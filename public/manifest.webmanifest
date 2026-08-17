@@ -1,0 +1,13 @@
+{
+  "name": "PFスクラップ管理",
+  "short_name": "PFスクラップ",
+  "description": "スクラップ重量管理システム（日次記録・理論スクラップとスクラップ売却の照合）",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f5",
+  "theme_color": "#b4632c",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

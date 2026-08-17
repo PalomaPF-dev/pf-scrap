@@ -1,0 +1,155 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionWithRole } from "@/lib/session";
+import { listDailyAgg, listItems } from "@/lib/db";
+import { monthlyItemRows, yearSummary } from "@/lib/calc";
+import { toCsv } from "@/lib/csv";
+import { isYmStr } from "@/lib/format";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * CSV出力（記録保管・報告用）。
+ *   GET /api/export?type=daily&ym=YYYY-MM     … 日次記録の月間集計
+ *   GET /api/export?type=mcframe&ym=YYYY-MM   … 品目別の理論スクラップ計算結果
+ *   GET /api/export?type=recon&year=YYYY      … 年間照合一覧
+ *   GET /api/export?type=items                … 品目マスター（管理者のみ）
+ * UTF-8 BOM 付き（Excel でそのまま開ける）。
+ */
+
+const pct = (v: number | null): string => (v === null ? "" : (v * 100).toFixed(2) + "%");
+
+function csvResponse(filename: string, rows: (string | number | null | undefined)[][]): NextResponse {
+  return new NextResponse("\uFEFF" + toCsv(rows), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+export async function GET(req: NextRequest) {
+  const s = await getSessionWithRole();
+  if (!s) return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+
+  const type = req.nextUrl.searchParams.get("type") ?? "";
+  const ymParam = req.nextUrl.searchParams.get("ym") ?? "";
+  const yearParam = Number(req.nextUrl.searchParams.get("year"));
+
+  try {
+    if (type === "daily") {
+      if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
+      // 所属工場ユーザーは自工場分のみ（画面と同じ範囲）
+      const factory = s.isDemo ? null : s.factory;
+      const agg = await listDailyAgg(s.companyId, ymParam, factory);
+      const rows: (string | number | null)[][] = [
+        ["日付", "工場", "責任者", "銅条(kg)", "銅管(kg)", "その他(kg)", "合計(kg)", "回収箱測定値", "差異率", "承認", "異常件数"],
+      ];
+      for (const r of agg) {
+        const sai =
+          r.kaishuSokuteichi !== null && r.total > 0
+            ? (r.kaishuSokuteichi - r.total) / r.total
+            : null;
+        rows.push([
+          r.recordDate,
+          r.factory,
+          r.sekininsha,
+          r.byKubun["銅条"],
+          r.byKubun["銅管"],
+          r.byKubun["その他"],
+          r.total,
+          r.kaishuSokuteichi ?? "",
+          pct(sai),
+          r.shonin,
+          r.ijoCount || "",
+        ]);
+      }
+      return csvResponse(`日次記録集計_${ymParam}.csv`, rows);
+    }
+
+    if (type === "mcframe") {
+      if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
+      const items = await monthlyItemRows(s.companyId, ymParam);
+      const rows: (string | number | null)[][] = [
+        ["KEY", "品名", "区分", "加工数", "単品完成重量(kg)", "重量根拠", "完成重量(kg)", "使用量(kg)", "理論スクラップ(kg)"],
+      ];
+      for (const r of items) {
+        rows.push([
+          r.itemKey,
+          r.hinmei ?? "",
+          r.kubun,
+          r.qty,
+          r.unitFinished,
+          r.unitSource + (r.faDate ? ` ${r.faDate}` : ""),
+          r.finished,
+          r.usage,
+          r.scrap,
+        ]);
+      }
+      return csvResponse(`品目別理論スクラップ_${ymParam}.csv`, rows);
+    }
+
+    if (type === "recon") {
+      const year =
+        Number.isInteger(yearParam) && yearParam >= 2000 && yearParam <= 2100
+          ? yearParam
+          : new Date().getFullYear();
+      const years = await yearSummary(s.companyId, year);
+      const rows: (string | number | null)[][] = [
+        ["年月", "月初在庫", "購入重量", "使用量", "構成重量", "完成重量", "理論SCP", "SCP売量", "日次記録SCP", "売量vs理論", "売却vs日次記録"],
+      ];
+      for (const r of years) {
+        rows.push([
+          r.ym,
+          r.zaiko ?? "",
+          r.konyu ?? "",
+          r.usage ?? "",
+          r.usageBom ?? "",
+          r.finished ?? "",
+          r.scrapTheo ?? "",
+          r.baikyaku ?? "",
+          r.daily ?? "",
+          r.diff7sell ?? "",
+          r.diff6 ?? "",
+        ]);
+      }
+      return csvResponse(`月次照合_${year}.csv`, rows);
+    }
+
+    if (type === "items") {
+      // マスタの出力はマスタ編集と同じく管理者のみ
+      if (s.role !== "admin") {
+        return NextResponse.json({ message: "管理者のみ出力できます" }, { status: 403 });
+      }
+      const { items } = await listItems(s.companyId, { limit: 2000 });
+      const rows: (string | number | null)[][] = [
+        ["管理図番", "品名", "KEY", "区分", "親図番", "親品名", "子図番", "子品名", "単位", "構成重量", "完成重量(理論)", "製造場所CD", "製造場所名", "工場"],
+      ];
+      for (const it of items) {
+        rows.push([
+          it.kanriZuban,
+          it.hinmei,
+          it.key,
+          it.kubun,
+          it.oyaZuban,
+          it.oyaHinmei,
+          it.koZuban,
+          it.koHinmei,
+          it.tani,
+          it.koseiJuryo,
+          it.kanseiJuryo,
+          it.seizoBashoCD,
+          it.seizoBashoMei,
+          it.factory,
+        ]);
+      }
+      return csvResponse("品目マスター.csv", rows);
+    }
+
+    return NextResponse.json({ message: "typeが不正です" }, { status: 400 });
+  } catch (e) {
+    console.error("[export]", e);
+    return NextResponse.json({ message: "出力に失敗しました" }, { status: 500 });
+  }
+}

@@ -12,7 +12,7 @@
 ## 技術構成
 
 - Next.js (App Router) + Tailwind CSS 4 + `@paloma-pf/ui`（共通シェル） — 他のPalomaシリーズと同一パターン
-- Neon Postgres（`DATABASE_URL`）/ next-auth（JWT・12時間・アプリ固有Cookie名 `scrap.session-token`）
+- Supabase Postgres（`DATABASE_URL` + `DB_DRIVER=pg`）/ next-auth（JWT・12時間・アプリ固有Cookie名 `scrap.session-token`）
 - ログインはポータル（portal.paloma-pf.com）のSSO一括ログインに一本化。パスワードログインは統一管理者（admin）のみ（SSO障害時の復旧用）
 - 無操作の自動ログアウト（`@paloma-pf/ui` の useIdleLogout）→ ポータルの一括ログアウトへ
 
@@ -70,11 +70,19 @@ npm run dev   # http://localhost:5188
 
 | 変数 | 用途 |
 | --- | --- |
-| `DATABASE_URL` | Neon Postgres（スクラップ専用DB）。オンプレは通常のPostgres URL + `DB_DRIVER=pg` |
+| `DATABASE_URL` | Supabase Postgres（スクラップ専用DB）。**Session pooler** の接続文字列を使う |
+| `DB_DRIVER` | `pg`（Supabase では明示推奨。未指定でもホスト名から自動判定される） |
 | `NEXTAUTH_SECRET` / `NEXTAUTH_URL` | next-auth |
 | `PF_PROVISION_KEY` | ポータル連携の共有キー（pf-portal と同じ値） |
 | `PF_ADMIN_BOOTSTRAP_HASH` | 統一管理者（admin）ブートストラップ用 bcrypt ハッシュ（任意） |
 | `ON_PREMISE` | `1` で社内運用（課金ゲートなし） |
+
+### Supabase の接続について
+
+- Supabase → Project → **Connect** → **Session pooler**（`...pooler.supabase.com:5432`）の接続文字列を使います。Vercel のサーバーレスから直接接続（`db.<ref>.supabase.co`）は接続枠を使い切りやすいため使いません。
+- 接続文字列の末尾に `?sslmode=require` を付けます（pg が接続文字列から解釈します）。
+- DB アダプタ（`src/lib/neon.ts`）はシリーズ共通で、Neon(HTTP) と 汎用 Postgres(node-postgres) を切り替えます。Supabase では後者が使われ、プーラの接続枠を分け合うため 1 インスタンスあたり最大 3 接続に抑えています。
+- テーブルは初回アクセス時に自動作成されます（冪等な `CREATE TABLE IF NOT EXISTS`）。マイグレーションの手動実行は不要です。
 
 ## 記録保管期間
 

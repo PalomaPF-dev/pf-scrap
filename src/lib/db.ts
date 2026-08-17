@@ -3,53 +3,29 @@ import { ensureSchema } from "./schema";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-/** スクラップの区分（品種）。日次記録・品目マスターで共通。 */
-export const KUBUN_LIST = ["銅条", "銅管", "その他"] as const;
-export type Kubun = (typeof KUBUN_LIST)[number];
-
-export interface ScrapItem {
-  id: string;
-  kanriZuban: string;
-  hinmei: string;
-  key: string;
-  kubun: string;
-  oyaZuban: string;
-  oyaHinmei: string;
-  koZuban: string;
-  koHinmei: string;
-  tani: string;
-  koseiJuryo: number;
-  kanseiJuryo: number;
-  seizoBashoCD: string;
-  seizoBashoMei: string;
-  factory: string;
-}
-
-export interface DailyEntry {
-  jikoku: string;
-  busho: string;
-  kikai: string;
-  hinshu: string;
-  kotei: string;
-  weight: number;
-  kirokusha: string;
-  ijo: string;
-}
-
-export interface DailyRecord {
-  id: string;
-  recordDate: string; // YYYY-MM-DD
-  factory: string;
-  sekininsha: string;
-  zenjitsuOk: boolean;
-  hakoZanryo: number;
-  kaishuSokuteichi: number | null;
-  tonyuKanryo: boolean;
-  shonin: string;
-  biko: string;
-  updatedBy: string;
-  entries: DailyEntry[];
-}
+// 型・定数はクライアント/サーバー共用の scrapTypes.ts に分離（ここから再エクスポート）
+export {
+  KUBUN_LIST,
+  SCALE_KIND_LIST,
+  DAILY_STATUS_LABEL,
+  type Kubun,
+  type ScaleKind,
+  type DailyStatus,
+  type ScrapItem,
+  type DailyEntry,
+  type DailyRecord,
+  type Scale,
+} from "./scrapTypes";
+import {
+  type ScrapItem as _ScrapItem,
+  type DailyRecord as _DailyRecord,
+  type DailyStatus as _DailyStatus,
+  type Scale as _Scale,
+} from "./scrapTypes";
+type ScrapItem = _ScrapItem;
+type DailyRecord = _DailyRecord;
+type DailyStatus = _DailyStatus;
+type Scale = _Scale;
 
 export interface FirstArticle {
   measuredOn: string;
@@ -172,7 +148,123 @@ export async function deleteItem(companyId: string, id: string): Promise<void> {
   await sql`DELETE FROM scrap_items WHERE company_id = ${companyId} AND id = ${id}`;
 }
 
+// ===== 重量計（スクラップ箱）マスター =====
+
+function mapScale(r: any): Scale {
+  return {
+    id: r.id,
+    qrCode: r.qr_code,
+    name: r.name,
+    kind: r.kind,
+    factory: r.factory,
+    sort: Number(r.sort) || 0,
+    active: Boolean(r.active),
+  };
+}
+
+/** 重量計の一覧。factory 指定で自工場のもの＋工場未設定のものに絞る。 */
+export async function listScales(
+  companyId: string,
+  opts: { factory?: string | null; activeOnly?: boolean } = {}
+): Promise<Scale[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const factory = opts.factory ?? null;
+  const activeOnly = opts.activeOnly ?? false;
+  const rows = await sql`
+    SELECT * FROM scrap_scales
+    WHERE company_id = ${companyId}
+      AND (${factory}::text IS NULL OR factory = ${factory} OR factory = '')
+      AND (${activeOnly} = false OR active = true)
+    ORDER BY kind, sort ASC, name ASC`;
+  return rows.map(mapScale);
+}
+
+export async function getScaleById(companyId: string, id: string): Promise<Scale | null> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT * FROM scrap_scales WHERE company_id = ${companyId} AND id = ${id} LIMIT 1`;
+  return rows[0] ? mapScale(rows[0]) : null;
+}
+
+/** QRコード値で重量計を引く（日次記録のQR読み取り用）。 */
+export async function getScaleByQr(companyId: string, qrCode: string): Promise<Scale | null> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT * FROM scrap_scales
+    WHERE company_id = ${companyId} AND qr_code = ${qrCode} AND active = true LIMIT 1`;
+  return rows[0] ? mapScale(rows[0]) : null;
+}
+
+/** QRコード値で upsert。id を返す。 */
+export async function upsertScale(
+  companyId: string,
+  s: Omit<Scale, "id"> & { id?: string | null }
+): Promise<string> {
+  await ensureSchema();
+  const sql = getSql();
+  if (s.id) {
+    await sql`
+      UPDATE scrap_scales SET
+        qr_code = ${s.qrCode}, name = ${s.name}, kind = ${s.kind},
+        factory = ${s.factory}, sort = ${s.sort}, active = ${s.active}
+      WHERE company_id = ${companyId} AND id = ${s.id}`;
+    return s.id;
+  }
+  const rows = await sql`
+    INSERT INTO scrap_scales (company_id, qr_code, name, kind, factory, sort, active)
+    VALUES (${companyId}, ${s.qrCode}, ${s.name}, ${s.kind}, ${s.factory}, ${s.sort}, ${s.active})
+    ON CONFLICT (company_id, qr_code) DO UPDATE SET
+      name = EXCLUDED.name, kind = EXCLUDED.kind, factory = EXCLUDED.factory,
+      sort = EXCLUDED.sort, active = EXCLUDED.active
+    RETURNING id`;
+  return rows[0].id as string;
+}
+
+export async function deleteScale(companyId: string, id: string): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`DELETE FROM scrap_scales WHERE company_id = ${companyId} AND id = ${id}`;
+}
+
 // ===== ① 日次記録 =====
+
+function mapDailyRecord(r: any, entries: any[]): DailyRecord {
+  return {
+    id: r.id,
+    recordDate: dateStr(r.record_date),
+    factory: r.factory,
+    sekininsha: r.sekininsha,
+    zenjitsuOk: Boolean(r.zenjitsu_ok),
+    hakoZanryo: num(r.hako_zanryo),
+    kaishuSokuteichi: numOrNull(r.kaishu_sokuteichi),
+    tonyuKanryo: Boolean(r.tonyu_kanryo),
+    shonin: r.shonin,
+    biko: r.biko,
+    updatedBy: r.updated_by,
+    status: (r.status ?? "draft") as DailyStatus,
+    appliedBy: r.applied_by ?? "",
+    appliedAt: r.applied_at ? new Date(r.applied_at).toISOString() : null,
+    approvedBy: r.approved_by ?? "",
+    approvedAt: r.approved_at ? new Date(r.approved_at).toISOString() : null,
+    rejectComment: r.reject_comment ?? "",
+    entries: entries.map((e: any) => ({
+      jikoku: e.jikoku,
+      hinshu: e.hinshu,
+      scaleId: e.scale_id ?? null,
+      scaleName: e.scale_name ?? "",
+      grossWeight: numOrNull(e.gross_weight),
+      tareWeight: numOrNull(e.tare_weight),
+      weight: num(e.weight),
+      cumBefore: numOrNull(e.cum_before),
+      cumAfter: numOrNull(e.cum_after),
+      kirokusha: e.kirokusha,
+      ijo: e.ijo,
+    })),
+  };
+}
 
 export async function getDailyRecord(
   companyId: string,
@@ -188,37 +280,19 @@ export async function getDailyRecord(
   const r = rows[0];
   if (!r) return null;
   const entries = await sql`
-    SELECT jikoku, busho, kikai, hinshu, kotei, weight, kirokusha, ijo
+    SELECT jikoku, hinshu, scale_id, scale_name, gross_weight, tare_weight,
+           weight, cum_before, cum_after, kirokusha, ijo
     FROM scrap_daily_entries WHERE record_id = ${r.id} ORDER BY sort ASC`;
-  return {
-    id: r.id,
-    recordDate: dateStr(r.record_date),
-    factory: r.factory,
-    sekininsha: r.sekininsha,
-    zenjitsuOk: Boolean(r.zenjitsu_ok),
-    hakoZanryo: num(r.hako_zanryo),
-    kaishuSokuteichi: numOrNull(r.kaishu_sokuteichi),
-    tonyuKanryo: Boolean(r.tonyu_kanryo),
-    shonin: r.shonin,
-    biko: r.biko,
-    updatedBy: r.updated_by,
-    entries: entries.map((e: any) => ({
-      jikoku: e.jikoku,
-      busho: e.busho,
-      kikai: e.kikai,
-      hinshu: e.hinshu,
-      kotei: e.kotei,
-      weight: num(e.weight),
-      kirokusha: e.kirokusha,
-      ijo: e.ijo,
-    })),
-  };
+  return mapDailyRecord(r, entries);
 }
 
-/** 日次記録票を保存（日付×工場で upsert。明細は全置換）。 */
+/** 日次記録票を保存（日付×工場で upsert。明細は全置換。承認状態は変更しない）。 */
 export async function saveDailyRecord(
   companyId: string,
-  rec: Omit<DailyRecord, "id">
+  rec: Omit<
+    DailyRecord,
+    "id" | "status" | "appliedBy" | "appliedAt" | "approvedBy" | "approvedAt" | "rejectComment"
+  >
 ): Promise<void> {
   await ensureSchema();
   const sql = getSql();
@@ -247,9 +321,83 @@ export async function saveDailyRecord(
   for (let i = 0; i < rec.entries.length; i++) {
     const e = rec.entries[i];
     await sql`
-      INSERT INTO scrap_daily_entries (company_id, record_id, jikoku, busho, kikai, hinshu, kotei, weight, kirokusha, ijo, sort)
-      VALUES (${companyId}, ${recordId}, ${e.jikoku}, ${e.busho}, ${e.kikai}, ${e.hinshu}, ${e.kotei}, ${e.weight}, ${e.kirokusha}, ${e.ijo}, ${i})`;
+      INSERT INTO scrap_daily_entries (
+        company_id, record_id, jikoku, hinshu, scale_id, scale_name,
+        gross_weight, tare_weight, weight, cum_before, cum_after, kirokusha, ijo, sort
+      )
+      VALUES (
+        ${companyId}, ${recordId}, ${e.jikoku}, ${e.hinshu}, ${e.scaleId}, ${e.scaleName},
+        ${e.grossWeight}, ${e.tareWeight}, ${e.weight}, ${e.cumBefore}, ${e.cumAfter},
+        ${e.kirokusha}, ${e.ijo}, ${i}
+      )`;
   }
+}
+
+/** 日次記録の承認状態を取得（存在しなければ null）。編集可否・二重申請の判定用。 */
+export async function getDailyStatus(
+  companyId: string,
+  recordDate: string,
+  factory: string
+): Promise<DailyStatus | null> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT status FROM scrap_daily_records
+    WHERE company_id = ${companyId} AND record_date = ${recordDate} AND factory = ${factory}
+    LIMIT 1`;
+  return rows[0] ? ((rows[0].status ?? "draft") as DailyStatus) : null;
+}
+
+/** 承認状態の更新（申請/承認/差し戻し）。 */
+export async function updateDailyStatus(
+  companyId: string,
+  recordDate: string,
+  factory: string,
+  patch:
+    | { status: "pending"; appliedBy: string }
+    | { status: "approved"; approvedBy: string }
+    | { status: "rejected"; approvedBy: string; rejectComment: string }
+    | { status: "draft" }
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  if (patch.status === "pending") {
+    await sql`
+      UPDATE scrap_daily_records SET status = 'pending',
+        applied_by = ${patch.appliedBy}, applied_at = NOW(),
+        approved_by = '', approved_at = NULL, reject_comment = '', updated_at = NOW()
+      WHERE company_id = ${companyId} AND record_date = ${recordDate} AND factory = ${factory}`;
+  } else if (patch.status === "approved") {
+    await sql`
+      UPDATE scrap_daily_records SET status = 'approved',
+        approved_by = ${patch.approvedBy}, approved_at = NOW(),
+        shonin = ${patch.approvedBy}, reject_comment = '', updated_at = NOW()
+      WHERE company_id = ${companyId} AND record_date = ${recordDate} AND factory = ${factory}`;
+  } else if (patch.status === "rejected") {
+    await sql`
+      UPDATE scrap_daily_records SET status = 'rejected',
+        approved_by = ${patch.approvedBy}, approved_at = NOW(),
+        reject_comment = ${patch.rejectComment}, updated_at = NOW()
+      WHERE company_id = ${companyId} AND record_date = ${recordDate} AND factory = ${factory}`;
+  } else {
+    await sql`
+      UPDATE scrap_daily_records SET status = 'draft', updated_at = NOW()
+      WHERE company_id = ${companyId} AND record_date = ${recordDate} AND factory = ${factory}`;
+  }
+}
+
+/** 申請中（pending）の件数。ポータルの承認待ちバッジ用。factory 指定で自工場のみ。 */
+export async function countPendingDaily(
+  companyId: string,
+  factory: string | null = null
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT COUNT(*)::int AS n FROM scrap_daily_records
+    WHERE company_id = ${companyId} AND status = 'pending'
+      AND (${factory}::text IS NULL OR factory = ${factory})`;
+  return Number(rows[0]?.n ?? 0);
 }
 
 export async function deleteDailyRecord(
@@ -269,13 +417,17 @@ export interface DailyAggRow {
   factory: string;
   sekininsha: string;
   shonin: string;
+  status: DailyStatus;
+  appliedBy: string;
+  approvedBy: string;
   kaishuSokuteichi: number | null;
   total: number;
-  byKubun: Record<Kubun, number>;
+  /** 箱の種類（上銅/銅ダライ）別の合計。それ以外（旧様式の記録）は「その他」 */
+  byKind: { 上銅: number; 銅ダライ: number; その他: number };
   ijoCount: number;
 }
 
-/** 月間の日次記録集計（1日1工場1行、区分別合計つき）。 */
+/** 月間の日次記録集計（1日1工場1行、箱の種類別合計つき）。 */
 export async function listDailyAgg(
   companyId: string,
   ym: string,
@@ -284,11 +436,12 @@ export async function listDailyAgg(
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
-    SELECT r.record_date, r.factory, r.sekininsha, r.shonin, r.kaishu_sokuteichi,
+    SELECT r.record_date, r.factory, r.sekininsha, r.shonin, r.status, r.applied_by, r.approved_by,
+      r.kaishu_sokuteichi,
       COALESCE(SUM(e.weight), 0) AS total,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅条'), 0) AS w_dojo,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅管'), 0) AS w_dokan,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu NOT IN ('銅条', '銅管')), 0) AS w_sonota,
+      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '上銅'), 0) AS w_jodo,
+      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅ダライ'), 0) AS w_darai,
+      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu NOT IN ('上銅', '銅ダライ')), 0) AS w_sonota,
       COUNT(*) FILTER (WHERE e.ijo <> '') AS ijo_count
     FROM scrap_daily_records r
     LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
@@ -302,27 +455,30 @@ export async function listDailyAgg(
     factory: r.factory,
     sekininsha: r.sekininsha,
     shonin: r.shonin,
+    status: (r.status ?? "draft") as DailyStatus,
+    appliedBy: r.applied_by ?? "",
+    approvedBy: r.approved_by ?? "",
     kaishuSokuteichi: numOrNull(r.kaishu_sokuteichi),
     total: num(r.total),
-    byKubun: { 銅条: num(r.w_dojo), 銅管: num(r.w_dokan), その他: num(r.w_sonota) },
+    byKind: { 上銅: num(r.w_jodo), 銅ダライ: num(r.w_darai), その他: num(r.w_sonota) },
     ijoCount: Number(r.ijo_count) || 0,
   }));
 }
 
-/** 月間の日次記録合計（区分別）。⑥の突合に使う。factory 指定で自工場のみ。 */
+/** 月間の日次記録合計（箱の種類別）。⑥の突合に使う。factory 指定で自工場のみ。 */
 export async function dailyMonthTotals(
   companyId: string,
   ym: string,
   factory: string | null = null
-): Promise<{ total: number; byKubun: Record<Kubun, number>; days: number }> {
+): Promise<{ total: number; byKind: { 上銅: number; 銅ダライ: number; その他: number }; days: number }> {
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
     SELECT
       COALESCE(SUM(e.weight), 0) AS total,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅条'), 0) AS w_dojo,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅管'), 0) AS w_dokan,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu NOT IN ('銅条', '銅管')), 0) AS w_sonota,
+      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '上銅'), 0) AS w_jodo,
+      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅ダライ'), 0) AS w_darai,
+      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu NOT IN ('上銅', '銅ダライ')), 0) AS w_sonota,
       COUNT(DISTINCT r.id) AS days
     FROM scrap_daily_records r
     LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
@@ -332,7 +488,7 @@ export async function dailyMonthTotals(
   const r = rows[0] ?? {};
   return {
     total: num(r.total),
-    byKubun: { 銅条: num(r.w_dojo), 銅管: num(r.w_dokan), その他: num(r.w_sonota) },
+    byKind: { 上銅: num(r.w_jodo), 銅ダライ: num(r.w_darai), その他: num(r.w_sonota) },
     days: Number(r.days) || 0,
   };
 }

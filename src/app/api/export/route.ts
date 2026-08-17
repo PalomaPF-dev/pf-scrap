@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionWithRole } from "@/lib/session";
-import { listDailyAgg, listItems } from "@/lib/db";
+import { DAILY_STATUS_LABEL, listDailyAgg, listItems } from "@/lib/db";
 import { monthlyItemRows, yearSummary } from "@/lib/calc";
 import { toCsv } from "@/lib/csv";
 import { isYmStr } from "@/lib/format";
@@ -44,7 +44,7 @@ export async function GET(req: NextRequest) {
       const factory = s.isDemo ? null : s.factory;
       const agg = await listDailyAgg(s.companyId, ymParam, factory);
       const rows: (string | number | null)[][] = [
-        ["日付", "工場", "責任者", "銅条(kg)", "銅管(kg)", "その他(kg)", "合計(kg)", "回収箱測定値", "差異率", "承認", "異常件数"],
+        ["日付", "工場", "責任者", "上銅(kg)", "銅ダライ(kg)", "その他(kg)", "合計(kg)", "回収箱測定値", "差異率", "状態", "承認者", "異常件数"],
       ];
       for (const r of agg) {
         const sai =
@@ -55,13 +55,14 @@ export async function GET(req: NextRequest) {
           r.recordDate,
           r.factory,
           r.sekininsha,
-          r.byKubun["銅条"],
-          r.byKubun["銅管"],
-          r.byKubun["その他"],
+          r.byKind["上銅"],
+          r.byKind["銅ダライ"],
+          r.byKind["その他"],
           r.total,
           r.kaishuSokuteichi ?? "",
           pct(sai),
-          r.shonin,
+          DAILY_STATUS_LABEL[r.status],
+          r.approvedBy,
           r.ijoCount || "",
         ]);
       }

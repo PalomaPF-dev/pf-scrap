@@ -82,6 +82,24 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_company_idx ON scrap_items(company_id)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_ko_zuban_idx ON scrap_items(company_id, ko_zuban)`);
 
+  // 重量計（スクラップ箱）マスター。箱には 上銅 / 銅ダライ の2種類があり、
+  // それぞれ重量計の上に常設されている。重量計にQRコードを貼り、日次記録では
+  // QR読み取りで投入先の箱を選択する。qr_code がQRに入れる値。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_scales (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      qr_code    TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      kind       TEXT NOT NULL DEFAULT '上銅',
+      factory    TEXT NOT NULL DEFAULT '',
+      sort       INTEGER NOT NULL DEFAULT 0,
+      active     BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, qr_code)
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_scales_company_idx ON scrap_scales(company_id)`);
+
   // ① 日次記録票（日付×工場で1枚）。
   await safeDdl(() => sql`
     CREATE TABLE IF NOT EXISTS scrap_daily_records (
@@ -102,6 +120,14 @@ async function buildSchema(): Promise<void> {
       UNIQUE (company_id, record_date, factory)
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_daily_records_date_idx ON scrap_daily_records(company_id, record_date)`);
+  // 承認ワークフロー。draft(下書き) → pending(申請中) → approved(承認済み) / rejected(差し戻し)。
+  // 記録者が「管理者へ申請」すると pending になり、管理者が承認/差し戻しする。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'draft'`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS applied_by TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS approved_by TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS reject_comment TEXT NOT NULL DEFAULT ''`);
 
   // ① 日中記録の明細（スクラップ発生のたびに1行）。
   await safeDdl(() => sql`
@@ -121,6 +147,17 @@ async function buildSchema(): Promise<void> {
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_daily_entries_record_idx ON scrap_daily_entries(record_id)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_daily_entries_company_idx ON scrap_daily_entries(company_id)`);
+  // 計量方式の改修（2026-08）: 重量計（スクラップ箱）をQRで選択し、
+  //   スクラップ重量 = 投入前重量(箱含む) − 箱重量(空き箱)
+  // を自動計算する。スクラップ箱は常時重量計の上にあるため、累積表示値
+  // （投入前 cum_before / 投入後 cum_after）も記録し、差分との整合を確認する。
+  // hinshu 列には箱の種類（上銅/銅ダライ）を入れる。busho/kikai/kotei は旧様式の名残（新規入力では未使用）。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS scale_id UUID`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS scale_name TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS gross_weight NUMERIC`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS tare_weight NUMERIC`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_before NUMERIC`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after NUMERIC`);
 
   // ③ 初品の実測完成品重量（測定日×KEYで1件。再測定は上書き）。
   await safeDdl(() => sql`

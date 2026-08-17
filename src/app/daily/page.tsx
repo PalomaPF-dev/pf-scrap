@@ -1,11 +1,14 @@
 import { FileDown } from "lucide-react";
 import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
 import {
+  DAILY_STATUS_LABEL,
   getDailyRecord,
   listDailyAgg,
   listFactoryOptions,
+  listScales,
   type DailyAggRow,
   type DailyRecord,
+  type Scale,
 } from "@/lib/db";
 import { fmt, fmtPct, isDateStr, isYmStr, thisMonthStr, todayStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
@@ -36,6 +39,7 @@ export default async function DailyPage({
   let factory: string;
   let record: DailyRecord | null;
   let agg: DailyAggRow[];
+  let scales: Scale[];
   try {
     const restriction = await getFactoryRestriction(session);
     const factories = await listFactoryOptions(session.companyId);
@@ -45,9 +49,13 @@ export default async function DailyPage({
     factory = restriction.restricted
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
-    [record, agg] = await Promise.all([
+    [record, agg, scales] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listDailyAgg(session.companyId, ym, restriction.restricted ? restriction.factory : null),
+      listScales(session.companyId, {
+        factory: restriction.restricted ? restriction.factory : factory,
+        activeOnly: true,
+      }),
     ]);
   } catch (e) {
     console.error("[daily]", e);
@@ -61,9 +69,9 @@ export default async function DailyPage({
 
   const isAdmin = session.role === "admin";
   const monthTotal = {
-    dojo: agg.reduce((t, r) => t + r.byKubun["銅条"], 0),
-    dokan: agg.reduce((t, r) => t + r.byKubun["銅管"], 0),
-    sonota: agg.reduce((t, r) => t + r.byKubun["その他"], 0),
+    jodo: agg.reduce((t, r) => t + r.byKind["上銅"], 0),
+    darai: agg.reduce((t, r) => t + r.byKind["銅ダライ"], 0),
+    sonota: agg.reduce((t, r) => t + r.byKind["その他"], 0),
     total: agg.reduce((t, r) => t + r.total, 0),
   };
 
@@ -71,17 +79,19 @@ export default async function DailyPage({
     <div className="p-4 sm:p-6">
       <PageHeader
         title="日次記録"
-        description="スクラップ日次記録票（発生のたびに記入し、終礼で回収箱測定値と突合）"
+        description="スクラップ発生のたびに、重量計（スクラップ箱）をQRで選んで計量・記録し、終礼後に管理者へ申請します"
       />
 
       <DailyRecordForm
-        key={`${date}|${factory}`}
+        key={`${date}|${factory}|${record?.status ?? "new"}`}
         date={date}
         factory={factory}
         factoryOptions={factoryOptions}
         factoryLocked={factoryLocked}
         initial={record}
+        scales={scales}
         userName={session.userName}
+        isAdmin={isAdmin}
       />
 
       {/* 月間集計 */}
@@ -106,13 +116,13 @@ export default async function DailyPage({
                 <th className={th}>日付</th>
                 <th className={th}>工場</th>
                 <th className={th}>責任者</th>
-                <th className={thNum}>銅条(kg)</th>
-                <th className={thNum}>銅管(kg)</th>
+                <th className={thNum}>上銅(kg)</th>
+                <th className={thNum}>銅ダライ(kg)</th>
                 <th className={thNum}>その他(kg)</th>
                 <th className={thNum}>合計(kg)</th>
                 <th className={thNum}>回収箱測定値</th>
                 <th className={thNum}>差異率</th>
-                <th className={th}>承認</th>
+                <th className={th}>状態</th>
                 <th className={thNum}>異常</th>
                 {isAdmin && <th className={th}></th>}
               </tr>
@@ -142,9 +152,9 @@ export default async function DailyPage({
                     </td>
                     <td className={td}>{r.factory}</td>
                     <td className={td}>{r.sekininsha}</td>
-                    <td className={tdNum}>{fmt(r.byKubun["銅条"])}</td>
-                    <td className={tdNum}>{fmt(r.byKubun["銅管"])}</td>
-                    <td className={tdNum}>{fmt(r.byKubun["その他"])}</td>
+                    <td className={tdNum}>{fmt(r.byKind["上銅"])}</td>
+                    <td className={tdNum}>{fmt(r.byKind["銅ダライ"])}</td>
+                    <td className={tdNum}>{fmt(r.byKind["その他"])}</td>
                     <td className={`${tdNum} font-semibold`}>{fmt(r.total)}</td>
                     <td className={tdNum}>{fmt(r.kaishuSokuteichi)}</td>
                     <td
@@ -153,12 +163,21 @@ export default async function DailyPage({
                       {fmtPct(sai)}
                     </td>
                     <td className={td}>
-                      {r.shonin ? (
-                        `✔ ${r.shonin}`
-                      ) : (
-                        <span className="rounded bg-[#eeeeee] px-1.5 py-0.5 text-[11px] text-[#555555]">
-                          未承認
-                        </span>
+                      <span
+                        className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+                          r.status === "approved"
+                            ? "bg-[#eef4ee] text-[#2f6b2f]"
+                            : r.status === "pending"
+                              ? "bg-[#fff3e0] text-[#a15c00]"
+                              : r.status === "rejected"
+                                ? "bg-[#fdecea] text-[#dc000c]"
+                                : "bg-[#eeeeee] text-[#555555]"
+                        }`}
+                      >
+                        {DAILY_STATUS_LABEL[r.status]}
+                      </span>
+                      {r.status === "approved" && r.approvedBy && (
+                        <span className="ml-1 text-xs text-[#707070]">{r.approvedBy}</span>
                       )}
                     </td>
                     <td className={tdNum}>{r.ijoCount > 0 ? r.ijoCount : ""}</td>
@@ -175,8 +194,8 @@ export default async function DailyPage({
                   <td className={td} colSpan={3}>
                     月間合計（{agg.length}日分）
                   </td>
-                  <td className={tdNum}>{fmt(monthTotal.dojo)}</td>
-                  <td className={tdNum}>{fmt(monthTotal.dokan)}</td>
+                  <td className={tdNum}>{fmt(monthTotal.jodo)}</td>
+                  <td className={tdNum}>{fmt(monthTotal.darai)}</td>
                   <td className={tdNum}>{fmt(monthTotal.sonota)}</td>
                   <td className={tdNum}>{fmt(monthTotal.total)}</td>
                   <td className={td} colSpan={isAdmin ? 5 : 4}></td>

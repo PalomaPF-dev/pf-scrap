@@ -10,15 +10,23 @@ import {
   deleteDailyRecord,
   deleteFirstArticle,
   deleteItem,
+  deleteScale,
   getDailyRecord,
+  getDailyStatus,
   getItemById,
+  getScaleById,
+  getScaleByQr,
   KUBUN_LIST,
+  SCALE_KIND_LIST,
   saveDailyRecord,
   saveMonthlyInput,
+  updateDailyStatus,
   upsertFirstArticle,
   upsertItem,
   upsertMcframeQty,
+  upsertScale,
   type DailyEntry,
+  type Scale,
   type ScrapItem,
 } from "./db";
 import { isDateStr, isYmStr, normYm, toNum, toNumOrNull } from "./format";
@@ -139,7 +147,83 @@ export async function importItemsAction(
   }
 }
 
+// ===== 重量計（スクラップ箱）マスター（管理者のみ） =====
+
+export async function saveScaleAction(input: {
+  id?: string | null;
+  qrCode: string;
+  name: string;
+  kind: string;
+  factory: string;
+  sort: unknown;
+  active: boolean;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const qrCode = asStr(input.qrCode, 100);
+    const name = asStr(input.name, 100);
+    if (!qrCode) return fail("QRコード値を入力してください。");
+    if (!name) return fail("名称を入力してください。");
+    const kind = (SCALE_KIND_LIST as readonly string[]).includes(String(input.kind))
+      ? String(input.kind)
+      : "上銅";
+    await upsertScale(s.companyId, {
+      id: input.id ?? null,
+      qrCode,
+      name,
+      kind,
+      factory: asStr(input.factory, 50),
+      sort: Math.trunc(toNum(input.sort)),
+      active: Boolean(input.active),
+    });
+    revalidatePath("/scales");
+    revalidatePath("/daily");
+    return { ok: true, message: "保存しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+export async function deleteScaleAction(id: string): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const scale = await getScaleById(s.companyId, id);
+    if (!scale) return fail("対象の重量計が見つかりません。");
+    await deleteScale(s.companyId, id);
+    revalidatePath("/scales");
+    revalidatePath("/daily");
+    return { ok: true, message: "削除しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** QRコード読み取り結果から重量計を引く（日次記録の箱選択用）。 */
+export async function lookupScaleByQrAction(qrCode: string): Promise<Scale | null> {
+  const s = await requireEntitledSession();
+  const code = asStr(qrCode, 100);
+  if (!code) return null;
+  return getScaleByQr(s.companyId, code);
+}
+
 // ===== ① 日次記録（全員） =====
+
+/** 承認状態による編集可否。申請中・承認済みは記録者は触れない（管理者は可）。 */
+async function assertDailyEditable(
+  companyId: string,
+  recordDate: string,
+  factory: string,
+  isAdmin: boolean
+): Promise<string | null> {
+  const status = await getDailyStatus(companyId, recordDate, factory);
+  if (status === "pending" && !isAdmin) {
+    return "この記録は申請中のため編集できません（管理者の承認待ち）。";
+  }
+  if (status === "approved" && !isAdmin) {
+    return "この記録は承認済みのため編集できません。修正が必要な場合は管理者へ連絡してください。";
+  }
+  return null;
+}
 
 export async function saveDailyRecordAction(input: {
   recordDate: string;
@@ -149,9 +233,9 @@ export async function saveDailyRecordAction(input: {
   hakoZanryo: unknown;
   kaishuSokuteichi: unknown;
   tonyuKanryo: boolean;
-  shonin: string;
   biko: string;
-  entries: Partial<DailyEntry>[];
+  /** 明細（クライアントからは数値も文字列で届く。サーバー側で検証・再計算） */
+  entries: Record<string, unknown>[];
 }): Promise<ActionResult> {
   try {
     const s = await requireEntitledSession();
@@ -163,27 +247,59 @@ export async function saveDailyRecordAction(input: {
     if (restriction.restricted && factory !== restriction.factory) {
       return fail(`所属工場（${restriction.factory}）の記録のみ保存できます。`);
     }
-    const entries: DailyEntry[] = (Array.isArray(input.entries) ? input.entries : [])
-      .map((e) => ({
+    const isAdmin = s.role === "admin";
+    const lockMsg = await assertDailyEditable(s.companyId, input.recordDate, factory, isAdmin);
+    if (lockMsg) return fail(lockMsg);
+
+    const prev = await getDailyRecord(s.companyId, input.recordDate, factory);
+    const entries: DailyEntry[] = [];
+    for (const e of Array.isArray(input.entries) ? input.entries : []) {
+      const gross = toNumOrNull(e.grossWeight);
+      const tare = toNumOrNull(e.tareWeight);
+      if (gross === null && tare === null) continue; // 未入力行はスキップ
+      if (gross === null || tare === null) {
+        return fail("投入前重量（箱含む）と箱重量（空き箱）の両方を入力してください。");
+      }
+      if (gross < tare) {
+        return fail("投入前重量（箱含む）が箱重量（空き箱）より小さい行があります。");
+      }
+      // 箱（重量計）のスナップショット。マスターが引ければ名称・種類を採用
+      const scaleId = asStr(e.scaleId ?? "", 50) || null;
+      let scaleName = asStr(e.scaleName, 100);
+      let kind = asStr(e.hinshu, 20);
+      if (scaleId) {
+        const scale = await getScaleById(s.companyId, scaleId);
+        if (scale) {
+          scaleName = scale.name;
+          kind = scale.kind;
+        }
+      }
+      if (!(SCALE_KIND_LIST as readonly string[]).includes(kind)) kind = "上銅";
+      entries.push({
         jikoku: asStr(e.jikoku, 10),
-        busho: asStr(e.busho, 50),
-        kikai: asStr(e.kikai, 50),
-        hinshu: asKubun(e.hinshu),
-        kotei: asStr(e.kotei, 50),
-        weight: toNum(e.weight),
-        kirokusha: asStr(e.kirokusha, 50),
+        hinshu: kind,
+        scaleId,
+        scaleName,
+        grossWeight: gross,
+        tareWeight: tare,
+        // スクラップ重量はサーバー側で必ず再計算（改ざん・計算ズレ防止）
+        weight: Math.round((gross - tare) * 1000) / 1000,
+        cumBefore: toNumOrNull(e.cumBefore),
+        cumAfter: toNumOrNull(e.cumAfter),
+        // 記録者はログインユーザーを自動記録（既存行は元の記録者を保持）
+        kirokusha: asStr(e.kirokusha, 50) || s.userName || s.loginId || "",
         ijo: asStr(e.ijo),
-      }))
-      .filter((e) => e.weight > 0 || e.jikoku || e.kikai);
+      });
+    }
     await saveDailyRecord(s.companyId, {
       recordDate: input.recordDate,
       factory,
-      sekininsha: asStr(input.sekininsha, 50),
+      sekininsha: asStr(input.sekininsha, 50) || s.userName,
       zenjitsuOk: Boolean(input.zenjitsuOk),
       hakoZanryo: toNum(input.hakoZanryo),
       kaishuSokuteichi: toNumOrNull(input.kaishuSokuteichi),
       tonyuKanryo: Boolean(input.tonyuKanryo),
-      shonin: asStr(input.shonin, 50),
+      shonin: prev?.shonin ?? "",
       biko: asStr(input.biko, 2000),
       updatedBy: s.loginId ?? s.userName,
       entries,
@@ -192,6 +308,85 @@ export async function saveDailyRecordAction(input: {
     revalidatePath("/");
     const total = entries.reduce((t, e) => t + e.weight, 0);
     return { ok: true, message: `保存しました（当日合計 ${total.toFixed(1)} kg）。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 管理者へ申請（保存済みの記録を pending にする）。 */
+export async function submitDailyRecordAction(
+  recordDate: string,
+  factory: string
+): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    if (!isDateStr(recordDate)) return fail("日付が正しくありません。");
+    const f = asStr(factory, 50);
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && f !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）の記録のみ申請できます。`);
+    }
+    const rec = await getDailyRecord(s.companyId, recordDate, f);
+    if (!rec) return fail("先に記録を保存してください。");
+    if (rec.entries.length === 0) return fail("投入記録が1件もありません。記録してから申請してください。");
+    if (rec.status === "pending") return fail("すでに申請中です。");
+    if (rec.status === "approved") return fail("すでに承認済みです。");
+    await updateDailyStatus(s.companyId, recordDate, f, {
+      status: "pending",
+      appliedBy: s.userName || s.loginId || "",
+    });
+    revalidatePath("/daily");
+    return { ok: true, message: "管理者へ申請しました。承認されるまで編集できません。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 承認（管理者のみ）。 */
+export async function approveDailyRecordAction(
+  recordDate: string,
+  factory: string
+): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    if (!isDateStr(recordDate)) return fail("日付が正しくありません。");
+    const f = asStr(factory, 50);
+    const rec = await getDailyRecord(s.companyId, recordDate, f);
+    if (!rec) return fail("対象の記録が見つかりません。");
+    if (rec.status !== "pending") return fail("申請中の記録のみ承認できます。");
+    await updateDailyStatus(s.companyId, recordDate, f, {
+      status: "approved",
+      approvedBy: s.userName || s.loginId || "",
+    });
+    revalidatePath("/daily");
+    return { ok: true, message: "承認しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 差し戻し（管理者のみ）。コメント付きで記録者へ返す。 */
+export async function rejectDailyRecordAction(
+  recordDate: string,
+  factory: string,
+  comment: string
+): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    if (!isDateStr(recordDate)) return fail("日付が正しくありません。");
+    const f = asStr(factory, 50);
+    const rec = await getDailyRecord(s.companyId, recordDate, f);
+    if (!rec) return fail("対象の記録が見つかりません。");
+    if (rec.status !== "pending" && rec.status !== "approved") {
+      return fail("申請中または承認済みの記録のみ差し戻しできます。");
+    }
+    await updateDailyStatus(s.companyId, recordDate, f, {
+      status: "rejected",
+      approvedBy: s.userName || s.loginId || "",
+      rejectComment: asStr(comment, 500),
+    });
+    revalidatePath("/daily");
+    return { ok: true, message: "差し戻しました。" };
   } catch (e) {
     return fail((e as Error).message);
   }

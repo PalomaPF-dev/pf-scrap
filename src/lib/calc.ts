@@ -107,7 +107,7 @@ export interface MonthlySummary {
   ym: string;
   perKubun: Record<string, KubunSummary>;
   itemRows: MonthlyItemRow[];
-  daily: { total: number; byKubun: Record<Kubun, number>; days: number };
+  daily: { total: number; byKind: { 上銅: number; 銅ダライ: number; その他: number }; days: number };
   baikyaku: number | null;
   diff6: number | null;
   rate6: number | null;

@@ -1,5 +1,5 @@
 import { FileDown, Tag } from "lucide-react";
-import { requireAdminPage } from "@/lib/session";
+import { requireOperationsPage } from "@/lib/session";
 import { listFactoryOptions, listScales, type Scale } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -18,7 +18,7 @@ export default async function ScalesPage({
 }: {
   searchParams: Promise<{ factory?: string }>;
 }) {
-  const session = await requireAdminPage();
+  const session = await requireOperationsPage();
   const sp = await searchParams;
   const factory = (sp.factory ?? "").trim();
 

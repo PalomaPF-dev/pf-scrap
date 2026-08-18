@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import {
   requireEntitledSession,
   requireAdminSession,
+  requireOperationsSession,
   getFactoryRestriction,
 } from "./session";
 import {
@@ -52,7 +53,7 @@ const asStr = (v: unknown, max = 200): string => String(v ?? "").trim().slice(0,
 const asKubun = (v: unknown): string =>
   (KUBUN_LIST as readonly string[]).includes(String(v)) ? String(v) : "その他";
 
-// ===== ② 品目マスター（管理者のみ） =====
+// ===== ② 品目マスター（生産管理部・調達部のメンバーと管理者のみ） =====
 
 export async function saveItemAction(input: {
   kanriZuban: string;
@@ -72,7 +73,7 @@ export async function saveItemAction(input: {
   factory: string;
 }): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     const kanriZuban = asStr(input.kanriZuban, 50);
     const seizoBashoCD = asStr(input.seizoBashoCD, 50);
     // 品目は「品目CD × 格納場所CD」の組で識別する。同じ品目CDが工場ごとに
@@ -106,7 +107,7 @@ export async function saveItemAction(input: {
 
 export async function deleteItemAction(id: string): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     const item = await getItemById(s.companyId, id);
     if (!item) return fail("対象の品目が見つかりません。");
     await deleteItem(s.companyId, id);
@@ -117,12 +118,12 @@ export async function deleteItemAction(id: string): Promise<ActionResult> {
   }
 }
 
-/** 品目マスターのCSV一括取込（管理者のみ）。行はクライアント側でパース済み。 */
+/** 品目マスターのCSV一括取込（生産管理部・調達部と管理者のみ）。行はクライアント側でパース済み。 */
 export async function importItemsAction(
   rows: Record<string, unknown>[]
 ): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 5000) return fail("一度に取込できるのは5,000行までです。");
     let skipped = 0;
@@ -162,7 +163,7 @@ export async function importItemsAction(
   }
 }
 
-// ===== 重量計（スクラップ箱）マスター（管理者のみ） =====
+// ===== 重量計（スクラップ箱）マスター（生産管理部・調達部のメンバーと管理者のみ） =====
 
 export async function saveScaleAction(input: {
   id?: string | null;
@@ -175,7 +176,7 @@ export async function saveScaleAction(input: {
   active: boolean;
 }): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     const qrCode = asStr(input.qrCode, 100);
     const name = asStr(input.name, 100);
     if (!qrCode) return fail("QRコード値を入力してください。");
@@ -203,7 +204,7 @@ export async function saveScaleAction(input: {
 
 export async function deleteScaleAction(id: string): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     const scale = await getScaleById(s.companyId, id);
     if (!scale) return fail("対象の重量計が見つかりません。");
     await deleteScale(s.companyId, id);
@@ -589,7 +590,7 @@ export async function rejectFirstArticleAction(
   }
 }
 
-// ===== ④ McFrame取込（管理者のみ） =====
+// ===== ④ McFrame取込（生産管理部・調達部のメンバーと管理者のみ） =====
 
 /**
  * 加工数CSVの取込。行はクライアント側でパース済み（{ itemKey, date?, ym?, qty }）。
@@ -606,7 +607,7 @@ export async function importMcframeAction(
   }[]
 ): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 10000) return fail("一度に取込できるのは10,000行までです。");
     // McFrameの実績は1日に同じ品目が何行も出るため、品目×日付で合計してから取り込む。
@@ -662,7 +663,7 @@ export async function importMcframeAction(
   }
 }
 
-// ===== ⑤ 調達入力（日次。調達担当者=全員入力可） =====
+// ===== ⑤ 調達入力（日次。生産管理部・調達部のメンバーと管理者のみ） =====
 
 /** 対象月×工場の日次調達データを一括保存。入力者はログインユーザーを自動記録。 */
 export async function saveProcureDaysAction(input: {
@@ -670,7 +671,7 @@ export async function saveProcureDaysAction(input: {
   days: Record<string, unknown>[];
 }): Promise<ActionResult> {
   try {
-    const s = await requireEntitledSession();
+    const s = await requireOperationsSession();
     const factory = asStr(input.factory, 50);
     if (!factory) return fail("工場を選択してください。");
     const restriction = await getFactoryRestriction(s);
@@ -715,7 +716,7 @@ export async function importProcureCsvAction(
   rows: Record<string, unknown>[]
 ): Promise<ActionResult> {
   try {
-    const s = await requireEntitledSession();
+    const s = await requireOperationsSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 5000) return fail("一度に取込できるのは5,000行までです。");
     const restriction = await getFactoryRestriction(s);
@@ -760,7 +761,7 @@ export async function addAdjustmentAction(input: {
   reason: string;
 }): Promise<ActionResult> {
   try {
-    const s = await requireEntitledSession();
+    const s = await requireOperationsSession();
     if (!isDateStr(input.adate)) return fail("日付を入力してください。");
     const factory = asStr(input.factory, 50);
     if (!factory) return fail("工場を選択してください。");
@@ -790,7 +791,7 @@ export async function addAdjustmentAction(input: {
 
 export async function deleteAdjustmentAction(id: string): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     await deleteAdjustment(s.companyId, asStr(id, 50));
     revalidatePath("/procurement");
     revalidatePath("/");
@@ -812,7 +813,7 @@ export async function saveMonthlyAnchorAction(input: {
   zaikoSonota: unknown;
 }): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     if (!isYmStr(input.ym)) return fail("年月が正しくありません。");
     const factory = asStr(input.factory, 50);
     if (!factory) return fail("工場を選択してください。");
@@ -845,7 +846,7 @@ export async function importMonthlyCsvAction(
   rows: Record<string, unknown>[]
 ): Promise<ActionResult> {
   try {
-    const s = await requireAdminSession();
+    const s = await requireOperationsSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 1000) return fail("一度に取込できるのは1,000行までです。");
     let count = 0;

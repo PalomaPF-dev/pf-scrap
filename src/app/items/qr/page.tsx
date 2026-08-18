@@ -1,4 +1,4 @@
-import { requireAdminPage } from "@/lib/session";
+import { requireOperationsPage } from "@/lib/session";
 import { listFactoryOptions, listItems, type ScrapItem } from "@/lib/db";
 import { itemRef } from "@/lib/scrapTypes";
 import PageHeader from "@/components/PageHeader";
@@ -16,7 +16,7 @@ export default async function ItemsQrPage({
 }: {
   searchParams: Promise<{ factory?: string; workplace?: string }>;
 }) {
-  const session = await requireAdminPage();
+  const session = await requireOperationsPage();
   const sp = await searchParams;
 
   let items: ScrapItem[];

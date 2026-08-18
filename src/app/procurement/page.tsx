@@ -1,4 +1,4 @@
-import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
+import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
 import {
   getMonthlyInput,
   listAdjustments,
@@ -24,7 +24,7 @@ export default async function ProcurementPage({
 }: {
   searchParams: Promise<{ ym?: string; factory?: string }>;
 }) {
-  const session = await requireEntitledSession();
+  const session = await requireOperationsPage();
   const sp = await searchParams;
   const ym = isYmStr(sp.ym) ? sp.ym : thisMonthStr();
 

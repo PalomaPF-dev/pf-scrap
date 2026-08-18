@@ -182,6 +182,18 @@ export async function getUserAffiliation(userId: string): Promise<string | null>
 }
 
 /**
+ * ポータルから連携された部署名（例「生産管理部」）。未連携・取得不可は null。
+ * 機能ごとの利用権限（マスタ・取込・調達入力）の判定に使う。
+ */
+export async function getUserDepartment(userId: string): Promise<string | null> {
+  const sql = getSql();
+  const rows = await sql`
+    SELECT portal_department FROM users WHERE id = ${userId} LIMIT 1`;
+  const v = (rows[0]?.portal_department ?? "").toString().trim();
+  return v || null;
+}
+
+/**
  * このユーザーが失効（退職・名簿からの削除）しているか。
  * ポータルから /api/provision で届く users.disabled を見る。JWT は取り消せないため、
  * リクエストごとにここで確認して、手元に残った cookie を無効にする。

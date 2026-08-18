@@ -1,4 +1,4 @@
-import { requireAdminPage } from "@/lib/session";
+import { requireOperationsPage } from "@/lib/session";
 import { listScales, type Scale } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -12,7 +12,7 @@ export default async function ScaleLabelsPage({
 }: {
   searchParams: Promise<{ factory?: string }>;
 }) {
-  const session = await requireAdminPage();
+  const session = await requireOperationsPage();
   const sp = await searchParams;
   const factory = (sp.factory ?? "").trim();
 

@@ -1,5 +1,5 @@
 import { FileDown } from "lucide-react";
-import { requireAdminPage } from "@/lib/session";
+import { requireOperationsPage } from "@/lib/session";
 import { mcframeDayTotals, monthlyItemRows, type McframeDayTotal } from "@/lib/calc";
 import { fmt, isYmStr, thisMonthStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
@@ -20,7 +20,7 @@ export default async function McframePage({
 }: {
   searchParams: Promise<{ ym?: string }>;
 }) {
-  const session = await requireAdminPage();
+  const session = await requireOperationsPage();
   const sp = await searchParams;
   const ym = isYmStr(sp.ym) ? sp.ym : thisMonthStr();
 

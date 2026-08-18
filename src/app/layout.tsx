@@ -4,6 +4,7 @@ import "./globals.css";
 import Providers from "@/components/Providers";
 import AppShell from "@/components/AppShell";
 import { loadSidebarUser } from "@/lib/sidebarUser";
+import { canUseOperations, getOptionalSession } from "@/lib/session";
 
 /**
  * 本文フォント。OS標準任せだと Mac=ヒラギノ / Windows=メイリオ で見え方が変わるため、
@@ -37,12 +38,25 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   // サイドバーに出す所属・権限・データ範囲。ポータルから連携された値を都度DBから読む
   // （JWTには載せないので、ポータルで変えたら次の描画で反映される）。
   const user = await loadSidebarUser();
+  // マスタ・取込・調達入力のタブを出すかどうか（生産管理部・調達部のメンバーと管理者）。
+  // 部署はJWTに載せずDBから読むので、ポータルで異動を反映したら次の描画で効く。
+  const sess = await getOptionalSession();
+  const canOperate = sess
+    ? await canUseOperations({
+        companyId: sess.companyId,
+        userId: sess.id,
+        role: sess.role ?? "admin",
+        isDemo: Boolean(sess.isDemo),
+      })
+    : false;
 
   return (
     <html lang="ja" className={notoSansJP.variable}>
       <body className="antialiased">
         <Providers>
-          <AppShell user={user}>{children}</AppShell>
+          <AppShell user={user} canOperate={canOperate}>
+            {children}
+          </AppShell>
         </Providers>
       </body>
     </html>

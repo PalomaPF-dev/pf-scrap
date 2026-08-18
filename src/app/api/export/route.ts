@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionWithRole } from "@/lib/session";
+import { canUseOperations, getSessionWithRole } from "@/lib/session";
 import { DAILY_STATUS_LABEL, listDailyAgg, listItems, listScales } from "@/lib/db";
 import { monthlyItemRows, yearSummary } from "@/lib/calc";
 import { toCsv } from "@/lib/csv";
@@ -32,6 +32,19 @@ function csvResponse(filename: string, rows: (string | number | null | undefined
 export async function GET(req: NextRequest) {
   const s = await getSessionWithRole();
   if (!s) return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+
+  // マスタ・取込の出力は、画面と同じく生産管理部・調達部のメンバーと管理者だけ
+  const canOperate = () =>
+    canUseOperations({
+      companyId: s.companyId,
+      userId: s.userId,
+      role: (s.role ?? "member") as "admin" | "member" | "worker",
+      isDemo: s.isDemo,
+    });
+  const denied = NextResponse.json(
+    { message: "生産管理部・調達部のメンバーと管理者のみ出力できます" },
+    { status: 403 }
+  );
 
   const type = req.nextUrl.searchParams.get("type") ?? "";
   const ymParam = req.nextUrl.searchParams.get("ym") ?? "";
@@ -70,6 +83,8 @@ export async function GET(req: NextRequest) {
     }
 
     if (type === "mcframe") {
+      // McFrame取込の画面と同じ権限（品目別の計算結果）
+      if (!(await canOperate())) return denied;
       if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
       const items = await monthlyItemRows(s.companyId, ymParam);
       const rows: (string | number | null)[][] = [
@@ -121,10 +136,8 @@ export async function GET(req: NextRequest) {
     }
 
     if (type === "items") {
-      // マスタの出力はマスタ編集と同じく管理者のみ
-      if (s.role !== "admin") {
-        return NextResponse.json({ message: "管理者のみ出力できます" }, { status: 403 });
-      }
+      // マスタの出力はマスタ編集と同じ権限
+      if (!(await canOperate())) return denied;
       // 画面の絞り込み（工場・製造場所・検索語）をそのまま出力に反映する
       const itemFactory = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
       const itemWorkplace = (req.nextUrl.searchParams.get("workplace") ?? "").trim() || null;
@@ -163,9 +176,7 @@ export async function GET(req: NextRequest) {
 
     if (type === "scales") {
       // テプラ（差し込み印刷）用。QR値の列をQRオブジェクトに割り当てて刷る。
-      if (s.role !== "admin") {
-        return NextResponse.json({ message: "管理者のみ出力できます" }, { status: 403 });
-      }
+      if (!(await canOperate())) return denied;
       const scaleFactory = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
       const scales = await listScales(s.companyId, { factory: scaleFactory });
       const rows: (string | number | null)[][] = [

@@ -2,7 +2,12 @@ import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "./authOptions";
 import { getCompanyEntitlement } from "./entitlement";
-import { getUserRoleFactory, isUserDisabled, type UserRole } from "./authDb";
+import {
+  getUserDepartment,
+  getUserRoleFactory,
+  isUserDisabled,
+  type UserRole,
+} from "./authDb";
 
 export interface AppSession {
   companyId: string;
@@ -84,6 +89,64 @@ export async function requireAdminPage(): Promise<AppSession> {
   const s = await requireEntitledSession();
   if (s.role !== "admin") {
     redirect("/");
+  }
+  return s;
+}
+
+/**
+ * 品目マスター・重量計マスター・McFrame取込・調達入力を扱える部署。
+ * ポータルの部署名（pf-portal の pf_portal_departments）と同じ表記にすること。
+ * 課まで分かれている場合（例「調達部 第一課」）も通るよう、前方一致で判定する。
+ */
+export const OPERATIONS_DEPARTMENTS = ["生産管理部", "調達部"] as const;
+
+/** 部署名が上記のいずれかか（空白を除いた前方一致）。 */
+function isOperationsDepartment(department: string | null): boolean {
+  const d = (department ?? "").replace(/[\s　]/g, "");
+  if (!d) return false;
+  return OPERATIONS_DEPARTMENTS.some((n) => d.startsWith(n.replace(/[\s　]/g, "")));
+}
+
+/**
+ * マスタ（品目・重量計）・McFrame取込・調達入力を扱えるか。
+ * - ポータルの管理者（role=admin）… 初期設定・障害対応のため常に可
+ * - 生産管理部 / 調達部 のメンバー … 日常の入力担当なので可
+ * - それ以外の部署 … 不可（画面のタブも出さない）
+ * 部署はDBから都度読むので、ポータルで異動を反映したら次の描画で効く。
+ */
+export async function canUseOperations(
+  s: Pick<AppSession, "companyId" | "userId" | "role" | "isDemo">
+): Promise<boolean> {
+  if (s.isDemo) return true;
+  if (s.role === "admin") return true;
+  try {
+    return isOperationsDepartment(await getUserDepartment(s.userId));
+  } catch (e) {
+    // 部署が引けないときは開けない（誤って全員に見せない）
+    console.error("[operations] department lookup failed:", e);
+    return false;
+  }
+}
+
+/**
+ * マスタ・取込・調達入力のページ用。権限が無ければ "/" へ戻す。
+ * 画面のタブも出さないが、URL直打ちをここで止める。
+ */
+export async function requireOperationsPage(): Promise<AppSession> {
+  const s = await requireEntitledSession();
+  if (!(await canUseOperations(s))) {
+    redirect("/");
+  }
+  return s;
+}
+
+/** マスタ・取込・調達入力の Server Action 用。権限が無ければエラー。 */
+export async function requireOperationsSession(): Promise<AppSession> {
+  const s = await requireEntitledSession();
+  if (!(await canUseOperations(s))) {
+    throw new Error(
+      `この操作は${OPERATIONS_DEPARTMENTS.join("・")}のメンバーと管理者のみ実行できます`
+    );
   }
   return s;
 }

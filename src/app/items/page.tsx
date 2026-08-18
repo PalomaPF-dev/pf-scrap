@@ -1,5 +1,5 @@
 import { FileDown, QrCode } from "lucide-react";
-import { requireAdminPage } from "@/lib/session";
+import { requireOperationsPage } from "@/lib/session";
 import {
   listFactoryOptions,
   listItemWorkplaces,
@@ -21,7 +21,7 @@ export default async function ItemsPage({
 }: {
   searchParams: Promise<{ q?: string; factory?: string; workplace?: string }>;
 }) {
-  const session = await requireAdminPage();
+  const session = await requireOperationsPage();
   const sp = await searchParams;
   const q = (sp.q ?? "").trim();
   const factory = (sp.factory ?? "").trim();

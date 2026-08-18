@@ -160,6 +160,11 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS tare_weight NUMERIC`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_before NUMERIC`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after NUMERIC`);
+  // 累積値の連携（2026-08）: 投入前の累積は「朝礼後の累積値」または同じ箱の直前の
+  // 投入後累積が自動で入る。そのままでは編集できず、訂正するときだけ理由を残す。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_before_reason TEXT NOT NULL DEFAULT ''`);
+  // 箱（重量計）ごとの朝礼後の累積値。{ "<scale_id>": 123.4 } 形式。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS kaishi_cum JSONB NOT NULL DEFAULT '{}'::jsonb`);
 
   // ③ 初品の実測完成品重量（測定日×KEYで1件。再測定は上書き）。
   await safeDdl(() => sql`

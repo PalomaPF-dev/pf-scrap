@@ -20,7 +20,14 @@ import {
   saveDailyRecordAction,
   submitDailyRecordAction,
 } from "@/lib/actions";
-import { DAILY_STATUS_LABEL, type DailyRecord, type DailyStatus, type Scale } from "@/lib/scrapTypes";
+import {
+  DAILY_STATUS_LABEL,
+  SCALE_KIND_LIST,
+  type DailyRecord,
+  type DailyStatus,
+  type Scale,
+  type ScaleKind,
+} from "@/lib/scrapTypes";
 import { fmt, fmtPct, toNum, toNumOrNull } from "@/lib/format";
 import DateNav from "@/components/DateNav";
 
@@ -34,6 +41,8 @@ type EntryDraft = {
   tare: string;
   cumBefore: string;
   cumAfter: string;
+  /** 投入前累積を自動値から変えたときの理由（空＝自動値のまま） */
+  cumBeforeReason: string;
   kirokusha: string;
   ijo: string;
 };
@@ -166,10 +175,17 @@ export default function DailyRecordForm({
       tare: e.tareWeight !== null ? String(e.tareWeight) : "",
       cumBefore: e.cumBefore !== null ? String(e.cumBefore) : "",
       cumAfter: e.cumAfter !== null ? String(e.cumAfter) : "",
+      cumBeforeReason: e.cumBeforeReason ?? "",
       kirokusha: e.kirokusha,
       ijo: e.ijo,
     }))
   );
+  // 箱ごとの朝礼後の累積値（scaleId → 入力文字列）。その日の最初の投入前累積になる。
+  const [kaishiCum, setKaishiCum] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const [id, v] of Object.entries(initial?.kaishiCum ?? {})) out[id] = String(v);
+    return out;
+  });
   const [kaishu, setKaishu] = useState(
     initial?.kaishuSokuteichi !== null && initial?.kaishuSokuteichi !== undefined
       ? String(initial.kaishuSokuteichi)
@@ -188,9 +204,33 @@ export default function DailyRecordForm({
   // ===== 計量入力 =====
   const [gross, setGross] = useState("");
   const [tare, setTare] = useState("");
-  const [cumBefore, setCumBefore] = useState("");
   const [cumAfter, setCumAfter] = useState("");
   const [ijo, setIjo] = useState("");
+  // 累積(投入前)は自動値。訂正するときだけ手入力に切り替え、理由を残す。
+  const [cumFix, setCumFix] = useState(false);
+  const [cumManual, setCumManual] = useState("");
+  const [cumReason, setCumReason] = useState("");
+
+  /**
+   * 選択中の箱の「次に入るはずの累積(投入前)」。
+   * 同じ箱の直前の投入後累積 → 無ければ朝礼後の累積値、の順で引き継ぐ。
+   */
+  const autoCumBefore = useMemo(() => {
+    if (!selectedScale) return "";
+    const last = [...entries]
+      .reverse()
+      .find((e) => e.scaleId === selectedScale.id && e.cumAfter !== "");
+    if (last) return last.cumAfter;
+    return kaishiCum[selectedScale.id] ?? "";
+  }, [selectedScale, entries, kaishiCum]);
+
+  // 自動値がまだ無い（朝礼後の累積値も前回の投入も無い）ときは、理由なしでそのまま手入力できる
+  const cumLinked = autoCumBefore !== "";
+  const cumEditable = !cumLinked || cumFix;
+  const cumBefore = cumEditable ? cumManual : autoCumBefore;
+  // 自動値から実際に変えたときだけ理由を必須にする（訂正を開いただけでは求めない）
+  const cumCorrected =
+    cumLinked && cumFix && cumManual.trim() !== "" && toNumOrNull(cumManual) !== toNumOrNull(autoCumBefore);
 
   const scrapWeight = useMemo(() => {
     const g = toNumOrNull(gross);
@@ -231,9 +271,10 @@ export default function DailyRecordForm({
 
   function selectScale(scale: Scale) {
     setSelectedScale(scale);
-    // 同じ箱の直近の「投入後累積」を次の「投入前累積」に自動引き継ぎ
-    const last = [...entries].reverse().find((e) => e.scaleId === scale.id && e.cumAfter !== "");
-    setCumBefore(last ? last.cumAfter : "");
+    // 投入前累積は autoCumBefore が箱ごとに引き継ぐので、訂正の状態だけ解除する
+    setCumFix(false);
+    setCumManual("");
+    setCumReason("");
     setMessage(null);
   }
 
@@ -307,6 +348,13 @@ export default function DailyRecordForm({
       setMessage({ ok: false, text: "投入前重量（箱含む）が箱重量より小さくなっています。" });
       return;
     }
+    if (cumCorrected && !cumReason.trim()) {
+      setMessage({
+        ok: false,
+        text: `累積(投入前)を自動値 ${autoCumBefore} kg から変更しています。訂正理由を入力してください。`,
+      });
+      return;
+    }
     setEntries((prev) => [
       ...prev,
       {
@@ -318,15 +366,18 @@ export default function DailyRecordForm({
         tare,
         cumBefore,
         cumAfter,
+        cumBeforeReason: cumCorrected ? cumReason.trim() : "",
         kirokusha: userName, // 記録者はログインユーザー
         ijo,
       },
     ]);
-    // 次の投入に備えてクリア（累積は投入後→次の投入前へ引き継ぎ）
+    // 次の投入に備えてクリア。投入前累積は今回の投入後累積が autoCumBefore として自動で入る
     setGross("");
     setTare("");
-    setCumBefore(cumAfter);
     setCumAfter("");
+    setCumFix(false);
+    setCumManual("");
+    setCumReason("");
     setIjo("");
     setMessage({ ok: true, text: `${fmt(scrapWeight)} kg を記録しました。忘れずに保存してください。` });
   }
@@ -338,6 +389,10 @@ export default function DailyRecordForm({
       sekininsha,
       zenjitsuOk,
       hakoZanryo,
+      // 空欄の箱は送らない（未読取と 0kg を区別する）
+      kaishiCum: Object.fromEntries(
+        Object.entries(kaishiCum).filter(([, v]) => v.trim() !== "")
+      ),
       kaishuSokuteichi: kaishu,
       tonyuKanryo,
       biko,
@@ -350,6 +405,7 @@ export default function DailyRecordForm({
         tareWeight: e.tare,
         cumBefore: e.cumBefore,
         cumAfter: e.cumAfter,
+        cumBeforeReason: e.cumBeforeReason,
         kirokusha: e.kirokusha,
         ijo: e.ijo,
       })),
@@ -398,14 +454,20 @@ export default function DailyRecordForm({
     });
   }
 
-  const scalesByKind = useMemo(() => {
+  // 一覧選択用。種類（上銅／銅ダライ）ごとにまとめ、マスター未定義の種類も末尾に出す
+  const scaleGroups = useMemo(() => {
     const map = new Map<string, Scale[]>();
     for (const s of scales.filter((s) => s.active)) {
       if (!map.has(s.kind)) map.set(s.kind, []);
       map.get(s.kind)!.push(s);
     }
-    return map;
+    const known = SCALE_KIND_LIST.filter((k) => map.has(k));
+    const others = [...map.keys()].filter((k) => !SCALE_KIND_LIST.includes(k as ScaleKind));
+    return [...known, ...others].map((kind) => ({ kind, items: map.get(kind)! }));
   }, [scales]);
+
+  /** 選択肢の表示名。設備番号があれば先頭に付けて現場の呼び名と一致させる */
+  const scaleLabel = (s: Scale) => (s.equipNo ? `${s.equipNo}　${s.name}` : s.name);
 
   const btnPrimary =
     "inline-flex h-11 items-center justify-center gap-1.5 rounded-lg bg-[#b4632c] px-4 text-sm font-semibold text-white hover:bg-[#96521f] disabled:opacity-50";
@@ -540,6 +602,47 @@ export default function DailyRecordForm({
               </>
             )}
           </div>
+
+          {/* 朝礼後の重量計の累積値。その日の最初の投入の「累積(投入前)」に自動で入る */}
+          {scales.length > 0 && (
+            <div>
+              <div className="mb-1.5 text-xs font-bold text-[#707070]">
+                朝礼後の累積値（重量計の表示値）
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {scales
+                  .filter((s) => s.active)
+                  .map((s) => (
+                    <label
+                      key={s.id}
+                      className="flex items-center gap-2 rounded-xl border border-[#e5e5e5] px-3 py-2"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-sm text-[#555555]">
+                        {scaleLabel(s)}
+                      </span>
+                      <KindTag kind={s.kind} />
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.1"
+                        min="0"
+                        value={kaishiCum[s.id] ?? ""}
+                        onChange={(e) =>
+                          setKaishiCum((prev) => ({ ...prev, [s.id]: e.target.value }))
+                        }
+                        className={`${numInput} w-24`}
+                        disabled={locked}
+                      />
+                      <span className="text-xs text-[#909090]">kg</span>
+                    </label>
+                  ))}
+              </div>
+              <p className="mt-1.5 text-xs text-[#909090]">
+                入力すると、その箱の最初の投入の「累積(投入前)」に自動で入ります。
+                2回目以降は前の投入の「累積(投入後)」が引き継がれます。
+              </p>
+            </div>
+          )}
         </div>
       </Step>
 
@@ -548,13 +651,13 @@ export default function DailyRecordForm({
         <Step
           n={2}
           title="スクラップ箱を選ぶ"
-          hint="重量計に貼られたQRコードを読み取るか、下のボタンから選びます。"
+          hint="重量計に貼られたQRコードを読み取るか、一覧から選びます。"
         >
           {selectedScale ? (
             <div className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-[#b4632c] bg-[#faf6ef] px-3 py-2.5">
               <span className="flex min-w-0 items-center gap-2 text-sm font-bold text-[#b4632c]">
                 <CheckCircle2 className="h-5 w-5 shrink-0" />
-                <span className="truncate">{selectedScale.name}</span>
+                <span className="truncate">{scaleLabel(selectedScale)}</span>
                 <KindTag kind={selectedScale.kind} />
               </span>
               <button
@@ -578,41 +681,35 @@ export default function DailyRecordForm({
             カメラでQRを読み取る
           </button>
 
+          {/* QRが読めないとき・貼り付けが剥がれたときのために一覧からも選べるようにする */}
           {scales.length === 0 ? (
             <p className="rounded-lg bg-[#fff3e0] px-3 py-2 text-sm text-[#a15c00]">
               重量計（スクラップ箱）が未登録です。管理者に「重量計マスター」への登録を依頼してください。
             </p>
           ) : (
-            <div className="space-y-3">
-              {["上銅", "銅ダライ"].map((kind) => (
-                <div key={kind}>
-                  <div className="mb-1.5 flex items-center gap-2">
-                    <KindTag kind={kind} />
-                    <span className="text-xs text-[#909090]">
-                      {(scalesByKind.get(kind) ?? []).length}台
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                    {(scalesByKind.get(kind) ?? []).map((scale) => (
-                      <button
-                        key={scale.id}
-                        onClick={() => selectScale(scale)}
-                        className={`h-12 rounded-xl px-3 text-sm font-semibold ${
-                          selectedScale?.id === scale.id
-                            ? "bg-[#b4632c] text-white"
-                            : "border border-[#e5e5e5] bg-white text-[#555555] hover:bg-[#f7f7f5]"
-                        }`}
-                      >
-                        {scale.name}
-                      </button>
+            <label className="flex flex-col gap-1 text-xs font-bold text-[#707070]">
+              一覧から選ぶ（QRが読めないとき）
+              <select
+                value={selectedScale?.id ?? ""}
+                onChange={(e) => {
+                  const next = scales.find((s) => s.id === e.target.value);
+                  if (next) selectScale(next);
+                  else setSelectedScale(null);
+                }}
+                className={`${input} w-full sm:w-96`}
+              >
+                <option value="">選択してください（{scales.length}台）</option>
+                {scaleGroups.map((g) => (
+                  <optgroup key={g.kind} label={`${g.kind}（${g.items.length}台）`}>
+                    {g.items.map((scale) => (
+                      <option key={scale.id} value={scale.id}>
+                        {scaleLabel(scale)}
+                      </option>
                     ))}
-                    {(scalesByKind.get(kind) ?? []).length === 0 && (
-                      <span className="text-xs text-[#909090]">未登録</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+                  </optgroup>
+                ))}
+              </select>
+            </label>
           )}
 
           {/* ハンディスキャナ入力（PC/据置端末向け） */}
@@ -696,18 +793,35 @@ export default function DailyRecordForm({
               重量計の累積値
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1 text-xs text-[#707070]">
-                累積(投入前) kg
+              {/* 訂正ボタンは label の外に置く（label が指す入力欄がボタンにならないように） */}
+              <div className="flex flex-col gap-1 text-xs text-[#707070]">
+                <span className="flex items-center justify-between gap-1">
+                  累積(投入前) kg
+                  {cumLinked && !cumFix && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCumFix(true);
+                        setCumManual(autoCumBefore);
+                      }}
+                      className="rounded px-1 text-xs font-semibold text-[#b4632c] underline"
+                    >
+                      訂正
+                    </button>
+                  )}
+                </span>
                 <input
                   type="number"
                   inputMode="decimal"
                   step="0.1"
                   min="0"
                   value={cumBefore}
-                  onChange={(e) => setCumBefore(e.target.value)}
-                  className={numInput}
+                  onChange={(e) => setCumManual(e.target.value)}
+                  readOnly={!cumEditable}
+                  aria-label="累積(投入前) kg"
+                  className={`${numInput} ${!cumEditable ? "bg-[#f0f0ee] text-[#555555]" : ""}`}
                 />
-              </label>
+              </div>
               <label className="flex flex-col gap-1 text-xs text-[#707070]">
                 累積(投入後) kg
                 <input
@@ -721,6 +835,52 @@ export default function DailyRecordForm({
                 />
               </label>
             </div>
+
+            {/* 自動で入った値の出どころ／訂正のときの理由入力 */}
+            {cumLinked && !cumFix && (
+              <p className="mt-1.5 text-xs text-[#909090]">
+                {entries.some((e) => e.scaleId === selectedScale?.id && e.cumAfter !== "")
+                  ? "前の投入の「累積(投入後)」が自動で入っています。"
+                  : "朝礼後の累積値が自動で入っています。"}
+                　違う場合は「訂正」から直せます（理由が必要です）。
+              </p>
+            )}
+            {!cumLinked && selectedScale && (
+              <p className="mt-1.5 text-xs text-[#a15c00]">
+                この箱の朝礼後の累積値が未入力です。1の朝礼確認で入力すると、以降は自動で引き継がれます。
+              </p>
+            )}
+            {cumFix && (
+              <div className="mt-2 rounded-lg border border-[#b4632c] bg-[#faf6ef] p-3">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[#96521f]">
+                    訂正中（自動値 {autoCumBefore || "—"} kg）
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCumFix(false);
+                      setCumManual("");
+                      setCumReason("");
+                    }}
+                    className="rounded px-1 text-xs font-semibold text-[#96521f] underline"
+                  >
+                    自動値に戻す
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={cumReason}
+                  onChange={(e) => setCumReason(e.target.value)}
+                  placeholder="訂正理由（例: 前回の読み取り誤り、途中で他部署が投入）"
+                  aria-label="累積の訂正理由"
+                  className={`${input} w-full`}
+                />
+                {cumCorrected && !cumReason.trim() && (
+                  <p className="mt-1 text-xs text-[#dc000c]">訂正理由を入力してください。</p>
+                )}
+              </div>
+            )}
             <div className="mt-2 flex items-center justify-between rounded-lg border border-[#e5e5e5] bg-[#f7f7f5] px-3 py-2 text-sm">
               <span className="text-[#707070]">累積差 / 整合Δ</span>
               <span
@@ -814,6 +974,11 @@ export default function DailyRecordForm({
                             </span>
                           )}
                         </div>
+                        {e.cumBeforeReason && (
+                          <div className="mt-0.5 text-xs text-[#a15c00]">
+                            累積訂正: {e.cumBeforeReason}
+                          </div>
+                        )}
                         {e.ijo && <div className="mt-0.5 text-xs text-[#dc000c]">異常: {e.ijo}</div>}
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
@@ -848,6 +1013,7 @@ export default function DailyRecordForm({
                     <th className={`${th} text-right`}>累積(前)</th>
                     <th className={`${th} text-right`}>累積(後)</th>
                     <th className={`${th} text-right`}>整合Δ</th>
+                    <th className={th}>累積訂正理由</th>
                     <th className={th}>記録者</th>
                     <th className={th}>異常</th>
                     {!locked && <th className={th}></th>}
@@ -877,6 +1043,9 @@ export default function DailyRecordForm({
                           className={`${tdNum} ${d !== null && Math.abs(d) > 0.5 ? "bg-[#fdecea] text-[#dc000c]" : ""}`}
                         >
                           {d !== null ? `${d > 0 ? "+" : ""}${fmt(d)}` : "-"}
+                        </td>
+                        <td className={`${td} ${e.cumBeforeReason ? "text-[#a15c00]" : ""}`}>
+                          {e.cumBeforeReason}
                         </td>
                         <td className={td}>{e.kirokusha}</td>
                         <td className={td}>{e.ijo}</td>

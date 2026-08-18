@@ -242,6 +242,8 @@ export async function saveDailyRecordAction(input: {
   sekininsha: string;
   zenjitsuOk: boolean;
   hakoZanryo: unknown;
+  /** 箱ごとの朝礼後の累積値（scaleId → kg。文字列で届く） */
+  kaishiCum?: Record<string, unknown>;
   kaishuSokuteichi: unknown;
   tonyuKanryo: boolean;
   biko: string;
@@ -263,6 +265,16 @@ export async function saveDailyRecordAction(input: {
     if (lockMsg) return fail(lockMsg);
 
     const prev = await getDailyRecord(s.companyId, input.recordDate, factory);
+
+    // 箱ごとの朝礼後の累積値。これがその日の最初の投入の「累積(投入前)」になる。
+    const kaishiCum: Record<string, number> = {};
+    for (const [k, v] of Object.entries(input.kaishiCum ?? {})) {
+      const n = toNumOrNull(v);
+      if (n !== null && asStr(k, 50)) kaishiCum[asStr(k, 50)] = n;
+    }
+    // 累積の連携チェック用。箱ごとに「次に入るはずの投入前累積」を持ち回る。
+    const expectedCum = new Map<string, number>(Object.entries(kaishiCum));
+
     const entries: DailyEntry[] = [];
     for (const e of Array.isArray(input.entries) ? input.entries : []) {
       const gross = toNumOrNull(e.grossWeight);
@@ -286,6 +298,25 @@ export async function saveDailyRecordAction(input: {
         }
       }
       if (!(SCALE_KIND_LIST as readonly string[]).includes(kind)) kind = "上銅";
+
+      // 累積(投入前)は自動値（朝礼後の累積値／同じ箱の直前の投入後累積）が入る。
+      // 違う値にするのは訂正なので、理由が無ければ受け付けない（画面と同じ判定をサーバーでも行う）。
+      const cumKey = scaleId ?? scaleName;
+      const cumBefore = toNumOrNull(e.cumBefore);
+      const cumAfter = toNumOrNull(e.cumAfter);
+      const cumBeforeReason = asStr(e.cumBeforeReason, 200);
+      const auto = expectedCum.get(cumKey);
+      const corrected =
+        auto !== undefined && cumBefore !== null && Math.abs(cumBefore - auto) > 0.0005;
+      if (corrected && !cumBeforeReason) {
+        return fail(
+          `「${scaleName || cumKey}」の累積(投入前)が自動値 ${auto} kg と違います。訂正する場合は理由を入力してください。`
+        );
+      }
+      // 次の投入に引き継ぐのは、その投入で実際に読み取った投入後累積
+      if (cumAfter !== null) expectedCum.set(cumKey, cumAfter);
+      else expectedCum.delete(cumKey);
+
       entries.push({
         jikoku: asStr(e.jikoku, 10),
         hinshu: kind,
@@ -295,8 +326,10 @@ export async function saveDailyRecordAction(input: {
         tareWeight: tare,
         // スクラップ重量はサーバー側で必ず再計算（改ざん・計算ズレ防止）
         weight: Math.round((gross - tare) * 1000) / 1000,
-        cumBefore: toNumOrNull(e.cumBefore),
-        cumAfter: toNumOrNull(e.cumAfter),
+        cumBefore,
+        cumAfter,
+        // 自動値のままなら理由は残さない（訂正した行だけ理由が入る）
+        cumBeforeReason: corrected ? cumBeforeReason : "",
         // 記録者はログインユーザーを自動記録（既存行は元の記録者を保持）
         kirokusha: asStr(e.kirokusha, 50) || s.userName || s.loginId || "",
         ijo: asStr(e.ijo),
@@ -309,6 +342,8 @@ export async function saveDailyRecordAction(input: {
       zenjitsuOk: Boolean(input.zenjitsuOk),
       // 始業時スクラップ箱残量は管理者のみが入力できる（一般ユーザーの送信値は無視）
       hakoZanryo: isAdmin ? toNum(input.hakoZanryo) : (prev?.hakoZanryo ?? 0),
+      // 朝礼後の累積値は当番が読み取って入力する（残量と違い管理者限定にしない）
+      kaishiCum,
       kaishuSokuteichi: toNumOrNull(input.kaishuSokuteichi),
       tonyuKanryo: Boolean(input.tonyuKanryo),
       shonin: prev?.shonin ?? "",

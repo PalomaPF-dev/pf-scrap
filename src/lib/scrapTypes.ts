@@ -57,6 +57,11 @@ export interface DailyEntry {
   /** スクラップ箱の重量計の累積表示値（投入前/投入後）kg。整合確認用 */
   cumBefore: number | null;
   cumAfter: number | null;
+  /**
+   * 投入前累積の訂正理由。投入前累積は「朝礼後の累積値」または同じ箱の直前の
+   * 投入後累積が自動で入るため、それと違う値を入れたときだけ理由が入る（空＝自動値のまま）。
+   */
+  cumBeforeReason: string;
   /** 記録者（ログインユーザーを自動記録） */
   kirokusha: string;
   ijo: string;
@@ -69,6 +74,11 @@ export interface DailyRecord {
   sekininsha: string;
   zenjitsuOk: boolean;
   hakoZanryo: number;
+  /**
+   * 箱（重量計）ごとの朝礼後の累積値 kg。scaleId をキーに持つ。
+   * その日の最初の投入では、この値が「累積(投入前)」に自動で入る。
+   */
+  kaishiCum: Record<string, number>;
   kaishuSokuteichi: number | null;
   tonyuKanryo: boolean;
   shonin: string;

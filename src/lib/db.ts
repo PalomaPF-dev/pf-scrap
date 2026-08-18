@@ -318,6 +318,7 @@ function mapDailyRecord(r: any, entries: any[]): DailyRecord {
     sekininsha: r.sekininsha,
     zenjitsuOk: Boolean(r.zenjitsu_ok),
     hakoZanryo: num(r.hako_zanryo),
+    kaishiCum: mapKaishiCum(r.kaishi_cum),
     kaishuSokuteichi: numOrNull(r.kaishu_sokuteichi),
     tonyuKanryo: Boolean(r.tonyu_kanryo),
     shonin: r.shonin,
@@ -339,10 +340,30 @@ function mapDailyRecord(r: any, entries: any[]): DailyRecord {
       weight: num(e.weight),
       cumBefore: numOrNull(e.cum_before),
       cumAfter: numOrNull(e.cum_after),
+      cumBeforeReason: e.cum_before_reason ?? "",
       kirokusha: e.kirokusha,
       ijo: e.ijo,
     })),
   };
+}
+
+/** kaishi_cum(JSONB) を scaleId → kg に正規化。ドライバによって文字列で返ることがある。 */
+function mapKaishiCum(raw: unknown): Record<string, number> {
+  let obj = raw;
+  if (typeof obj === "string") {
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return {};
+    }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    const n = Number(v);
+    if (Number.isFinite(n)) out[k] = n;
+  }
+  return out;
 }
 
 export async function getDailyRecord(
@@ -360,7 +381,7 @@ export async function getDailyRecord(
   if (!r) return null;
   const entries = await sql`
     SELECT jikoku, hinshu, scale_id, scale_name, gross_weight, tare_weight,
-           weight, cum_before, cum_after, kirokusha, ijo
+           weight, cum_before, cum_after, cum_before_reason, kirokusha, ijo
     FROM scrap_daily_entries WHERE record_id = ${r.id} ORDER BY sort ASC`;
   return mapDailyRecord(r, entries);
 }
@@ -378,16 +399,18 @@ export async function saveDailyRecord(
   const rows = await sql`
     INSERT INTO scrap_daily_records (
       company_id, record_date, factory, sekininsha, zenjitsu_ok, hako_zanryo,
-      kaishu_sokuteichi, tonyu_kanryo, shonin, biko, updated_by
+      kaishi_cum, kaishu_sokuteichi, tonyu_kanryo, shonin, biko, updated_by
     ) VALUES (
       ${companyId}, ${rec.recordDate}, ${rec.factory}, ${rec.sekininsha}, ${rec.zenjitsuOk},
-      ${rec.hakoZanryo}, ${rec.kaishuSokuteichi}, ${rec.tonyuKanryo}, ${rec.shonin},
+      ${rec.hakoZanryo}, ${JSON.stringify(rec.kaishiCum ?? {})}::jsonb,
+      ${rec.kaishuSokuteichi}, ${rec.tonyuKanryo}, ${rec.shonin},
       ${rec.biko}, ${rec.updatedBy}
     )
     ON CONFLICT (company_id, record_date, factory) DO UPDATE SET
       sekininsha = EXCLUDED.sekininsha,
       zenjitsu_ok = EXCLUDED.zenjitsu_ok,
       hako_zanryo = EXCLUDED.hako_zanryo,
+      kaishi_cum = EXCLUDED.kaishi_cum,
       kaishu_sokuteichi = EXCLUDED.kaishu_sokuteichi,
       tonyu_kanryo = EXCLUDED.tonyu_kanryo,
       shonin = EXCLUDED.shonin,
@@ -402,12 +425,13 @@ export async function saveDailyRecord(
     await sql`
       INSERT INTO scrap_daily_entries (
         company_id, record_id, jikoku, hinshu, scale_id, scale_name,
-        gross_weight, tare_weight, weight, cum_before, cum_after, kirokusha, ijo, sort
+        gross_weight, tare_weight, weight, cum_before, cum_after, cum_before_reason,
+        kirokusha, ijo, sort
       )
       VALUES (
         ${companyId}, ${recordId}, ${e.jikoku}, ${e.hinshu}, ${e.scaleId}, ${e.scaleName},
         ${e.grossWeight}, ${e.tareWeight}, ${e.weight}, ${e.cumBefore}, ${e.cumAfter},
-        ${e.kirokusha}, ${e.ijo}, ${i}
+        ${e.cumBeforeReason ?? ""}, ${e.kirokusha}, ${e.ijo}, ${i}
       )`;
   }
 }

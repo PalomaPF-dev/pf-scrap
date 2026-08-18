@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { encode } from "next-auth/jwt";
 import { authOptions } from "@/lib/authOptions";
-import { ensureAuthSchema, isUserDisabled } from "@/lib/authDb";
+import {
+  BOOTSTRAP_COMPANY_NAME,
+  createInvitedUser,
+  ensureAuthSchema,
+  getOrCreateCompanyByName,
+  isUserDisabled,
+} from "@/lib/authDb";
 import { getSql } from "@/lib/neon";
 
 export const runtime = "nodejs";
@@ -20,6 +26,8 @@ export const dynamic = "force-dynamic";
 const APP_KEY = "scrap";
 // セッション寿命（authOptions.session.maxAge と同じ12時間）
 const SESSION_MAX_AGE = 12 * 60 * 60;
+// 社員番号は半角英数字とハイフン・アンダースコアのみ（/api/provision と同じ規則）
+const isLoginId = (s: string) => /^[A-Za-z0-9_-]{1,64}$/.test(s);
 
 /** 検証失敗時は理由を漏らさずログイン画面へ（詳細はサーバーログのみ） */
 function ssoFail(req: NextRequest): NextResponse {
@@ -51,7 +59,15 @@ export async function GET(req: NextRequest) {
   if (!safeEqual(sig, expected)) return ssoFail(req);
 
   // ペイロード検証（loginId / app / exp。exp は epoch ms、発行から60秒有効）
-  let data: { loginId?: unknown; app?: unknown; exp?: unknown };
+  let data: {
+    loginId?: unknown;
+    app?: unknown;
+    exp?: unknown;
+    name?: unknown;
+    role?: unknown;
+    canManage?: unknown;
+    department?: unknown;
+  };
   try {
     data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
   } catch {
@@ -61,6 +77,12 @@ export async function GET(req: NextRequest) {
   if (!loginId) return ssoFail(req);
   if (data.app !== APP_KEY) return ssoFail(req);
   if (typeof data.exp !== "number" || !(data.exp > Date.now())) return ssoFail(req);
+  // ポータルは氏名・権限・所属もトークンに載せてくる（署名済みなので信頼できる）。
+  // アカウント未発行のときの自動作成に使う。
+  const tokenName = typeof data.name === "string" ? data.name.trim() : "";
+  const tokenRole: "admin" | "member" =
+    data.role === "admin" || data.canManage === true ? "admin" : "member";
+  const tokenDepartment = typeof data.department === "string" ? data.department.trim() : "";
 
   try {
     // authorize と同様、login_id 列などのスキーマを冪等に整えてから検索する
@@ -73,7 +95,7 @@ export async function GET(req: NextRequest) {
 
     // 社員番号（login_id）でユーザー特定。pending でもログイン可（パスワードは触らない）。
     const sql = getSql();
-    const rows = await sql`
+    const findUser = () => sql`
       SELECT u.id, u.login_id, u.email, u.name, u.role,
              c.id AS company_id, c.name AS company_name, c.is_demo
       FROM users u
@@ -81,6 +103,22 @@ export async function GET(req: NextRequest) {
       WHERE u.login_id = ${loginId}
       LIMIT 1
     `;
+    let rows = await findUser();
+    if (rows.length === 0) {
+      // 名簿の再連携（プロビジョニング）がまだ届いていない人。
+      // ポータルは「アプリ側でアカウント未発行でもログインできるように」
+      // 氏名・権限をトークンに載せてくるので、ここでアカウントを作って通す。
+      // 所属工場はトークンに無いため未設定（＝全工場）で作る。次の名簿連携で
+      // ポータル側の所属工場が反映され、自工場のみの表示に絞られる。
+      if (!isLoginId(loginId) || loginId === "admin") return ssoFail(req);
+      const companyId = await getOrCreateCompanyByName(BOOTSTRAP_COMPANY_NAME);
+      await createInvitedUser(companyId, loginId, tokenName || loginId, tokenRole);
+      if (tokenDepartment) {
+        await sql`
+          UPDATE users SET portal_department = ${tokenDepartment} WHERE login_id = ${loginId}`;
+      }
+      rows = await findUser();
+    }
     const user = rows[0];
     if (!user) return ssoFail(req);
     // 失効済み（退職・名簿からの削除）はポータル経由でも入れない

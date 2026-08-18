@@ -5,7 +5,6 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Camera,
   CheckCircle2,
-  ChevronDown,
   Plus,
   QrCode,
   Save,
@@ -83,6 +82,11 @@ function KindTag({ kind }: { kind: string }) {
       {kind}
     </span>
   );
+}
+
+/** 入力項目の通し番号（①②③④）。記録票の項目と対応づけて迷わないようにする */
+function FieldNo({ n }: { n: string }) {
+  return <span className="mr-1 font-bold text-[#b4632c]">{n}</span>;
 }
 
 /** 手順番号つきの見出し（現場で迷わないよう「いま何をするか」を明示する） */
@@ -187,8 +191,6 @@ export default function DailyRecordForm({
   const [cumBefore, setCumBefore] = useState("");
   const [cumAfter, setCumAfter] = useState("");
   const [ijo, setIjo] = useState("");
-  // 累積値・異常メモは毎回は使わないので、モバイルでは折りたたんでおく
-  const [detailOpen, setDetailOpen] = useState(false);
 
   const scrapWeight = useMemo(() => {
     const g = toNumOrNull(gross);
@@ -640,8 +642,10 @@ export default function DailyRecordForm({
           title="計量して記録する"
           hint="スクラップ重量 = 投入前重量(箱含む) − 箱重量(空き箱)。時刻と記録者は自動で入ります。"
         >
+          {/* ① 投入前重量 ② 箱重量 → スクラップ重量（自動計算） */}
           <div className="grid grid-cols-2 gap-3">
             <label className="flex flex-col gap-1 text-xs text-[#707070]">
+              <FieldNo n="①" />
               投入前重量(箱含む) kg
               <input
                 type="number"
@@ -654,6 +658,7 @@ export default function DailyRecordForm({
               />
             </label>
             <label className="flex flex-col gap-1 text-xs text-[#707070]">
+              <FieldNo n="②" />
               箱重量(空き箱) kg
               <input
                 type="number"
@@ -674,7 +679,7 @@ export default function DailyRecordForm({
                 : "border-[#e5e5e5] bg-[#f7f7f5]"
             }`}
           >
-            <span className="text-sm text-[#707070]">スクラップ重量</span>
+            <span className="text-sm text-[#707070]">スクラップ重量（①−②）</span>
             <span
               className={`text-2xl font-bold tabular-nums ${
                 scrapWeight !== null && scrapWeight < 0 ? "text-[#dc000c]" : "text-[#333333]"
@@ -684,70 +689,71 @@ export default function DailyRecordForm({
             </span>
           </div>
 
-          {/* 累積値・異常メモは折りたたみ（毎回は使わない） */}
-          <button
-            onClick={() => setDetailOpen((v) => !v)}
-            className="mt-3 inline-flex items-center gap-1 text-sm font-medium text-[#b4632c]"
-          >
-            <ChevronDown className={`h-4 w-4 transition-transform ${detailOpen ? "rotate-180" : ""}`} />
-            重量計の累積値・異常メモ{detailOpen ? "を閉じる" : "を入力する"}
-          </button>
-          {detailOpen && (
-            <div className="mt-3 space-y-3 rounded-xl bg-[#f7f7f5] p-3">
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1 text-xs text-[#707070]">
-                  累積(投入前) kg
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="0.1"
-                    min="0"
-                    value={cumBefore}
-                    onChange={(e) => setCumBefore(e.target.value)}
-                    className={numInput}
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-[#707070]">
-                  累積(投入後) kg
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="0.1"
-                    min="0"
-                    value={cumAfter}
-                    onChange={(e) => setCumAfter(e.target.value)}
-                    className={numInput}
-                  />
-                </label>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm">
-                <span className="text-[#707070]">累積差 / 整合Δ</span>
-                <span
-                  className={`font-bold tabular-nums ${
-                    gap !== null && Math.abs(gap) > 0.5 ? "text-[#dc000c]" : "text-[#333333]"
-                  }`}
-                >
-                  {cumDiff !== null ? `${fmt(cumDiff)} kg` : "—"}
-                  {gap !== null ? `（Δ ${gap > 0 ? "+" : ""}${fmt(gap)}）` : ""}
-                </span>
-              </div>
-              {gap !== null && Math.abs(gap) > 0.5 && (
-                <p className="text-xs text-[#dc000c]">
-                  累積差と自動計算のスクラップ重量に {fmt(Math.abs(gap))} kg
-                  の差があります。計量を確認してください（そのまま記録も可能です）。
-                </p>
-              )}
+          {/* ③ 重量計の累積値（投入前 → 投入後）。自動計算との整合Δを確認する */}
+          <div className="mt-4">
+            <div className="mb-1.5 text-xs font-bold text-[#707070]">
+              <FieldNo n="③" />
+              重量計の累積値
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               <label className="flex flex-col gap-1 text-xs text-[#707070]">
-                異常メモ
+                累積(投入前) kg
                 <input
-                  type="text"
-                  value={ijo}
-                  onChange={(e) => setIjo(e.target.value)}
-                  className={input}
+                  type="number"
+                  inputMode="decimal"
+                  step="0.1"
+                  min="0"
+                  value={cumBefore}
+                  onChange={(e) => setCumBefore(e.target.value)}
+                  className={numInput}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-[#707070]">
+                累積(投入後) kg
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.1"
+                  min="0"
+                  value={cumAfter}
+                  onChange={(e) => setCumAfter(e.target.value)}
+                  className={numInput}
                 />
               </label>
             </div>
-          )}
+            <div className="mt-2 flex items-center justify-between rounded-lg border border-[#e5e5e5] bg-[#f7f7f5] px-3 py-2 text-sm">
+              <span className="text-[#707070]">累積差 / 整合Δ</span>
+              <span
+                className={`font-bold tabular-nums ${
+                  gap !== null && Math.abs(gap) > 0.5 ? "text-[#dc000c]" : "text-[#333333]"
+                }`}
+              >
+                {cumDiff !== null ? `${fmt(cumDiff)} kg` : "—"}
+                {gap !== null ? `（Δ ${gap > 0 ? "+" : ""}${fmt(gap)}）` : ""}
+              </span>
+            </div>
+            {gap !== null && Math.abs(gap) > 0.5 && (
+              <p className="mt-1.5 text-xs text-[#dc000c]">
+                累積差と自動計算のスクラップ重量に {fmt(Math.abs(gap))} kg
+                の差があります。計量を確認してください（そのまま記録も可能です）。
+              </p>
+            )}
+          </div>
+
+          {/* ④ 異常メモ */}
+          <label className="mt-4 flex flex-col gap-1 text-xs text-[#707070]">
+            <span className="text-xs font-bold text-[#707070]">
+              <FieldNo n="④" />
+              異常メモ
+            </span>
+            <input
+              type="text"
+              value={ijo}
+              onChange={(e) => setIjo(e.target.value)}
+              placeholder="異常があれば記入（例: 異物混入、計量やり直し）"
+              className={input}
+            />
+          </label>
 
           <button
             onClick={addEntry}

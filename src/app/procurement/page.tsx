@@ -63,7 +63,9 @@ export default async function ProcurementPage({
         title="調達入力"
         description="入荷（購入実績）とスクラップ売却数を毎日入力します。在庫は前日の理論在庫から自動計算され、棚卸等のズレは理由付きの在庫補正で記録します。"
       />
+      {/* 対象月・工場が変わったら入力状態を作り直す（前月の入力値が残らないようにする） */}
       <ProcurePanel
+        key={`${ym}|${factory}`}
         ym={ym}
         factory={factory}
         factoryOptions={factoryOptions}

@@ -4,7 +4,7 @@ import { monthlyItemRows } from "@/lib/calc";
 import { fmt, isYmStr, thisMonthStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
-import MonthPicker from "@/components/MonthPicker";
+import MonthNav from "@/components/MonthNav";
 import McframeImportButton from "@/components/McframeImportButton";
 
 export const dynamic = "force-dynamic";
@@ -48,7 +48,7 @@ export default async function McframePage({
           action={
             <>
               <McframeImportButton />
-              <MonthPicker ym={ym} />
+              <MonthNav ym={ym} />
               <a
                 href={`/api/export?type=mcframe&ym=${ym}`}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"

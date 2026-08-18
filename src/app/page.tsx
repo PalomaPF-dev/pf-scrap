@@ -6,7 +6,7 @@ import { KUBUN_LIST } from "@/lib/db";
 import { fmt, fmtPct, isYmStr, thisMonthStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
-import MonthPicker from "@/components/MonthPicker";
+import MonthNav from "@/components/MonthNav";
 import FactorySelect from "@/components/FactorySelect";
 import { listFactoryOptions } from "@/lib/db";
 
@@ -90,7 +90,7 @@ export default async function DashboardPage({
             ) : (
               <FactorySelect factory={factory ?? ""} options={factoryOptions} />
             )}
-            <MonthPicker ym={ym} />
+            <MonthNav ym={ym} />
             <a
               href={`/api/export?type=recon&year=${year}${factory ? `&factory=${encodeURIComponent(factory)}` : ""}`}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"

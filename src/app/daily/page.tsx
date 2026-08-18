@@ -13,7 +13,7 @@ import {
 import { fmt, fmtPct, isDateStr, isYmStr, thisMonthStr, todayStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
-import MonthPicker from "@/components/MonthPicker";
+import MonthNav from "@/components/MonthNav";
 import DailyRecordForm from "@/components/DailyRecordForm";
 import DeleteDailyButton from "@/components/DeleteDailyButton";
 
@@ -98,18 +98,66 @@ export default async function DailyPage({
       <section className="mt-6 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-bold text-[#333333]">月間集計</h2>
-          <div className="flex items-center gap-2">
-            <MonthPicker ym={ym} />
+          <div className="flex flex-wrap items-center gap-2">
+            <MonthNav ym={ym} />
             <a
               href={`/api/export?type=daily&ym=${ym}`}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
             >
               <FileDown className="h-4 w-4" />
               CSV出力
             </a>
           </div>
         </div>
-        <div className="overflow-x-auto">
+
+        {/* モバイル: 日別カード */}
+        <ul className="space-y-2 sm:hidden">
+          {agg.length === 0 && (
+            <li className="rounded-xl bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
+              対象月の記録がありません
+            </li>
+          )}
+          {agg.map((r) => (
+            <li key={`m-${r.recordDate}|${r.factory}`} className="rounded-xl border border-[#e5e5e5] p-3">
+              <a
+                href={`/daily?date=${r.recordDate}&factory=${encodeURIComponent(r.factory)}&ym=${ym}`}
+                className="flex items-center justify-between gap-2"
+              >
+                <span className="min-w-0">
+                  <span className="text-sm font-bold text-[#b4632c]">{r.recordDate}</span>
+                  <span className="ml-2 text-xs text-[#707070]">{r.factory}</span>
+                  <span className="mt-0.5 block text-xs text-[#909090]">
+                    上銅 {fmt(r.byKind["上銅"])} ／ 銅ダライ {fmt(r.byKind["銅ダライ"])}
+                  </span>
+                </span>
+                <span className="shrink-0 text-right">
+                  <span className="block text-lg font-bold tabular-nums">{fmt(r.total)}</span>
+                  <span
+                    className={`mt-0.5 inline-block rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+                      r.status === "approved"
+                        ? "bg-[#eef4ee] text-[#2f6b2f]"
+                        : r.status === "pending"
+                          ? "bg-[#fff3e0] text-[#a15c00]"
+                          : r.status === "rejected"
+                            ? "bg-[#fdecea] text-[#dc000c]"
+                            : "bg-[#eeeeee] text-[#555555]"
+                    }`}
+                  >
+                    {DAILY_STATUS_LABEL[r.status]}
+                  </span>
+                </span>
+              </a>
+            </li>
+          ))}
+          {agg.length > 0 && (
+            <li className="flex items-center justify-between rounded-xl bg-[#faf6ef] px-3 py-2.5 text-sm font-semibold">
+              <span>月間合計（{agg.length}日分）</span>
+              <span className="tabular-nums">{fmt(monthTotal.total)} kg</span>
+            </li>
+          )}
+        </ul>
+
+        <div className="hidden overflow-x-auto sm:block">
           <table className="print-table w-full border-collapse text-sm">
             <thead>
               <tr>

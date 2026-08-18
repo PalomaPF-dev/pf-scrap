@@ -30,7 +30,7 @@ type Draft = {
   factory: string;
 };
 
-const emptyDraft = (): Draft => ({
+const emptyDraft = (factory: string): Draft => ({
   id: null,
   kanriZuban: "",
   hinmei: "",
@@ -44,7 +44,7 @@ const emptyDraft = (): Draft => ({
   kanseiJuryo: "",
   seizoBashoCD: "",
   seizoBashoMei: "",
-  factory: "大口",
+  factory,
 });
 
 const toDraft = (it: ScrapItem): Draft => ({
@@ -68,9 +68,12 @@ const toDraft = (it: ScrapItem): Draft => ({
 export default function ItemsTable({
   items,
   truncated,
+  factoryOptions,
 }: {
   items: ScrapItem[];
   truncated: boolean;
+  /** 工場マスタ（新規登録時の既定値・選択肢。ポータル配信の名称と揃える） */
+  factoryOptions: string[];
 }) {
   const router = useRouter();
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -132,7 +135,7 @@ export default function ItemsTable({
         <button
           onClick={() => {
             setError("");
-            setDraft(emptyDraft());
+            setDraft(emptyDraft(factoryOptions[0] ?? ""));
           }}
           className="inline-flex items-center gap-1.5 rounded-lg bg-[#b4632c] px-3 py-2 text-sm font-semibold text-white hover:bg-[#96521f]"
         >
@@ -255,7 +258,24 @@ export default function ItemsTable({
               {field("構成重量(kg/個)", "koseiJuryo", { required: true, type: "number" })}
               {field("完成重量(理論値 kg/個)", "kanseiJuryo", { type: "number" })}
               {field("製造場所名", "seizoBashoMei")}
-              {field("工場", "factory")}
+              <label className="flex flex-col gap-1 text-xs text-[#707070]">
+                工場
+                <select
+                  value={draft.factory}
+                  onChange={(e) => set({ factory: e.target.value })}
+                  className={input}
+                >
+                  <option value="">（未設定）</option>
+                  {!factoryOptions.includes(draft.factory) && draft.factory !== "" && (
+                    <option value={draft.factory}>{draft.factory}</option>
+                  )}
+                  {factoryOptions.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
             {error && (
               <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

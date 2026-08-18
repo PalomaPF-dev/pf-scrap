@@ -1,6 +1,6 @@
 import { FileDown, QrCode } from "lucide-react";
 import { requireAdminPage } from "@/lib/session";
-import { listItems, type ScrapItem } from "@/lib/db";
+import { listFactoryOptions, listItems, type ScrapItem } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import SearchBox from "@/components/SearchBox";
@@ -20,8 +20,12 @@ export default async function ItemsPage({
   const q = (sp.q ?? "").trim();
 
   let items: ScrapItem[];
+  let factoryOptions: string[];
   try {
-    ({ items } = await listItems(session.companyId, { q, limit: 500 }));
+    [{ items }, factoryOptions] = await Promise.all([
+      listItems(session.companyId, { q, limit: 500 }),
+      listFactoryOptions(session.companyId),
+    ]);
   } catch (e) {
     console.error("[items]", e);
     return (
@@ -60,7 +64,7 @@ export default async function ItemsPage({
       <div className="mb-4">
         <SearchBox q={q} placeholder="子図番・親図番・管理図番・KEY・品名で検索" />
       </div>
-      <ItemsTable items={items} truncated={items.length >= 500} />
+      <ItemsTable items={items} truncated={items.length >= 500} factoryOptions={factoryOptions} />
     </div>
   );
 }

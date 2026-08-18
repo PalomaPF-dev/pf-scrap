@@ -14,7 +14,7 @@ import {
 import type { InventoryAdjustment, MonthlyInput, ProcureDay } from "@/lib/db";
 import { downloadCsv, parseCsv, readTextFile } from "@/lib/csv";
 import { fmt, toNum, todayStr } from "@/lib/format";
-import MonthPicker from "@/components/MonthPicker";
+import MonthNav from "@/components/MonthNav";
 
 const td = "border border-[#e5e5e5] px-2 py-1 whitespace-nowrap";
 const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2 py-1.5 text-center font-semibold whitespace-nowrap";
@@ -85,6 +85,8 @@ export default function ProcurePanel({
   }, [ym, days]);
 
   const [rows, setRows] = useState<Row[]>(initialRows);
+  // 月の全日を並べると長いので、入力済みの日だけに絞り込めるようにする
+  const [onlyFilled, setOnlyFilled] = useState(false);
   const [zaikoDojo, setZaikoDojo] = useState(s(anchor?.zaikoDojo));
   const [zaikoDokan, setZaikoDokan] = useState(s(anchor?.zaikoDokan));
   const [zaikoSonota, setZaikoSonota] = useState(s(anchor?.zaikoSonota));
@@ -105,6 +107,14 @@ export default function ProcurePanel({
   function setRow(i: number, k: keyof Row, v: string) {
     setRows((prev) => prev.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
   }
+
+  const filled = (r: Row) =>
+    Boolean(r.konyuDojo || r.konyuDokan || r.konyuSonota || r.baikyaku || r.note);
+  const visibleRows = useMemo(
+    () => rows.map((r, i) => ({ r, i })).filter(({ r }) => !onlyFilled || filled(r)),
+    [rows, onlyFilled]
+  );
+  const filledCount = useMemo(() => rows.filter(filled).length, [rows]);
 
   const totals = useMemo(() => {
     const t = { dojo: 0, dokan: 0, sonota: 0, baikyaku: 0 };
@@ -255,17 +265,18 @@ export default function ProcurePanel({
     <div className="space-y-4">
       {/* 対象月・工場・操作 */}
       <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-        <div className="flex flex-wrap items-center gap-3">
-          <MonthPicker ym={ym} />
+        {/* 対象月は ◀ ▶ で移動。工場と合わせて、選んだ月のデータだけを表示する */}
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <MonthNav ym={ym} />
           {factoryLocked ? (
-            <span className="rounded-lg border border-[#e5e5e5] bg-[#f7f7f5] px-3 py-1.5 text-sm">
+            <span className="flex h-10 items-center rounded-lg border border-[#e5e5e5] bg-[#f7f7f5] px-3 text-sm">
               {factory}
             </span>
           ) : (
             <select
               value={factory}
               onChange={(e) => moveTo({ factory: e.target.value })}
-              className={input}
+              className={`${input} h-10`}
             >
               {!factoryOptions.includes(factory) && <option value={factory}>{factory}</option>}
               {factoryOptions.map((f) => (
@@ -275,6 +286,8 @@ export default function ProcurePanel({
               ))}
             </select>
           )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={save}
             disabled={pending}
@@ -346,10 +359,75 @@ export default function ProcurePanel({
 
       {/* 日次グリッド */}
       <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-        <h2 className="mb-3 text-sm font-bold text-[#333333]">
-          {ym} 入荷・売却の日次入力（{factory}）
-        </h2>
-        <div className="overflow-x-auto">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-bold text-[#333333]">
+            {ym} 入荷・売却の日次入力（{factory}）
+          </h2>
+          <label className="flex items-center gap-2 text-sm text-[#555555]">
+            <input
+              type="checkbox"
+              checked={onlyFilled}
+              onChange={(e) => setOnlyFilled(e.target.checked)}
+              className="h-4 w-4 accent-[#b4632c]"
+            />
+            入力のある日だけ表示（{filledCount}日）
+          </label>
+        </div>
+
+        {/* モバイル: 日ごとのカード */}
+        <ul className="space-y-2 sm:hidden">
+          {visibleRows.length === 0 && (
+            <li className="rounded-xl bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
+              入力のある日がありません。
+            </li>
+          )}
+          {visibleRows.map(({ r, i }) => (
+            <li key={r.pdate} className="rounded-xl border border-[#e5e5e5] p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-sm font-bold tabular-nums">{r.pdate.slice(5)}</span>
+                <span className="text-xs text-[#909090]">{r.recordedBy}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {(
+                  [
+                    ["購入 銅条(kg)", "konyuDojo"],
+                    ["購入 銅管(kg)", "konyuDokan"],
+                    ["購入 その他(kg)", "konyuSonota"],
+                    ["売却(kg)", "baikyaku"],
+                  ] as const
+                ).map(([label, k]) => (
+                  <label key={k} className="flex flex-col gap-1 text-xs text-[#707070]">
+                    {label}
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.1"
+                      value={r[k]}
+                      onChange={(e) => setRow(i, k, e.target.value)}
+                      className="h-11 rounded-lg border border-[#e5e5e5] bg-white px-3 text-right text-base tabular-nums focus:border-[#b4632c] focus:outline-none"
+                    />
+                  </label>
+                ))}
+              </div>
+              <input
+                type="text"
+                value={r.note}
+                onChange={(e) => setRow(i, "note", e.target.value)}
+                placeholder="備考"
+                className="mt-2 h-11 w-full rounded-lg border border-[#e5e5e5] bg-white px-3 text-base focus:border-[#b4632c] focus:outline-none"
+              />
+            </li>
+          ))}
+          <li className="flex items-center justify-between rounded-xl bg-[#faf6ef] px-3 py-2.5 text-sm font-semibold">
+            <span>月間合計 購入</span>
+            <span className="tabular-nums">
+              {fmt(totals.dojo + totals.dokan + totals.sonota)} kg ／ 売却 {fmt(totals.baikyaku)} kg
+            </span>
+          </li>
+        </ul>
+
+        {/* PC: 表 */}
+        <div className="hidden overflow-x-auto sm:block">
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr>
@@ -363,7 +441,14 @@ export default function ProcurePanel({
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {visibleRows.length === 0 && (
+                <tr>
+                  <td className={td} colSpan={7}>
+                    入力のある日がありません。
+                  </td>
+                </tr>
+              )}
+              {visibleRows.map(({ r, i }) => (
                 <tr key={r.pdate} className={r.recordedBy ? "" : "bg-[#fcfcfb]"}>
                   <td className={`${td} tabular-nums`}>{r.pdate.slice(5)}</td>
                   <td className={`${td} text-right`}>

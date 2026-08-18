@@ -304,7 +304,8 @@ export async function saveDailyRecordAction(input: {
       factory,
       sekininsha: asStr(input.sekininsha, 50) || s.userName,
       zenjitsuOk: Boolean(input.zenjitsuOk),
-      hakoZanryo: toNum(input.hakoZanryo),
+      // 始業時スクラップ箱残量は管理者のみが入力できる（一般ユーザーの送信値は無視）
+      hakoZanryo: isAdmin ? toNum(input.hakoZanryo) : (prev?.hakoZanryo ?? 0),
       kaishuSokuteichi: toNumOrNull(input.kaishuSokuteichi),
       tonyuKanryo: Boolean(input.tonyuKanryo),
       shonin: prev?.shonin ?? "",

@@ -550,7 +550,9 @@ export async function dailyMonthTotals(
 
 export async function listFirstArticles(
   companyId: string,
-  limit = 200
+  limit = 200,
+  /** 指定すると、その工場の品目の測定記録だけを返す（品目マスターの工場で判定） */
+  factory: string | null = null
 ): Promise<FirstArticle[]> {
   await ensureSchema();
   const sql = getSql();
@@ -565,6 +567,10 @@ export async function listFirstArticles(
         ORDER BY i.ko_zuban LIMIT 1) AS kansei_juryo
     FROM scrap_first_articles f
     WHERE f.company_id = ${companyId}
+      AND (${factory}::text IS NULL OR EXISTS (
+        SELECT 1 FROM scrap_items i
+        WHERE i.company_id = f.company_id AND i.key = f.item_key
+          AND (i.factory = ${factory} OR i.factory = '')))
     ORDER BY f.measured_on DESC, f.item_key
     LIMIT ${limit}`;
   return rows.map((r: any) => ({

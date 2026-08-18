@@ -227,21 +227,22 @@ export default function FirstArticlePanel({
             工場が登録されていません。管理者にポータルの工場マスタ配信を依頼してください。
           </p>
         ) : (
-          <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+          // 工場が増えても並びが崩れないよう、タイルではなく選択式にする
+          <select
+            value={factory}
+            onChange={(e) => moveToFactory(e.target.value)}
+            aria-label="工場"
+            className={`${input} w-full sm:w-64`}
+          >
+            {!factoryOptions.includes(factory) && factory !== "" && (
+              <option value={factory}>{factory}</option>
+            )}
             {factoryOptions.map((f) => (
-              <button
-                key={f}
-                onClick={() => moveToFactory(f)}
-                className={`h-12 rounded-xl px-4 text-sm font-semibold sm:h-11 ${
-                  f === factory
-                    ? "bg-[#b4632c] text-white"
-                    : "border border-[#e5e5e5] bg-white text-[#555555] hover:bg-[#f7f7f5]"
-                }`}
-              >
+              <option key={f} value={f}>
                 {f}
-              </button>
+              </option>
             ))}
-          </div>
+          </select>
         )}
       </Step>
 

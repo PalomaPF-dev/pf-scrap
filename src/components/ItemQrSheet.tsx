@@ -61,52 +61,57 @@ export default function ItemQrSheet({
     router.push(`${pathname}?${q.toString()}`);
   }
 
-  const chip = (active: boolean) =>
-    `h-11 rounded-xl px-4 text-sm font-semibold ${
-      active
-        ? "bg-[#b4632c] text-white"
-        : "border border-[#e5e5e5] bg-white text-[#555555] hover:bg-[#f7f7f5]"
-    }`;
+  // 工場・職場が増えても並びが崩れないよう、タイルではなく選択式にする
+  const select =
+    "h-11 w-full rounded-lg border border-[#e5e5e5] bg-white px-3 text-base focus:border-[#b4632c] focus:outline-none sm:h-10 sm:w-64 sm:text-sm";
 
+  // total = いま表示している品目数（印刷ボタン用）。allCount = その工場の全品目数
   const total = groups.reduce((t, g) => t + g.items.length, 0);
+  const allCount = workplaces.reduce((t, w) => t + w.count, 0);
 
   return (
     <div>
       <div className="no-print mb-4 space-y-3">
-        <div>
-          <div className="mb-1.5 text-xs font-bold text-[#707070]">1. 工場を選ぶ</div>
-          {factoryOptions.length === 0 ? (
-            <p className="rounded-lg bg-[#fff3e0] px-3 py-2 text-sm text-[#a15c00]">
-              工場が登録されていません。
-            </p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {factoryOptions.map((f) => (
-                <button key={f} onClick={() => go({ factory: f })} className={chip(f === factory)}>
-                  {f}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div>
-          <div className="mb-1.5 text-xs font-bold text-[#707070]">2. 職場を選ぶ（任意）</div>
-          <div className="flex flex-wrap gap-2">
-            <button onClick={() => go({ workplace: "" })} className={chip(!workplace)}>
-              すべて
-            </button>
-            {workplaces.map((w) => (
-              <button
-                key={w.name}
-                onClick={() => go({ workplace: w.name })}
-                className={chip(w.name === workplace)}
+        {factoryOptions.length === 0 ? (
+          <p className="rounded-lg bg-[#fff3e0] px-3 py-2 text-sm text-[#a15c00]">
+            工場が登録されていません。
+          </p>
+        ) : (
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <label className="flex flex-col gap-1 text-xs font-bold text-[#707070]">
+              1. 工場を選ぶ
+              <select
+                value={factory}
+                onChange={(e) => go({ factory: e.target.value })}
+                className={select}
               >
-                {w.name}（{w.count}）
-              </button>
-            ))}
+                {!factoryOptions.includes(factory) && factory !== "" && (
+                  <option value={factory}>{factory}</option>
+                )}
+                {factoryOptions.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-bold text-[#707070]">
+              2. 職場を選ぶ（任意）
+              <select
+                value={workplace}
+                onChange={(e) => go({ workplace: e.target.value })}
+                className={select}
+              >
+                <option value="">すべて（{allCount}品目）</option>
+                {workplaces.map((w) => (
+                  <option key={w.name} value={w.name}>
+                    {w.name}（{w.count}）
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
-        </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-3">
           <button

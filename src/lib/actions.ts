@@ -566,6 +566,11 @@ export async function importMcframeAction(
       }
       months.push({ ym, itemKey, qty: toNum(r.qty) });
     }
+    if (!days.length && !months.length) {
+      return fail(
+        "日付（または年月）とKEYを読み取れる行がありませんでした。日別は「KEY, 日付, 加工数」、過去データ移行の月次は「KEY, 年月, 加工数」の形式で、取込ボタンを使い分けてください。"
+      );
+    }
     const dayCount = days.length ? await upsertMcframeDays(s.companyId, days) : 0;
     const monthCount = months.length ? await upsertMcframeQty(s.companyId, months) : 0;
     revalidatePath("/mcframe");

@@ -48,7 +48,7 @@ export default async function McframePage({
       <div className="p-4 sm:p-6">
         <PageHeader
           title="McFrame取込"
-          description="品目マスターのKEY単位で完成品数量（加工数）を取り込みます。CSV形式: KEY,日付,加工数（日別）または KEY,年月,加工数（月次）。「管理図番,製造場所CD,日付/年月,加工数」の4列も可。日付は 2026/8/5・2026-08-05、年月は 2026/08・202608 いずれも可。同じ日付(年月)×KEYは上書きされます。"
+          description="品目マスターのKEY単位で完成品数量（加工数）を日別に取り込みます。CSV形式: KEY,日付,加工数（「管理図番,製造場所CD,日付,加工数」の4列も可 / 日付は 2026/8/5・2026-08-05 いずれも可）。月次の集計値は日別の合計で出るため、月次CSVの取込は日別データが無い過去期間の移行にだけ使います。同じ日付×KEYは上書きされます。"
           action={
             <>
               <McframeImportButton />
@@ -72,8 +72,10 @@ export default async function McframePage({
           </p>
           {dayTotals.length === 0 ? (
             <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
-              この月は日別の加工数がありません（月次の取込値で集計しています）。
-              CSVに「日付」列を付けて取り込むと、日ごとの完成品重量が出せます。
+              この月は日別の加工数がありません。
+              {rows.length > 0
+                ? "下の品目別集計は、過去データ移行で取り込んだ月次値を使っています。"
+                : "「CSV取込（日別）」から KEY, 日付, 加工数 のCSVを取り込んでください。"}
             </p>
           ) : (
             <div className="overflow-x-auto">

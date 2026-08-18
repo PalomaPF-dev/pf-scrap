@@ -235,6 +235,7 @@ export async function monthlySummary(
       method: null,
     };
   }
+  const hasBom = itemRows.length > 0;
   for (const r of itemRows) {
     const kb = (KUBUN_LIST as readonly string[]).includes(r.kubun) ? r.kubun : "その他";
     perKubun[kb].usageBom += r.usage;
@@ -252,7 +253,9 @@ export async function monthlySummary(
     }
     const usage = t.usageInv !== null ? t.usageInv : t.usageBom;
     t.method = t.usageInv !== null ? "在庫法" : "構成法";
-    t.scrapTheo = usage - t.finished;
+    // 完成重量が算出できない月（McFrame加工数が未取込）は理論スクラップも不明とする。
+    // 0扱いにすると「使用量まるごとがスクラップ」という誤った数字になる。
+    t.scrapTheo = hasBom ? usage - t.finished : null;
   }
   {
     const t = perKubun["全体"];
@@ -265,7 +268,7 @@ export async function monthlySummary(
     }
     const usage = t.usageInv !== null ? t.usageInv : t.usageBom;
     t.method = t.usageInv !== null ? "在庫法" : "構成法";
-    t.scrapTheo = usage - t.finished;
+    t.scrapTheo = hasBom ? usage - t.finished : null;
   }
 
   // 売却数量: 日次調達の月間集計を優先（無い月は月次保存値）
@@ -325,7 +328,7 @@ export async function yearSummary(
       usage: g.usageInv !== null ? g.usageInv : s.itemRows.length ? g.usageBom : null,
       usageBom: s.itemRows.length ? g.usageBom : null,
       finished: s.itemRows.length ? g.finished : null,
-      scrapTheo: g.zaiko !== null || s.itemRows.length ? g.scrapTheo : null,
+      scrapTheo: s.itemRows.length ? g.scrapTheo : null,
       baikyaku: s.baikyaku,
       daily: s.daily.days ? s.daily.total : null,
       diff7sell: s.diff7sell,

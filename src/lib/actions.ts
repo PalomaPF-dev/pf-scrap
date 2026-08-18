@@ -28,6 +28,7 @@ import {
   updateFirstArticleStatus,
   upsertFirstArticle,
   upsertItem,
+  bulkUpsertItems,
   upsertMcframeQty,
   upsertProcureDays,
   upsertScale,
@@ -115,8 +116,8 @@ export async function importItemsAction(
     const s = await requireAdminSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 5000) return fail("一度に取込できるのは5,000行までです。");
-    let count = 0;
     let skipped = 0;
+    const clean = [];
     for (const r of rows) {
       const kanriZuban = asStr(r.kanriZuban, 50);
       const seizoBashoCD = asStr(r.seizoBashoCD, 50);
@@ -129,7 +130,7 @@ export async function importItemsAction(
       const kz = kanriZuban || (seizoBashoCD && key.endsWith(seizoBashoCD)
         ? key.slice(0, key.length - seizoBashoCD.length)
         : key);
-      await upsertItem(s.companyId, {
+      clean.push({
         kanriZuban: kz,
         hinmei: asStr(r.hinmei),
         key,
@@ -145,8 +146,8 @@ export async function importItemsAction(
         seizoBashoMei: asStr(r.seizoBashoMei),
         factory: asStr(r.factory, 50),
       });
-      count++;
     }
+    const count = await bulkUpsertItems(s.companyId, clean);
     revalidatePath("/items");
     return { ok: true, message: `品目マスター取込完了: ${count}件 / スキップ ${skipped}件` };
   } catch (e) {

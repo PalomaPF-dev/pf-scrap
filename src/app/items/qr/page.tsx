@@ -1,5 +1,6 @@
 import { requireAdminPage } from "@/lib/session";
 import { listFactoryOptions, listItems, type ScrapItem } from "@/lib/db";
+import { itemRef } from "@/lib/scrapTypes";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import ItemQrSheet from "@/components/ItemQrSheet";
@@ -38,13 +39,14 @@ export default async function ItemsQrPage({
     );
   }
 
-  // KEY単位（完成品単位）に集約し、職場（製造場所名）ごとにグループ化
-  const byKey = new Map<string, ScrapItem>();
+  // 品目単位（品目CD×格納場所CD）に集約し、職場（製造場所名）ごとにグループ化
+  const byRef = new Map<string, ScrapItem>();
   for (const it of items) {
-    if (!byKey.has(it.key)) byKey.set(it.key, it);
+    const ref = itemRef(it.kanriZuban, it.kakunoCD);
+    if (!byRef.has(ref)) byRef.set(ref, it);
   }
   const groups = new Map<string, ScrapItem[]>();
-  for (const it of byKey.values()) {
+  for (const it of byRef.values()) {
     const g = it.seizoBashoMei || it.factory || "（職場未設定）";
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g)!.push(it);

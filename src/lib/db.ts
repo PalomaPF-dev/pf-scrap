@@ -58,7 +58,6 @@ function mapItem(r: any): ScrapItem {
     id: r.id,
     kanriZuban: r.kanri_zuban,
     hinmei: r.hinmei,
-    key: r.key,
     kubun: r.kubun,
     oyaZuban: r.oya_zuban,
     oyaHinmei: r.oya_hinmei,
@@ -69,6 +68,8 @@ function mapItem(r: any): ScrapItem {
     kanseiJuryo: num(r.kansei_juryo),
     seizoBashoCD: r.seizo_basho_cd,
     seizoBashoMei: r.seizo_basho_mei,
+    kakunoCD: r.kakuno_cd ?? "",
+    kakunoMei: r.kakuno_mei ?? "",
     factory: r.factory,
   };
 }
@@ -92,12 +93,12 @@ export async function listItems(
   const like = `%${q}%`;
   const factory = opts.factory ?? null;
   const workplace = (opts.workplace ?? "").trim() || null;
-  // 子図番・親図番・管理図番・KEY・品名で検索（子図番での呼び出しが主用途）
+  // 子図番・親図番・品目CD・格納場所CD・品名で検索（子図番での呼び出しが主用途）
   const rows = await sql`
     SELECT *, COUNT(*) OVER() AS total FROM scrap_items
     WHERE company_id = ${companyId}
       AND (${q} = '' OR ko_zuban ILIKE ${like} OR oya_zuban ILIKE ${like}
-           OR kanri_zuban ILIKE ${like} OR key ILIKE ${like}
+           OR kanri_zuban ILIKE ${like} OR kakuno_cd ILIKE ${like}
            OR hinmei ILIKE ${like} OR ko_hinmei ILIKE ${like} OR oya_hinmei ILIKE ${like})
       AND (${factory}::text IS NULL OR factory = ${factory} OR factory = '')
       AND (${workplace}::text IS NULL OR seizo_basho_mei = ${workplace})
@@ -114,7 +115,7 @@ export async function listItemWorkplaces(
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
-    SELECT seizo_basho_mei AS name, COUNT(DISTINCT key) AS cnt
+    SELECT seizo_basho_mei AS name, COUNT(DISTINCT (kanri_zuban || '\t' || kakuno_cd)) AS cnt
     FROM scrap_items
     WHERE company_id = ${companyId} AND seizo_basho_mei <> ''
       AND (${factory}::text IS NULL OR factory = ${factory} OR factory = '')
@@ -131,7 +132,7 @@ export async function getItemById(companyId: string, id: string): Promise<ScrapI
   return rows[0] ? mapItem(rows[0]) : null;
 }
 
-/** KEY×子図番で upsert。id を返す。 */
+/** 品目CD×格納場所CD×子図番で upsert。id を返す。 */
 export async function upsertItem(
   companyId: string,
   it: Omit<ScrapItem, "id">
@@ -140,15 +141,16 @@ export async function upsertItem(
   const sql = getSql();
   const rows = await sql`
     INSERT INTO scrap_items (
-      company_id, kanri_zuban, hinmei, key, kubun, oya_zuban, oya_hinmei,
+      company_id, kanri_zuban, hinmei, kubun, oya_zuban, oya_hinmei,
       ko_zuban, ko_hinmei, tani, kosei_juryo, kansei_juryo,
-      seizo_basho_cd, seizo_basho_mei, factory
+      seizo_basho_cd, seizo_basho_mei, kakuno_cd, kakuno_mei, factory
     ) VALUES (
-      ${companyId}, ${it.kanriZuban}, ${it.hinmei}, ${it.key}, ${it.kubun},
+      ${companyId}, ${it.kanriZuban}, ${it.hinmei}, ${it.kubun},
       ${it.oyaZuban}, ${it.oyaHinmei}, ${it.koZuban}, ${it.koHinmei}, ${it.tani},
-      ${it.koseiJuryo}, ${it.kanseiJuryo}, ${it.seizoBashoCD}, ${it.seizoBashoMei}, ${it.factory}
+      ${it.koseiJuryo}, ${it.kanseiJuryo}, ${it.seizoBashoCD}, ${it.seizoBashoMei},
+      ${it.kakunoCD}, ${it.kakunoMei}, ${it.factory}
     )
-    ON CONFLICT (company_id, key, ko_zuban) DO UPDATE SET
+    ON CONFLICT (company_id, kanri_zuban, kakuno_cd, ko_zuban) DO UPDATE SET
       kanri_zuban = EXCLUDED.kanri_zuban,
       hinmei = EXCLUDED.hinmei,
       kubun = EXCLUDED.kubun,
@@ -160,6 +162,7 @@ export async function upsertItem(
       kansei_juryo = EXCLUDED.kansei_juryo,
       seizo_basho_cd = EXCLUDED.seizo_basho_cd,
       seizo_basho_mei = EXCLUDED.seizo_basho_mei,
+      kakuno_mei = EXCLUDED.kakuno_mei,
       factory = EXCLUDED.factory,
       updated_at = NOW()
     RETURNING id`;
@@ -181,27 +184,29 @@ export async function bulkUpsertItems(
   // 同一チャンク内に同じ一意キーが2行あると ON CONFLICT DO UPDATE がエラーになるため、
   // 取込前に重複を畳む（後勝ち）。
   const uniq = new Map<string, Omit<ScrapItem, "id">>();
-  for (const it of items) uniq.set(`${it.key}\t${it.koZuban}`, it);
+  for (const it of items) uniq.set(`${it.kanriZuban}\t${it.kakunoCD}\t${it.koZuban}`, it);
   const list = [...uniq.values()];
   let count = 0;
   for (let i = 0; i < list.length; i += chunkSize) {
     const c = list.slice(i, i + chunkSize);
     await sql`
       INSERT INTO scrap_items (
-        company_id, kanri_zuban, hinmei, key, kubun, oya_zuban, oya_hinmei,
+        company_id, kanri_zuban, hinmei, kubun, oya_zuban, oya_hinmei,
         ko_zuban, ko_hinmei, tani, kosei_juryo, kansei_juryo,
-        seizo_basho_cd, seizo_basho_mei, factory
+        seizo_basho_cd, seizo_basho_mei, kakuno_cd, kakuno_mei, factory
       )
       SELECT ${companyId}, * FROM unnest(
         ${c.map((x) => x.kanriZuban)}::text[], ${c.map((x) => x.hinmei)}::text[],
-        ${c.map((x) => x.key)}::text[], ${c.map((x) => x.kubun)}::text[],
+        ${c.map((x) => x.kubun)}::text[],
         ${c.map((x) => x.oyaZuban)}::text[], ${c.map((x) => x.oyaHinmei)}::text[],
         ${c.map((x) => x.koZuban)}::text[], ${c.map((x) => x.koHinmei)}::text[],
         ${c.map((x) => x.tani)}::text[], ${c.map((x) => x.koseiJuryo)}::numeric[],
         ${c.map((x) => x.kanseiJuryo)}::numeric[], ${c.map((x) => x.seizoBashoCD)}::text[],
-        ${c.map((x) => x.seizoBashoMei)}::text[], ${c.map((x) => x.factory)}::text[]
+        ${c.map((x) => x.seizoBashoMei)}::text[],
+        ${c.map((x) => x.kakunoCD)}::text[], ${c.map((x) => x.kakunoMei)}::text[],
+        ${c.map((x) => x.factory)}::text[]
       )
-      ON CONFLICT (company_id, key, ko_zuban) DO UPDATE SET
+      ON CONFLICT (company_id, kanri_zuban, kakuno_cd, ko_zuban) DO UPDATE SET
         kanri_zuban = EXCLUDED.kanri_zuban,
         hinmei = EXCLUDED.hinmei,
         kubun = EXCLUDED.kubun,
@@ -213,6 +218,7 @@ export async function bulkUpsertItems(
         kansei_juryo = EXCLUDED.kansei_juryo,
         seizo_basho_cd = EXCLUDED.seizo_basho_cd,
         seizo_basho_mei = EXCLUDED.seizo_basho_mei,
+        kakuno_mei = EXCLUDED.kakuno_mei,
         factory = EXCLUDED.factory,
         updated_at = NOW()`;
     count += c.length;
@@ -607,25 +613,29 @@ export async function listFirstArticles(
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
-    SELECT f.measured_on, f.item_key, f.weight, f.sokuteisha,
+    SELECT f.measured_on, f.hinmoku_cd, f.kakuno_cd, f.weight, f.sokuteisha,
       f.status, f.approved_by, f.reject_comment,
       (SELECT hinmei FROM scrap_items i
-        WHERE i.company_id = f.company_id AND i.key = f.item_key
+        WHERE i.company_id = f.company_id
+          AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
         ORDER BY i.ko_zuban LIMIT 1) AS hinmei,
       (SELECT kansei_juryo FROM scrap_items i
-        WHERE i.company_id = f.company_id AND i.key = f.item_key
+        WHERE i.company_id = f.company_id
+          AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
         ORDER BY i.ko_zuban LIMIT 1) AS kansei_juryo
     FROM scrap_first_articles f
     WHERE f.company_id = ${companyId}
       AND (${factory}::text IS NULL OR EXISTS (
         SELECT 1 FROM scrap_items i
-        WHERE i.company_id = f.company_id AND i.key = f.item_key
+        WHERE i.company_id = f.company_id
+          AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
           AND (i.factory = ${factory} OR i.factory = '')))
-    ORDER BY f.measured_on DESC, f.item_key
+    ORDER BY f.measured_on DESC, f.hinmoku_cd, f.kakuno_cd
     LIMIT ${limit}`;
   return rows.map((r: any) => ({
     measuredOn: dateStr(r.measured_on),
-    itemKey: r.item_key,
+    hinmokuCD: r.hinmoku_cd,
+    kakunoCD: r.kakuno_cd,
     weight: num(r.weight),
     sokuteisha: r.sokuteisha,
     status: (r.status ?? "approved") as FaStatus,
@@ -639,14 +649,22 @@ export async function listFirstArticles(
 /** 登録＝管理者への申請（status='pending'）。再登録は再申請扱い。 */
 export async function upsertFirstArticle(
   companyId: string,
-  fa: { measuredOn: string; itemKey: string; weight: number; sokuteisha: string }
+  fa: {
+    measuredOn: string;
+    hinmokuCD: string;
+    kakunoCD: string;
+    weight: number;
+    sokuteisha: string;
+  }
 ): Promise<void> {
   await ensureSchema();
   const sql = getSql();
   await sql`
-    INSERT INTO scrap_first_articles (company_id, measured_on, item_key, weight, sokuteisha, status)
-    VALUES (${companyId}, ${fa.measuredOn}, ${fa.itemKey}, ${fa.weight}, ${fa.sokuteisha}, 'pending')
-    ON CONFLICT (company_id, measured_on, item_key) DO UPDATE SET
+    INSERT INTO scrap_first_articles
+      (company_id, measured_on, hinmoku_cd, kakuno_cd, weight, sokuteisha, status)
+    VALUES (${companyId}, ${fa.measuredOn}, ${fa.hinmokuCD}, ${fa.kakunoCD},
+            ${fa.weight}, ${fa.sokuteisha}, 'pending')
+    ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
       weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
       status = 'pending', approved_by = '', approved_at = NULL, reject_comment = ''`;
 }
@@ -655,7 +673,8 @@ export async function upsertFirstArticle(
 export async function updateFirstArticleStatus(
   companyId: string,
   measuredOn: string,
-  itemKey: string,
+  hinmokuCD: string,
+  kakunoCD: string,
   patch:
     | { status: "approved"; approvedBy: string }
     | { status: "rejected"; approvedBy: string; rejectComment: string }
@@ -666,13 +685,15 @@ export async function updateFirstArticleStatus(
     await sql`
       UPDATE scrap_first_articles SET status = 'approved',
         approved_by = ${patch.approvedBy}, approved_at = NOW(), reject_comment = ''
-      WHERE company_id = ${companyId} AND measured_on = ${measuredOn} AND item_key = ${itemKey}`;
+      WHERE company_id = ${companyId} AND measured_on = ${measuredOn}
+        AND hinmoku_cd = ${hinmokuCD} AND kakuno_cd = ${kakunoCD}`;
   } else {
     await sql`
       UPDATE scrap_first_articles SET status = 'rejected',
         approved_by = ${patch.approvedBy}, approved_at = NOW(),
         reject_comment = ${patch.rejectComment}
-      WHERE company_id = ${companyId} AND measured_on = ${measuredOn} AND item_key = ${itemKey}`;
+      WHERE company_id = ${companyId} AND measured_on = ${measuredOn}
+        AND hinmoku_cd = ${hinmokuCD} AND kakuno_cd = ${kakunoCD}`;
   }
 }
 
@@ -689,69 +710,87 @@ export async function countPendingFirstArticles(companyId: string): Promise<numb
 export async function deleteFirstArticle(
   companyId: string,
   measuredOn: string,
-  itemKey: string
+  hinmokuCD: string,
+  kakunoCD: string
 ): Promise<void> {
   await ensureSchema();
   const sql = getSql();
   await sql`
     DELETE FROM scrap_first_articles
-    WHERE company_id = ${companyId} AND measured_on = ${measuredOn} AND item_key = ${itemKey}`;
+    WHERE company_id = ${companyId} AND measured_on = ${measuredOn}
+      AND hinmoku_cd = ${hinmokuCD} AND kakuno_cd = ${kakunoCD}`;
 }
 
 // ===== ④ McFrame取込 =====
 
-/** 年月×KEY で upsert（再取込は上書き）。取込件数を返す。 */
+/** McFrame取込の1行。品目は「品目CD × 格納場所CD」の組で特定する。 */
+export interface McframeQtyRow {
+  ym: string;
+  hinmokuCD: string;
+  kakunoCD: string;
+  qty: number;
+}
+export interface McframeDayRow {
+  qdate: string;
+  hinmokuCD: string;
+  kakunoCD: string;
+  qty: number;
+}
+
+/** 年月×品目CD×格納場所CD で upsert（再取込は上書き）。取込件数を返す。 */
 export async function upsertMcframeQty(
   companyId: string,
-  rows: { ym: string; itemKey: string; qty: number }[]
+  rows: McframeQtyRow[]
 ): Promise<number> {
   await ensureSchema();
   const sql = getSql();
   // 1行ずつ往復すると数千件の取込がサーバーレスのタイムアウトに掛かるため、
-  // 重複（年月×KEY）を畳んだうえで unnest による複数行INSERTにまとめる。
-  const uniq = new Map<string, { ym: string; itemKey: string; qty: number }>();
-  for (const r of rows) uniq.set(`${r.ym}\t${r.itemKey}`, r);
+  // 重複（年月×品目CD×格納場所CD）を畳んだうえで unnest による複数行INSERTにまとめる。
+  const uniq = new Map<string, McframeQtyRow>();
+  for (const r of rows) uniq.set(`${r.ym}\t${r.hinmokuCD}\t${r.kakunoCD}`, r);
   const list = [...uniq.values()];
   const chunkSize = 500;
   let count = 0;
   for (let i = 0; i < list.length; i += chunkSize) {
     const c = list.slice(i, i + chunkSize);
     await sql`
-      INSERT INTO scrap_mcframe_qty (company_id, ym, item_key, qty)
+      INSERT INTO scrap_mcframe_qty (company_id, ym, hinmoku_cd, kakuno_cd, qty)
       SELECT ${companyId}, * FROM unnest(
         ${c.map((x) => x.ym)}::text[],
-        ${c.map((x) => x.itemKey)}::text[],
+        ${c.map((x) => x.hinmokuCD)}::text[],
+        ${c.map((x) => x.kakunoCD)}::text[],
         ${c.map((x) => x.qty)}::numeric[]
       )
-      ON CONFLICT (company_id, ym, item_key) DO UPDATE SET
+      ON CONFLICT (company_id, ym, hinmoku_cd, kakuno_cd) DO UPDATE SET
         qty = EXCLUDED.qty, updated_at = NOW()`;
     count += c.length;
   }
   return count;
 }
 
-/** 日付×KEY で upsert（再取込は上書き）。取込件数を返す。 */
+/** 日付×品目CD×格納場所CD で upsert（再取込は上書き）。取込件数を返す。 */
 export async function upsertMcframeDays(
   companyId: string,
-  rows: { qdate: string; itemKey: string; qty: number }[]
+  rows: McframeDayRow[]
 ): Promise<number> {
   await ensureSchema();
   const sql = getSql();
-  const uniq = new Map<string, { qdate: string; itemKey: string; qty: number }>();
-  for (const r of rows) uniq.set(`${r.qdate}\t${r.itemKey}`, r);
+  const uniq = new Map<string, McframeDayRow>();
+  for (const r of rows) uniq.set(`${r.qdate}\t${r.hinmokuCD}\t${r.kakunoCD}`, r);
   const list = [...uniq.values()];
   const chunkSize = 500;
   let count = 0;
   for (let i = 0; i < list.length; i += chunkSize) {
     const c = list.slice(i, i + chunkSize);
     await sql`
-      INSERT INTO scrap_mcframe_days (company_id, qdate, item_key, qty)
+      INSERT INTO scrap_mcframe_days (company_id, qdate, hinmoku_cd, kakuno_cd, qty)
       SELECT ${companyId}, * FROM unnest(
         ${c.map((x) => x.qdate)}::date[],
-        ${c.map((x) => x.itemKey)}::text[],
+        ${c.map((x) => x.hinmokuCD)}::text[],
+        ${c.map((x) => x.kakunoCD)}::text[],
         ${c.map((x) => x.qty)}::numeric[]
       )
-      ON CONFLICT (company_id, qdate, item_key) DO UPDATE SET
+      ON CONFLICT (company_id, qdate, hinmoku_cd, kakuno_cd) DO UPDATE SET
         qty = EXCLUDED.qty, updated_at = NOW()`;
     count += c.length;
   }

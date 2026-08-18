@@ -23,7 +23,9 @@ import {
  */
 
 export interface MonthlyItemRow {
-  itemKey: string;
+  /** 品目CD × 格納場所CD（品目の識別子） */
+  hinmokuCD: string;
+  kakunoCD: string;
   hinmei: string | null;
   kubun: string;
   found: boolean;
@@ -46,7 +48,7 @@ function monthEnd(ym: string): string {
 }
 
 /**
- * 品目別計算の本体。加工数があるKEYごとに1行。
+ * 品目別計算の本体。加工数がある品目（品目CD×格納場所CD）ごとに1行。
  *
  * 加工数の取り方:
  *   - mode='day'   … その日の日別加工数（scrap_mcframe_days）
@@ -67,21 +69,21 @@ async function itemRows(
   const asOf = mode === "day" ? qdate : monthEnd(ym);
   const rows = await sql`
     WITH src AS (
-      SELECT item_key, SUM(qty)::numeric AS qty
+      SELECT hinmoku_cd, kakuno_cd, SUM(qty)::numeric AS qty
       FROM scrap_mcframe_days
       WHERE company_id = ${companyId}
         AND ((${mode} = 'day' AND qdate = ${qdate}::date)
           OR (${mode} = 'month' AND to_char(qdate, 'YYYY-MM') = ${ym}))
-      GROUP BY item_key
+      GROUP BY hinmoku_cd, kakuno_cd
       UNION ALL
       -- 日別が1件も無い月だけ、月次取込値を使う（二重計上を避ける）
-      SELECT item_key, qty FROM scrap_mcframe_qty q
+      SELECT hinmoku_cd, kakuno_cd, qty FROM scrap_mcframe_qty q
       WHERE q.company_id = ${companyId} AND ${mode} = 'month' AND q.ym = ${ym}
         AND NOT EXISTS (
           SELECT 1 FROM scrap_mcframe_days d
           WHERE d.company_id = ${companyId} AND to_char(d.qdate, 'YYYY-MM') = ${ym})
     )
-    SELECT m.item_key, m.qty,
+    SELECT m.hinmoku_cd, m.kakuno_cd, m.qty,
       i.kubun, i.hinmei, i.kansei_juryo AS theo_unit, i.kosei_sum, i.cnt, i.all_cnt,
       fa.weight AS fa_weight, fa.measured_on AS fa_date
     FROM src m
@@ -93,11 +95,13 @@ async function itemRows(
              COUNT(*) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS cnt,
              COUNT(*) AS all_cnt
       FROM scrap_items s
-      WHERE s.company_id = ${companyId} AND s.key = m.item_key
+      WHERE s.company_id = ${companyId}
+        AND s.kanri_zuban = m.hinmoku_cd AND s.kakuno_cd = m.kakuno_cd
     ) i ON true
     LEFT JOIN LATERAL (
       SELECT weight, measured_on FROM scrap_first_articles f
-      WHERE f.company_id = ${companyId} AND f.item_key = m.item_key
+      WHERE f.company_id = ${companyId}
+        AND f.hinmoku_cd = m.hinmoku_cd AND f.kakuno_cd = m.kakuno_cd
         AND f.status = 'approved'
         AND f.measured_on <= ${asOf}::date
       ORDER BY f.measured_on DESC LIMIT 1
@@ -112,7 +116,8 @@ async function itemRows(
     const usage = qty * (Number(r.kosei_sum) || 0);
     const finished = qty * unitFinished;
     return {
-      itemKey: r.item_key,
+      hinmokuCD: r.hinmoku_cd,
+      kakunoCD: r.kakuno_cd,
       hinmei: r.hinmei ?? null,
       kubun: found ? r.kubun ?? "その他" : "その他",
       found,
@@ -209,11 +214,13 @@ export async function mcframeDayTotals(
              SUM(kosei_juryo) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS kosei_sum,
              COUNT(*) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS cnt
       FROM scrap_items s
-      WHERE s.company_id = ${companyId} AND s.key = m.item_key
+      WHERE s.company_id = ${companyId}
+        AND s.kanri_zuban = m.hinmoku_cd AND s.kakuno_cd = m.kakuno_cd
     ) i ON true
     LEFT JOIN LATERAL (
       SELECT weight FROM scrap_first_articles f
-      WHERE f.company_id = ${companyId} AND f.item_key = m.item_key
+      WHERE f.company_id = ${companyId}
+        AND f.hinmoku_cd = m.hinmoku_cd AND f.kakuno_cd = m.kakuno_cd
         AND f.status = 'approved' AND f.measured_on <= m.qdate
       ORDER BY f.measured_on DESC LIMIT 1
     ) fa ON true

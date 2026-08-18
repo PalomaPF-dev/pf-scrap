@@ -73,11 +73,12 @@ export async function GET(req: NextRequest) {
       if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
       const items = await monthlyItemRows(s.companyId, ymParam);
       const rows: (string | number | null)[][] = [
-        ["KEY", "品名", "区分", "加工数", "単品完成重量(kg)", "重量根拠", "完成重量(kg)", "使用量(kg)", "理論スクラップ(kg)"],
+        ["品目CD", "格納場所CD", "品名", "区分", "加工数", "単品完成重量(kg)", "重量根拠", "完成重量(kg)", "使用量(kg)", "理論スクラップ(kg)"],
       ];
       for (const r of items) {
         rows.push([
-          r.itemKey,
+          r.hinmokuCD,
+          r.kakunoCD,
           r.hinmei ?? "",
           r.kubun,
           r.qty,
@@ -135,13 +136,14 @@ export async function GET(req: NextRequest) {
         limit: 2000,
       });
       const rows: (string | number | null)[][] = [
-        ["管理図番", "品名", "KEY", "区分", "親図番", "親品名", "子図番", "子品名", "単位", "構成重量", "完成重量(理論)", "製造場所CD", "製造場所名", "工場"],
+        ["品目CD", "格納場所CD", "格納場所名", "品名", "区分", "親図番", "親品名", "子図番", "子品名", "単位", "構成重量", "完成重量(理論)", "製造場所CD", "製造場所名", "工場"],
       ];
       for (const it of items) {
         rows.push([
           it.kanriZuban,
+          it.kakunoCD,
+          it.kakunoMei,
           it.hinmei,
-          it.key,
           it.kubun,
           it.oyaZuban,
           it.oyaHinmei,

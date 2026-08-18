@@ -10,7 +10,7 @@ import {
   rejectFirstArticleAction,
   saveFirstArticleAction,
 } from "@/lib/actions";
-import { FA_STATUS_LABEL, type FirstArticle, type ScrapItem } from "@/lib/scrapTypes";
+import { FA_STATUS_LABEL, itemRef, type FirstArticle, type ScrapItem } from "@/lib/scrapTypes";
 import { fmt, todayStr } from "@/lib/format";
 
 const td = "border border-[#e5e5e5] px-2.5 py-1.5 whitespace-nowrap";
@@ -111,7 +111,8 @@ export default function FirstArticlePanel({
     if (!trimmed) return;
     setQrInput("");
     startTransition(async () => {
-      const item = await lookupItemByQrAction(trimmed);
+      // 選択中の工場を渡す。QR値に格納場所CDが無くても、工場内で1つに決まれば引ける。
+      const item = await lookupItemByQrAction(trimmed, factory || null);
       if (!item) {
         setMessage({
           ok: false,
@@ -128,7 +129,7 @@ export default function FirstArticlePanel({
           text: `注意: この品目はマスター上「${item.factory}」の品目です（選択中の工場は「${factory}」）。取り違えでなければそのまま登録できます。`,
         });
       } else {
-        setMessage({ ok: true, text: `品目「${item.hinmei || item.key}」を選択しました。` });
+        setMessage({ ok: true, text: `品目「${item.hinmei || item.kanriZuban}」を選択しました。` });
       }
     });
   }
@@ -177,7 +178,11 @@ export default function FirstArticlePanel({
     }
     setMessage(null);
     startTransition(async () => {
-      const res = await saveFirstArticleAction({ itemKey: selected.key, weight });
+      const res = await saveFirstArticleAction({
+        hinmokuCD: selected.kanriZuban,
+        kakunoCD: selected.kakunoCD,
+        weight,
+      });
       setMessage({ ok: res.ok, text: res.message ?? "" });
       if (res.ok) {
         setWeight("");
@@ -189,7 +194,7 @@ export default function FirstArticlePanel({
 
   function approve(h: FirstArticle) {
     startTransition(async () => {
-      const res = await approveFirstArticleAction(h.measuredOn, h.itemKey);
+      const res = await approveFirstArticleAction(h.measuredOn, h.hinmokuCD, h.kakunoCD);
       if (!res.ok) alert(res.message);
       router.refresh();
     });
@@ -199,16 +204,16 @@ export default function FirstArticlePanel({
     const comment = prompt("差し戻しの理由（測定者に表示されます）");
     if (comment === null) return;
     startTransition(async () => {
-      const res = await rejectFirstArticleAction(h.measuredOn, h.itemKey, comment);
+      const res = await rejectFirstArticleAction(h.measuredOn, h.hinmokuCD, h.kakunoCD, comment);
       if (!res.ok) alert(res.message);
       router.refresh();
     });
   }
 
   function remove(h: FirstArticle) {
-    if (!confirm(`${h.measuredOn} ${h.itemKey} の測定記録を削除しますか?`)) return;
+    if (!confirm(`${h.measuredOn} ${itemRef(h.hinmokuCD, h.kakunoCD)} の測定記録を削除しますか?`)) return;
     startTransition(async () => {
-      const res = await deleteFirstArticleAction(h.measuredOn, h.itemKey);
+      const res = await deleteFirstArticleAction(h.measuredOn, h.hinmokuCD, h.kakunoCD);
       if (!res.ok) alert(res.message);
       router.refresh();
     });
@@ -257,9 +262,10 @@ export default function FirstArticlePanel({
             <span className="flex min-w-0 items-start gap-2 text-sm font-bold text-[#b4632c]">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
               <span className="min-w-0">
-                <span className="block truncate">{selected.hinmei || selected.key}</span>
+                <span className="block truncate">{selected.hinmei || selected.kanriZuban}</span>
                 <span className="block font-mono text-xs font-normal text-[#96521f]">
-                  {selected.key} ／ {selected.seizoBashoMei || selected.kubun}
+                  {itemRef(selected.kanriZuban, selected.kakunoCD)} ／{" "}
+                  {selected.seizoBashoMei || selected.kubun}
                 </span>
                 <span className="block text-xs font-normal text-[#96521f]">
                   理論完成重量 {fmt(selected.kanseiJuryo, 6)} kg
@@ -368,7 +374,10 @@ export default function FirstArticlePanel({
             </li>
           )}
           {history.map((h) => (
-            <li key={`c-${h.measuredOn}|${h.itemKey}`} className="rounded-xl border border-[#e5e5e5] p-3">
+            <li
+              key={`c-${h.measuredOn}|${h.hinmokuCD}|${h.kakunoCD}`}
+              className="rounded-xl border border-[#e5e5e5] p-3"
+            >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
@@ -378,7 +387,9 @@ export default function FirstArticlePanel({
                   <div className="mt-0.5 truncate text-sm text-[#555555]">
                     {h.hinmei ?? "（マスター未登録）"}
                   </div>
-                  <div className="truncate font-mono text-xs text-[#909090]">{h.itemKey}</div>
+                  <div className="truncate font-mono text-xs text-[#909090]">
+                    {itemRef(h.hinmokuCD, h.kakunoCD)}
+                  </div>
                   <div className="mt-0.5 text-xs text-[#909090]">
                     測定者 {h.sokuteisha} ／ 理論 {fmt(h.kanseiJuryo, 6)}
                   </div>
@@ -426,7 +437,8 @@ export default function FirstArticlePanel({
             <thead>
               <tr>
                 <th className={th}>測定日</th>
-                <th className={th}>KEY</th>
+                <th className={th}>品目CD</th>
+                <th className={th}>格納場所CD</th>
                 <th className={th}>品名</th>
                 <th className={`${th} text-right`}>実測完成重量(kg)</th>
                 <th className={`${th} text-right`}>理論値(kg)</th>
@@ -439,7 +451,7 @@ export default function FirstArticlePanel({
             <tbody>
               {history.length === 0 && (
                 <tr>
-                  <td className={td} colSpan={9}>
+                  <td className={td} colSpan={10}>
                     測定記録がありません
                   </td>
                 </tr>
@@ -448,9 +460,10 @@ export default function FirstArticlePanel({
                 const diff =
                   h.kanseiJuryo !== null && h.kanseiJuryo !== 0 ? h.weight - h.kanseiJuryo : null;
                 return (
-                  <tr key={`${h.measuredOn}|${h.itemKey}`}>
+                  <tr key={`${h.measuredOn}|${h.hinmokuCD}|${h.kakunoCD}`}>
                     <td className={td}>{h.measuredOn}</td>
-                    <td className={td}>{h.itemKey}</td>
+                    <td className={td}>{h.hinmokuCD}</td>
+                    <td className={td}>{h.kakunoCD}</td>
                     <td className={td}>{h.hinmei ?? "（マスター未登録）"}</td>
                     <td className={tdNum}>{fmt(h.weight, 6)}</td>
                     <td className={tdNum}>{fmt(h.kanseiJuryo, 6)}</td>

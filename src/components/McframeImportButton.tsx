@@ -7,12 +7,15 @@ import { importMcframeAction } from "@/lib/actions";
 import { parseCsv, readTextFile } from "@/lib/csv";
 
 /**
- * McFrame 完成品数量（加工数）のCSV取込。品目マスターのKEY単位で取り込む。
+ * McFrame 完成品数量（加工数）のCSV取込。
+ * 品目は「品目CD × 格納場所CD」の組で特定する（同じ品目CDが工場ごとにあるため）。
  *
- * 通常運用は日別（KEY,日付,加工数）。月次集計は日別の合計で出るため、
- * 月次の取込は過去データ移行のときだけ使う（Excelに月次の加工数しか無い期間用）。
- * 「管理図番,製造場所CD,日付/年月,加工数」の4列も可。1行目ヘッダー可。
- * UTF-8 / Shift_JIS 自動判定。
+ * 受け付ける形式:
+ *   - McFrameの製造実績をそのまま出力したCSV（品目ＣＤ／格納場所ＣＤ／出来高計上日／基準単位良品数量。
+ *     英語見出し itm_p.itm_cd / strg_loc_cd / yield_ac_dt / base_unit_yield_qty_p.qty でも可）
+ *   - 品目CD, 格納場所CD, 日付, 加工数（月次は 日付 の代わりに 年月）
+ * 同じ品目が同じ日に複数行あっても、取込時に合計される。
+ * UTF-8 / Shift_JIS 自動判定。ExcelのままではなくCSVで保存して取り込む。
  */
 export default function McframeImportButton() {
   const router = useRouter();
@@ -28,43 +31,73 @@ export default function McframeImportButton() {
       setMessage("CSVが空です。");
       return;
     }
-    // ヘッダー検出と列位置の判定
-    let start = 0;
-    const h = rows[0].map((v) => String(v).trim());
-    const looksHeader = h.some((v) => /key|年月|日付|加工数|図番|数量|qty/i.test(v));
-    let idxKey = 0;
-    let idxPeriod = 1;
-    let idxQty = 2;
-    let idxBasho = -1;
-    if (looksHeader) {
-      start = 1;
-      const find = (...names: string[]) =>
-        h.findIndex((v) => names.some((n) => v.toLowerCase() === n || v.includes(n)));
-      const k = find("key", "管理図番");
-      const b = find("製造場所");
-      const p = mode === "daily" ? find("日付", "完成日", "実績日", "年月") : find("年月", "日付");
-      const q = find("加工数", "数量", "qty");
-      if (k >= 0) idxKey = k;
-      if (b >= 0) idxBasho = b;
-      if (p >= 0) idxPeriod = p;
-      if (q >= 0) idxQty = q;
-    } else if (rows[0].length >= 4) {
-      // ヘッダー無し4列: 管理図番, 製造場所CD, 日付(年月), 加工数
-      idxKey = 0;
-      idxBasho = 1;
+    // 見出しは全角英数字・空白のゆれがあるので、正規化してから照合する
+    const norm = (v: unknown) =>
+      String(v ?? "")
+        .replace(/[Ａ-Ｚａ-ｚ０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+        .replace(/[\s　"']/g, "")
+        .toLowerCase();
+    // McFrameの実績出力は1行目が英語見出し・2行目が日本語見出しのことがあるため、
+    // 品目CDらしき列を持つ行を見出しとして探す（先頭5行まで）。
+    const hasCol = (r: string[], ...names: string[]) =>
+      r.some((v) => names.some((n) => norm(v) === n || norm(v).includes(n)));
+    let head = -1;
+    for (let i = 0; i < Math.min(rows.length, 5); i++) {
+      if (hasCol(rows[i], "品目cd", "itm_cd", "管理図番", "key")) {
+        head = i;
+        break;
+      }
+    }
+    const find = (r: string[], ...names: string[]) =>
+      r.findIndex((v) => names.some((n) => norm(v) === n || norm(v).includes(n)));
+
+    let start: number;
+    let idxItem: number, idxKakuno: number, idxPeriod: number, idxQty: number;
+    if (head >= 0) {
+      const h = rows[head];
+      start = head + 1;
+      idxItem = find(h, "品目cd", "itm_cd", "管理図番", "key");
+      idxKakuno = find(h, "格納場所cd", "strg_loc_cd");
+      // 格納場所が無い出力は製造場所で代用する（品目マスター側も同じ扱い）
+      if (idxKakuno < 0) idxKakuno = find(h, "製造場所cd", "mfg_loc_cd");
+      idxPeriod =
+        mode === "daily"
+          ? find(h, "出来高計上日", "yield_ac_dt", "出来高実績日", "yield_act_dt", "日付", "完成日", "実績日")
+          : find(h, "年月", "日付");
+      idxQty = find(h, "基準単位良品数量", "base_unit_yield_qty", "加工数", "良品数量", "数量", "qty");
+    } else {
+      // 見出し無し: 品目CD, 格納場所CD, 日付(年月), 加工数
+      start = 0;
+      idxItem = 0;
+      idxKakuno = 1;
       idxPeriod = 2;
       idxQty = 3;
     }
-    const records = rows.slice(start).map((r) => {
-      const period = String(r[idxPeriod] ?? "").trim();
-      return {
-        itemKey:
-          String(r[idxKey] ?? "").trim() + (idxBasho >= 0 ? String(r[idxBasho] ?? "").trim() : ""),
-        date: mode === "daily" ? period : "",
-        ym: mode === "daily" ? "" : period,
-        qty: String(r[idxQty] ?? "").trim(),
-      };
-    });
+    if (idxItem < 0 || idxKakuno < 0 || idxPeriod < 0 || idxQty < 0) {
+      setMessage(
+        mode === "daily"
+          ? "列が読み取れません。McFrameの製造実績の出力（品目ＣＤ・格納場所ＣＤ・出来高計上日・基準単位良品数量）か、品目CD, 格納場所CD, 日付, 加工数 のCSVを取り込んでください。"
+          : "列が読み取れません。品目CD, 格納場所CD, 年月, 加工数 のCSVを取り込んでください。"
+      );
+      return;
+    }
+    const records = rows
+      .slice(start)
+      .filter((r) => String(r[idxItem] ?? "").trim() !== "")
+      .map((r) => {
+        const period = String(r[idxPeriod] ?? "").trim();
+        return {
+          hinmokuCD: String(r[idxItem] ?? "").trim(),
+          kakunoCD: String(r[idxKakuno] ?? "").trim(),
+          date: mode === "daily" ? period : "",
+          ym: mode === "daily" ? "" : period,
+          qty: String(r[idxQty] ?? "").trim(),
+        };
+      });
+    if (records.length === 0) {
+      setMessage("取込対象の行がありませんでした。");
+      return;
+    }
     startTransition(async () => {
       const res = await importMcframeAction(records);
       setMessage(res.message ?? "");
@@ -77,7 +110,7 @@ export default function McframeImportButton() {
       <button
         onClick={() => dayRef.current?.click()}
         disabled={pending}
-        title="KEY, 日付, 加工数"
+        title="McFrameの製造実績、または 品目CD, 格納場所CD, 日付, 加工数"
         className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#b4632c] px-3 text-sm font-semibold text-white hover:bg-[#96521f] disabled:opacity-50"
       >
         <Upload className="h-4 w-4" />
@@ -97,7 +130,7 @@ export default function McframeImportButton() {
       <button
         onClick={() => monthRef.current?.click()}
         disabled={pending}
-        title="過去データ移行用: KEY, 年月, 加工数（日別データが無い期間だけ使います）"
+        title="過去データ移行用: 品目CD, 格納場所CD, 年月, 加工数（日別データが無い期間だけ使います）"
         className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm text-[#555555] hover:bg-[#f7f7f5] disabled:opacity-50"
       >
         <Upload className="h-4 w-4" />

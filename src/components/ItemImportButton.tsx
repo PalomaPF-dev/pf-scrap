@@ -8,14 +8,16 @@ import { parseCsv, readTextFile } from "@/lib/csv";
 
 /**
  * 品目マスターのCSV取込。1行目に見出しがあれば列順は自由
- * （見出し例: 管理図番, 品名, KEY, 区分, 親図番, 親品名, 子図番, 子品名, 単位,
- *   構成重量, 完成重量(理論), 製造場所CD, 製造場所名, 工場）。
- * KEY 未指定時は 管理図番+製造場所CD から自動生成。UTF-8 / Shift_JIS 自動判定。
+ * （見出し例: 品目CD, 格納場所CD, 格納場所名, 品名, 区分, 親図番, 親品名, 子図番, 子品名,
+ *   単位, 構成重量, 完成重量(理論), 製造場所CD, 製造場所名, 工場）。
+ * 品目は「品目CD × 格納場所CD」の組で識別する。格納場所CDが無いCSV（旧様式）は
+ * 製造場所CDで代用する。UTF-8 / Shift_JIS 自動判定。
  */
 const COLS: [string, string][] = [
-  ["kanriZuban", "管理図番"],
+  ["kanriZuban", "品目CD"],
+  ["kakunoCD", "格納場所CD"],
+  ["kakunoMei", "格納場所名"],
   ["hinmei", "品名"],
-  ["key", "KEY"],
   ["kubun", "区分"],
   ["oyaZuban", "親図番"],
   ["oyaHinmei", "親品名"],
@@ -46,8 +48,11 @@ export default function ItemImportButton() {
     const header = rows[0].map((v) => String(v).trim());
     const colIdx: Record<string, number> = {};
     let hasHeader = false;
+    // 旧様式（管理図番＝品目CD）の見出しも受け付ける
+    const alias: Record<string, string[]> = { kanriZuban: ["管理図番"] };
     for (const [k, jp] of COLS) {
-      const idx = header.findIndex((h) => h === jp || h === k || h.startsWith(jp));
+      const names = [jp, k, ...(alias[k] ?? [])];
+      const idx = header.findIndex((h) => names.some((n) => h === n || h.startsWith(n)));
       if (idx >= 0) {
         colIdx[k] = idx;
         hasHeader = true;

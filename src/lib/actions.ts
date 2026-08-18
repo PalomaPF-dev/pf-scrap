@@ -34,11 +34,14 @@ import {
   upsertProcureDays,
   upsertScale,
   type DailyEntry,
+  type McframeDayRow,
+  type McframeQtyRow,
   type ProcureDay,
   type Scale,
   type ScrapItem,
 } from "./db";
 import { isDateStr, isYmStr, normDateStr, normYm, todayStr, toNum, toNumOrNull } from "./format";
+import { parseItemRef } from "./scrapTypes";
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; message: string };
 
@@ -64,18 +67,21 @@ export async function saveItemAction(input: {
   kanseiJuryo: unknown;
   seizoBashoCD: string;
   seizoBashoMei: string;
+  kakunoCD: string;
+  kakunoMei: string;
   factory: string;
 }): Promise<ActionResult> {
   try {
     const s = await requireAdminSession();
     const kanriZuban = asStr(input.kanriZuban, 50);
     const seizoBashoCD = asStr(input.seizoBashoCD, 50);
-    if (!kanriZuban || !seizoBashoCD) return fail("管理図番と製造場所CDを入力してください。");
+    // 品目は「品目CD × 格納場所CD」の組で識別する。同じ品目CDが工場ごとに
+    // 存在するため、格納場所CDが無いと品目を特定できない。
+    const kakunoCD = asStr(input.kakunoCD, 50);
+    if (!kanriZuban || !kakunoCD) return fail("品目CDと格納場所CDを入力してください。");
     const item: Omit<ScrapItem, "id"> = {
       kanriZuban,
       hinmei: asStr(input.hinmei),
-      // KEY = 管理図番 + 製造場所CD（McFrame の設定に合わせて自動生成）
-      key: kanriZuban + seizoBashoCD,
       kubun: asKubun(input.kubun),
       oyaZuban: asStr(input.oyaZuban, 50),
       oyaHinmei: asStr(input.oyaHinmei),
@@ -86,6 +92,8 @@ export async function saveItemAction(input: {
       kanseiJuryo: toNum(input.kanseiJuryo),
       seizoBashoCD,
       seizoBashoMei: asStr(input.seizoBashoMei),
+      kakunoCD,
+      kakunoMei: asStr(input.kakunoMei),
       factory: asStr(input.factory, 50),
     };
     await upsertItem(s.companyId, item);
@@ -122,19 +130,15 @@ export async function importItemsAction(
     for (const r of rows) {
       const kanriZuban = asStr(r.kanriZuban, 50);
       const seizoBashoCD = asStr(r.seizoBashoCD, 50);
-      let key = asStr(r.key, 100);
-      if (!key) key = kanriZuban + seizoBashoCD;
-      if (!key) {
+      // 格納場所CDが無いCSV（旧様式）は、製造場所CDで代用して組を作る。
+      const kakunoCD = asStr(r.kakunoCD, 50) || seizoBashoCD;
+      if (!kanriZuban || !kakunoCD) {
         skipped++;
         continue;
       }
-      const kz = kanriZuban || (seizoBashoCD && key.endsWith(seizoBashoCD)
-        ? key.slice(0, key.length - seizoBashoCD.length)
-        : key);
       clean.push({
-        kanriZuban: kz,
+        kanriZuban,
         hinmei: asStr(r.hinmei),
-        key,
         kubun: asKubun(r.kubun),
         oyaZuban: asStr(r.oyaZuban, 50),
         oyaHinmei: asStr(r.oyaHinmei),
@@ -145,6 +149,8 @@ export async function importItemsAction(
         kanseiJuryo: toNum(r.kanseiJuryo),
         seizoBashoCD,
         seizoBashoMei: asStr(r.seizoBashoMei),
+        kakunoCD,
+        kakunoMei: asStr(r.kakunoMei),
         factory: asStr(r.factory, 50),
       });
     }
@@ -465,18 +471,27 @@ export async function loadDailyRecordAction(recordDate: string, factory: string)
 
 // ===== ③ 初品重量測定（全員。登録＝管理者へ申請） =====
 
-/** QRコード（品目KEY）から品目を引く（初品測定のQR読み取り用）。 */
-export async function lookupItemByQrAction(code: string) {
+/**
+ * QRコードから品目を引く（初品測定のQR読み取り用）。
+ * QR値は「品目CD-格納場所CD」。格納場所CDが付いていない値（品目CDのみ）でも、
+ * 選択中の工場で1件に絞れれば受け付ける。
+ */
+export async function lookupItemByQrAction(code: string, factory?: string | null) {
   const s = await requireEntitledSession();
-  const key = asStr(code, 100);
-  if (!key) return null;
-  const { items } = await listItems(s.companyId, { q: key, limit: 10 });
-  // KEY 完全一致を優先、なければ子図番一致
-  return (
-    items.find((it) => it.key === key) ??
-    items.find((it) => it.koZuban === key) ??
-    null
-  );
+  const raw = asStr(code, 100);
+  if (!raw) return null;
+  const { hinmokuCd, kakunoCd } = parseItemRef(raw);
+  const f = asStr(factory ?? "", 50) || null;
+  const { items } = await listItems(s.companyId, { q: hinmokuCd, factory: f, limit: 50 });
+  if (kakunoCd) {
+    const hit = items.find((it) => it.kanriZuban === hinmokuCd && it.kakunoCD === kakunoCd);
+    if (hit) return hit;
+  }
+  // 格納場所CD無しの読み取り。工場内で組が1つに決まるときだけ採用する。
+  const byCode = items.filter((it) => it.kanriZuban === hinmokuCd);
+  const refs = new Set(byCode.map((it) => it.kakunoCD));
+  if (byCode.length > 0 && refs.size === 1) return byCode[0];
+  return items.find((it) => it.koZuban === raw) ?? null;
 }
 
 /**
@@ -484,19 +499,22 @@ export async function lookupItemByQrAction(code: string) {
  * 登録と同時に管理者へ申請（pending）となり、承認された測定値のみ完成重量の計算に採用される。
  */
 export async function saveFirstArticleAction(input: {
-  itemKey: string;
+  hinmokuCD: string;
+  kakunoCD: string;
   weight: unknown;
 }): Promise<ActionResult> {
   try {
     const s = await requireEntitledSession();
-    const itemKey = asStr(input.itemKey, 100);
-    if (!itemKey) return fail("品目を選択してください。");
+    const hinmokuCD = asStr(input.hinmokuCD, 50);
+    const kakunoCD = asStr(input.kakunoCD, 50);
+    if (!hinmokuCD || !kakunoCD) return fail("品目を選択してください。");
     const weight = toNum(input.weight);
     if (weight <= 0) return fail("実測完成品重量を入力してください。");
     const measuredOn = todayStr();
     await upsertFirstArticle(s.companyId, {
       measuredOn,
-      itemKey,
+      hinmokuCD,
+      kakunoCD,
       weight,
       sokuteisha: s.userName || s.loginId || "",
     });
@@ -513,12 +531,13 @@ export async function saveFirstArticleAction(input: {
 
 export async function deleteFirstArticleAction(
   measuredOn: string,
-  itemKey: string
+  hinmokuCD: string,
+  kakunoCD: string
 ): Promise<ActionResult> {
   try {
     const s = await requireEntitledSession();
     if (!isDateStr(measuredOn)) return fail("日付が正しくありません。");
-    await deleteFirstArticle(s.companyId, measuredOn, asStr(itemKey, 100));
+    await deleteFirstArticle(s.companyId, measuredOn, asStr(hinmokuCD, 50), asStr(kakunoCD, 50));
     revalidatePath("/first");
     return { ok: true, message: "削除しました。" };
   } catch (e) {
@@ -529,12 +548,13 @@ export async function deleteFirstArticleAction(
 /** 初品測定の承認（管理者のみ）。承認された値が完成重量の計算に使われる。 */
 export async function approveFirstArticleAction(
   measuredOn: string,
-  itemKey: string
+  hinmokuCD: string,
+  kakunoCD: string
 ): Promise<ActionResult> {
   try {
     const s = await requireAdminSession();
     if (!isDateStr(measuredOn)) return fail("日付が正しくありません。");
-    await updateFirstArticleStatus(s.companyId, measuredOn, asStr(itemKey, 100), {
+    await updateFirstArticleStatus(s.companyId, measuredOn, asStr(hinmokuCD, 50), asStr(kakunoCD, 50), {
       status: "approved",
       approvedBy: s.userName || s.loginId || "",
     });
@@ -549,13 +569,14 @@ export async function approveFirstArticleAction(
 /** 初品測定の差し戻し（管理者のみ）。 */
 export async function rejectFirstArticleAction(
   measuredOn: string,
-  itemKey: string,
+  hinmokuCD: string,
+  kakunoCD: string,
   comment: string
 ): Promise<ActionResult> {
   try {
     const s = await requireAdminSession();
     if (!isDateStr(measuredOn)) return fail("日付が正しくありません。");
-    await updateFirstArticleStatus(s.companyId, measuredOn, asStr(itemKey, 100), {
+    await updateFirstArticleStatus(s.companyId, measuredOn, asStr(hinmokuCD, 50), asStr(kakunoCD, 50), {
       status: "rejected",
       approvedBy: s.userName || s.loginId || "",
       rejectComment: asStr(comment, 500),
@@ -576,24 +597,36 @@ export async function rejectFirstArticleAction(
  * 日別が入っている月は、月次集計でも日別の合計を使う。
  */
 export async function importMcframeAction(
-  rows: { itemKey?: unknown; date?: unknown; ym?: unknown; qty?: unknown }[]
+  rows: {
+    hinmokuCD?: unknown;
+    kakunoCD?: unknown;
+    date?: unknown;
+    ym?: unknown;
+    qty?: unknown;
+  }[]
 ): Promise<ActionResult> {
   try {
     const s = await requireAdminSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 10000) return fail("一度に取込できるのは10,000行までです。");
-    const days: { qdate: string; itemKey: string; qty: number }[] = [];
-    const months: { ym: string; itemKey: string; qty: number }[] = [];
+    // McFrameの実績は1日に同じ品目が何行も出るため、品目×日付で合計してから取り込む。
+    const days = new Map<string, McframeDayRow>();
+    const months = new Map<string, McframeQtyRow>();
     let bad = 0;
     for (const r of rows) {
-      const itemKey = asStr(r.itemKey, 100);
-      if (!itemKey) {
+      const hinmokuCD = asStr(r.hinmokuCD, 50);
+      const kakunoCD = asStr(r.kakunoCD, 50);
+      if (!hinmokuCD || !kakunoCD) {
         bad++;
         continue;
       }
+      const qty = toNum(r.qty);
       const qdate = normDateStr(r.date);
       if (qdate) {
-        days.push({ qdate, itemKey, qty: toNum(r.qty) });
+        const k = `${qdate}\t${hinmokuCD}\t${kakunoCD}`;
+        const prev = days.get(k);
+        if (prev) prev.qty += qty;
+        else days.set(k, { qdate, hinmokuCD, kakunoCD, qty });
         continue;
       }
       const ym = normYm(r.ym);
@@ -601,15 +634,18 @@ export async function importMcframeAction(
         bad++;
         continue;
       }
-      months.push({ ym, itemKey, qty: toNum(r.qty) });
+      const k = `${ym}\t${hinmokuCD}\t${kakunoCD}`;
+      const prev = months.get(k);
+      if (prev) prev.qty += qty;
+      else months.set(k, { ym, hinmokuCD, kakunoCD, qty });
     }
-    if (!days.length && !months.length) {
+    if (!days.size && !months.size) {
       return fail(
-        "日付（または年月）とKEYを読み取れる行がありませんでした。日別は「KEY, 日付, 加工数」、過去データ移行の月次は「KEY, 年月, 加工数」の形式で、取込ボタンを使い分けてください。"
+        "品目CD・格納場所CDと日付（または年月）を読み取れる行がありませんでした。日別は「品目CD, 格納場所CD, 日付, 加工数」、過去データ移行の月次は「品目CD, 格納場所CD, 年月, 加工数」の形式です。McFrameの製造実績をそのまま出力したファイルも取り込めます。"
       );
     }
-    const dayCount = days.length ? await upsertMcframeDays(s.companyId, days) : 0;
-    const monthCount = months.length ? await upsertMcframeQty(s.companyId, months) : 0;
+    const dayCount = days.size ? await upsertMcframeDays(s.companyId, [...days.values()]) : 0;
+    const monthCount = months.size ? await upsertMcframeQty(s.companyId, [...months.values()]) : 0;
     revalidatePath("/mcframe");
     revalidatePath("/daily");
     revalidatePath("/");

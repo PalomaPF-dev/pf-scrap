@@ -24,11 +24,11 @@ let schemaReady: Promise<void> | null = null;
 
 /**
  * スクラップ重量管理のドメインテーブルを冪等に作成。
- * - scrap_items           … 品目マスター（KEY=管理図番+製造場所CD、子図番、構成/完成重量）
+ * - scrap_items           … 品目マスター（品目CD×格納場所CDで識別、子図番、構成/完成重量）
  * - scrap_daily_records   … 日次記録票（日付×工場で1枚）
  * - scrap_daily_entries   … 日中記録の明細（発生のたびに1行）
  * - scrap_first_articles  … 初品の実測完成品重量
- * - scrap_mcframe_qty     … McFrame取込の完成品数量（年月×KEY）
+ * - scrap_mcframe_qty     … McFrame取込の完成品数量（年月×品目CD×格納場所CD）
  * - scrap_monthly_inputs  … 月初在庫・購入重量・スクラップ売却数量（年月で1行）
  * - portal_factories / portal_workplaces … ポータル配信の工場・職場マスタ（入力候補）
  *
@@ -55,15 +55,15 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_pro BOOLEAN NOT NULL DEFAULT false`);
   await safeDdl(() => sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ`);
 
-  // ② 品目マスター。KEY = 管理図番 + 製造場所CD（McFrameの設定）。
-  // 1つのKEY（完成品）に複数の子図番（材料）が付き得るため、KEY×子図番で一意。
+  // ② 品目マスター。品目は「品目CD × 格納場所CD」の組で識別する（McFrameの設定）。
+  // 同じ品目CDでも工場（格納場所）が違えば別物のため、必ず組で持つ。
+  // 1つの完成品に複数の子図番（材料）が付き得るので、品目CD×格納場所CD×子図番で一意。
   await safeDdl(() => sql`
     CREATE TABLE IF NOT EXISTS scrap_items (
       id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       company_id      UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
       kanri_zuban     TEXT NOT NULL,
       hinmei          TEXT NOT NULL DEFAULT '',
-      key             TEXT NOT NULL,
       kubun           TEXT NOT NULL DEFAULT 'その他',
       oya_zuban       TEXT NOT NULL DEFAULT '',
       oya_hinmei      TEXT NOT NULL DEFAULT '',
@@ -74,10 +74,11 @@ async function buildSchema(): Promise<void> {
       kansei_juryo    NUMERIC NOT NULL DEFAULT 0,
       seizo_basho_cd  TEXT NOT NULL DEFAULT '',
       seizo_basho_mei TEXT NOT NULL DEFAULT '',
+      kakuno_cd       TEXT NOT NULL DEFAULT '',
+      kakuno_mei      TEXT NOT NULL DEFAULT '',
       factory         TEXT NOT NULL DEFAULT '',
       created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (company_id, key, ko_zuban)
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_company_idx ON scrap_items(company_id)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_ko_zuban_idx ON scrap_items(company_id, ko_zuban)`);
@@ -166,19 +167,18 @@ async function buildSchema(): Promise<void> {
   // 箱（重量計）ごとの朝礼後の累積値。{ "<scale_id>": 123.4 } 形式。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS kaishi_cum JSONB NOT NULL DEFAULT '{}'::jsonb`);
 
-  // ③ 初品の実測完成品重量（測定日×KEYで1件。再測定は上書き）。
+  // ③ 初品の実測完成品重量（測定日×品目CD×格納場所CDで1件。再測定は上書き）。
   await safeDdl(() => sql`
     CREATE TABLE IF NOT EXISTS scrap_first_articles (
       id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
       measured_on DATE NOT NULL,
-      item_key    TEXT NOT NULL,
+      hinmoku_cd  TEXT NOT NULL DEFAULT '',
+      kakuno_cd   TEXT NOT NULL DEFAULT '',
       weight      NUMERIC NOT NULL,
       sokuteisha  TEXT NOT NULL DEFAULT '',
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (company_id, measured_on, item_key)
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
-  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_first_articles_key_idx ON scrap_first_articles(company_id, item_key, measured_on)`);
   // 初品測定の承認ワークフロー（2026-08）: 登録と同時に管理者へ申請（pending）し、
   // 承認（approved）された測定値だけを完成重量の計算に採用する。
   await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'`);
@@ -198,20 +198,20 @@ async function buildSchema(): Promise<void> {
     }
   }
 
-  // ④ McFrame取込の完成品数量（年月×KEYで1件。再取込は上書き）。ym は 'YYYY-MM'。
+  // ④ McFrame取込の完成品数量（年月×品目CD×格納場所CDで1件。再取込は上書き）。ym は 'YYYY-MM'。
   await safeDdl(() => sql`
     CREATE TABLE IF NOT EXISTS scrap_mcframe_qty (
       id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
       ym         TEXT NOT NULL,
-      item_key   TEXT NOT NULL,
+      hinmoku_cd TEXT NOT NULL DEFAULT '',
+      kakuno_cd  TEXT NOT NULL DEFAULT '',
       qty        NUMERIC NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (company_id, ym, item_key)
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_mcframe_qty_ym_idx ON scrap_mcframe_qty(company_id, ym)`);
 
-  // ④' McFrame取込の完成品数量（日付×KEY）。
+  // ④' McFrame取込の完成品数量（日付×品目CD×格納場所CD）。
   // 日別の加工数があれば、その日の完成品重量 = Σ(加工数 × 単品完成重量) を日単位で出せる。
   // 月次集計は、その月に日別データがあれば日別の合計を優先する（過去データは月次のみ）。
   await safeDdl(() => sql`
@@ -219,12 +219,65 @@ async function buildSchema(): Promise<void> {
       id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
       qdate      DATE NOT NULL,
-      item_key   TEXT NOT NULL,
+      hinmoku_cd TEXT NOT NULL DEFAULT '',
+      kakuno_cd  TEXT NOT NULL DEFAULT '',
       qty        NUMERIC NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (company_id, qdate, item_key)
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_mcframe_days_date_idx ON scrap_mcframe_days(company_id, qdate)`);
+
+  // ===== 品目の識別を「KEY」から「品目CD × 格納場所CD」の組へ移行（2026-08） =====
+  // 旧: KEY = 管理図番 + 製造場所CD を1本の文字列で持っていた。
+  // 新: 品目CD と 格納場所CD を別々の列で持ち、必ず組で突き合わせる。
+  // 同じ品目CDが工場ごとに存在するため（実データで5品目が大口・直方の両方にある）、
+  // 品目CD単独では特定できない。以下は既存DB向けの冪等な移行。
+  await safeDdl(() => sql`ALTER TABLE scrap_items ADD COLUMN IF NOT EXISTS kakuno_cd TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_items ADD COLUMN IF NOT EXISTS kakuno_mei TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS hinmoku_cd TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS kakuno_cd TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_mcframe_qty ADD COLUMN IF NOT EXISTS hinmoku_cd TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_mcframe_qty ADD COLUMN IF NOT EXISTS kakuno_cd TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_mcframe_days ADD COLUMN IF NOT EXISTS hinmoku_cd TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_mcframe_days ADD COLUMN IF NOT EXISTS kakuno_cd TEXT NOT NULL DEFAULT ''`);
+  {
+    // 旧 key 列が残っているDBだけ、値を組に移してから列を落とす。
+    const legacy = await sql`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'scrap_items' AND column_name = 'key' LIMIT 1`.catch(() => []);
+    if (Array.isArray(legacy) && legacy.length > 0) {
+      // 格納場所CDが未取込の品目は、いったん製造場所CDで代用する。
+      // 品目マスターを取り込み直すと正しい格納場所CDに更新される。
+      await sql`UPDATE scrap_items SET kakuno_cd = seizo_basho_cd WHERE kakuno_cd = ''`;
+      // 旧 item_key（= 管理図番 + 製造場所CD）から組を復元する。
+      await sql`
+        UPDATE scrap_first_articles t SET hinmoku_cd = i.kanri_zuban, kakuno_cd = i.kakuno_cd
+        FROM (SELECT DISTINCT company_id, key, kanri_zuban, kakuno_cd FROM scrap_items) i
+        WHERE t.hinmoku_cd = '' AND t.company_id = i.company_id AND t.item_key = i.key`;
+      await sql`
+        UPDATE scrap_mcframe_qty t SET hinmoku_cd = i.kanri_zuban, kakuno_cd = i.kakuno_cd
+        FROM (SELECT DISTINCT company_id, key, kanri_zuban, kakuno_cd FROM scrap_items) i
+        WHERE t.hinmoku_cd = '' AND t.company_id = i.company_id AND t.item_key = i.key`;
+      await sql`
+        UPDATE scrap_mcframe_days t SET hinmoku_cd = i.kanri_zuban, kakuno_cd = i.kakuno_cd
+        FROM (SELECT DISTINCT company_id, key, kanri_zuban, kakuno_cd FROM scrap_items) i
+        WHERE t.hinmoku_cd = '' AND t.company_id = i.company_id AND t.item_key = i.key`;
+      // 品目マスターに無いKEYは復元できないので、取込前の状態に戻す（残すと重複の元になる）。
+      await sql`DELETE FROM scrap_first_articles WHERE hinmoku_cd = ''`;
+      await sql`DELETE FROM scrap_mcframe_qty WHERE hinmoku_cd = ''`;
+      await sql`DELETE FROM scrap_mcframe_days WHERE hinmoku_cd = ''`;
+      // 列を落とすと、その列に依存するUNIQUE制約も一緒に消える。
+      await sql`ALTER TABLE scrap_items DROP COLUMN IF EXISTS key`;
+      await sql`ALTER TABLE scrap_first_articles DROP COLUMN IF EXISTS item_key`;
+      await sql`ALTER TABLE scrap_mcframe_qty DROP COLUMN IF EXISTS item_key`;
+      await sql`ALTER TABLE scrap_mcframe_days DROP COLUMN IF EXISTS item_key`;
+    }
+  }
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_items_ref_uidx ON scrap_items(company_id, kanri_zuban, kakuno_cd, ko_zuban)`);
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_first_articles_ref_uidx ON scrap_first_articles(company_id, measured_on, hinmoku_cd, kakuno_cd)`);
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_mcframe_qty_ref_uidx ON scrap_mcframe_qty(company_id, ym, hinmoku_cd, kakuno_cd)`);
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_mcframe_days_ref_uidx ON scrap_mcframe_days(company_id, qdate, hinmoku_cd, kakuno_cd)`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_hinmoku_idx ON scrap_items(company_id, kanri_zuban, kakuno_cd)`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_first_articles_ref_idx ON scrap_first_articles(company_id, hinmoku_cd, kakuno_cd, measured_on)`);
 
   // ⑤ 月次入力（年月×工場で1行）。区分別の月初在庫・購入重量と、スクラップ売却数量。
   // 工場別シート（大口/直方）の運用に合わせて工場単位で持ち、照合は全社合算/工場別を切り替える。

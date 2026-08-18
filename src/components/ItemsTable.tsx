@@ -4,7 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Pencil, Plus, Trash2, X } from "lucide-react";
 import { deleteItemAction, saveItemAction } from "@/lib/actions";
-import type { ScrapItem } from "@/lib/db";
+import { itemRef, type ScrapItem } from "@/lib/scrapTypes";
 import { fmt } from "@/lib/format";
 
 const td = "border border-[#e5e5e5] px-2.5 py-1.5 whitespace-nowrap";
@@ -26,6 +26,8 @@ type Draft = {
   koseiJuryo: string;
   kanseiJuryo: string;
   seizoBashoCD: string;
+  kakunoCD: string;
+  kakunoMei: string;
   seizoBashoMei: string;
   factory: string;
 };
@@ -43,6 +45,8 @@ const emptyDraft = (factory: string): Draft => ({
   koseiJuryo: "",
   kanseiJuryo: "",
   seizoBashoCD: "",
+  kakunoCD: "",
+  kakunoMei: "",
   seizoBashoMei: "",
   factory,
 });
@@ -60,6 +64,8 @@ const toDraft = (it: ScrapItem): Draft => ({
   koseiJuryo: String(it.koseiJuryo),
   kanseiJuryo: String(it.kanseiJuryo),
   seizoBashoCD: it.seizoBashoCD,
+  kakunoCD: it.kakunoCD,
+  kakunoMei: it.kakunoMei,
   seizoBashoMei: it.seizoBashoMei,
   factory: it.factory,
 });
@@ -99,15 +105,13 @@ export default function ItemsTable({
   }
 
   function remove(it: ScrapItem) {
-    if (!confirm(`品目「${it.key} ${it.koZuban}」を削除しますか?`)) return;
+    if (!confirm(`品目「${itemRef(it.kanriZuban, it.kakunoCD)} ${it.koZuban}」を削除しますか?`)) return;
     startTransition(async () => {
       const res = await deleteItemAction(it.id);
       if (!res.ok) alert(res.message);
       router.refresh();
     });
   }
-
-  const key = draft ? draft.kanriZuban.trim() + draft.seizoBashoCD.trim() : "";
 
   const field = (
     label: string,
@@ -148,7 +152,7 @@ export default function ItemsTable({
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr>
-              {["管理図番", "品名", "KEY", "区分", "親図番", "子図番", "子品名", "単位"].map((h) => (
+              {["品目CD", "格納場所CD", "品名", "区分", "親図番", "子図番", "子品名", "単位"].map((h) => (
                 <th key={h} className={th}>
                   {h}
                 </th>
@@ -171,8 +175,8 @@ export default function ItemsTable({
             {items.map((it) => (
               <tr key={it.id} className="hover:bg-[#faf6ef]">
                 <td className={td}>{it.kanriZuban}</td>
+                <td className={td}>{it.kakunoCD}</td>
                 <td className={td}>{it.hinmei}</td>
-                <td className={td}>{it.key}</td>
                 <td className={td}>{it.kubun}</td>
                 <td className={td}>{it.oyaZuban}</td>
                 <td className={td}>{it.koZuban}</td>
@@ -231,12 +235,12 @@ export default function ItemsTable({
               </button>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {field("管理図番", "kanriZuban", { required: true })}
-              {field("製造場所CD", "seizoBashoCD", { required: true, placeholder: "Z023000" })}
-              <label className="flex flex-col gap-1 text-xs text-[#707070]">
-                KEY（自動 = 管理図番+製造場所CD）
-                <input value={key} readOnly className={`${input} bg-[#f7f7f5]`} />
-              </label>
+              {/* 品目は「品目CD × 格納場所CD」の組で識別する。
+                  同じ品目CDが工場ごとに存在するため、両方そろって初めて特定できる。 */}
+              {field("品目CD", "kanriZuban", { required: true, placeholder: "411611500" })}
+              {field("格納場所CD", "kakunoCD", { required: true, placeholder: "K053000" })}
+              {field("格納場所名", "kakunoMei", { placeholder: "直方内胴組立完成品倉庫" })}
+              {field("製造場所CD", "seizoBashoCD", { placeholder: "Z053000" })}
               {field("品名", "hinmei")}
               <label className="flex flex-col gap-1 text-xs text-[#707070]">
                 区分

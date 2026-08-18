@@ -22,11 +22,37 @@ export const DAILY_STATUS_LABEL: Record<DailyStatus, string> = {
   rejected: "差し戻し",
 };
 
+/**
+ * 品目の識別子は「品目CD × 格納場所CD」の組。
+ * 同じ品目CDでも工場（格納場所）が違えば別物のため、単独では特定できない
+ * （実データでも5品目が大口・直方の両方に存在する）。
+ * QRコードや1行表示のように1本の文字列にしたいときだけ、この区切りで連結する。
+ */
+export const ITEM_REF_SEP = "-";
+
+/** 品目CD と 格納場所CD を1本の文字列にする（QR値・表示用）。 */
+export function itemRef(hinmokuCd: string, kakunoCd: string): string {
+  const h = (hinmokuCd ?? "").trim();
+  const k = (kakunoCd ?? "").trim();
+  return k ? `${h}${ITEM_REF_SEP}${k}` : h;
+}
+
+/**
+ * itemRef の逆変換。格納場所CDが付いていない値（品目CDのみ）も受け付ける。
+ * 読み取り側は、格納場所CDが空なら工場の絞り込みなどで一意に決める。
+ */
+export function parseItemRef(value: string): { hinmokuCd: string; kakunoCd: string } {
+  const v = (value ?? "").trim();
+  const i = v.indexOf(ITEM_REF_SEP);
+  if (i <= 0) return { hinmokuCd: v, kakunoCd: "" };
+  return { hinmokuCd: v.slice(0, i), kakunoCd: v.slice(i + ITEM_REF_SEP.length) };
+}
+
 export interface ScrapItem {
   id: string;
+  /** 品目CD（McFrameの品目ＣＤ。旧・管理図番） */
   kanriZuban: string;
   hinmei: string;
-  key: string;
   kubun: string;
   oyaZuban: string;
   oyaHinmei: string;
@@ -37,6 +63,9 @@ export interface ScrapItem {
   kanseiJuryo: number;
   seizoBashoCD: string;
   seizoBashoMei: string;
+  /** 格納場所CD／名（McFrameの格納場所。品目CDとセットで品目を identify する） */
+  kakunoCD: string;
+  kakunoMei: string;
   factory: string;
 }
 
@@ -104,7 +133,9 @@ export const FA_STATUS_LABEL: Record<FaStatus, string> = {
 
 export interface FirstArticle {
   measuredOn: string;
-  itemKey: string;
+  /** 品目CD × 格納場所CD（品目の識別子） */
+  hinmokuCD: string;
+  kakunoCD: string;
   weight: number;
   sokuteisha: string;
   status: FaStatus;

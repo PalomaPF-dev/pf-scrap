@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Printer } from "lucide-react";
-import type { ScrapItem } from "@/lib/scrapTypes";
+import { itemRef, type ScrapItem } from "@/lib/scrapTypes";
 
 /** QRコード画像（値=品目KEY）。qrcode ライブラリでクライアント側生成。 */
 function QrImage({ value, size = 88 }: { value: string; size?: number }) {
@@ -143,21 +143,26 @@ export default function ItemQrSheet({
               <tr>
                 <th className={`${th} w-[120px] text-center`}>QRコード</th>
                 <th className={th}>品名</th>
-                <th className={`${th} w-[180px]`}>管理図番</th>
+                <th className={`${th} w-[180px]`}>品目CD</th>
               </tr>
             </thead>
             <tbody>
-              {g.items.map((it) => (
-                <tr key={it.key} className="break-inside-avoid">
-                  <td className={`${td} text-center`}>
-                    <div className="flex justify-center">
-                      <QrImage value={it.key} />
-                    </div>
-                  </td>
-                  <td className={`${td} text-base font-bold`}>{it.hinmei || it.key}</td>
-                  <td className={`${td} font-mono text-base`}>{it.kanriZuban}</td>
-                </tr>
-              ))}
+              {g.items.map((it) => {
+                // QRの値は「品目CD-格納場所CD」。同じ品目CDが工場ごとにあるため、
+                // 品目CDだけでは読み取り側で1つに決められない。
+                const ref = itemRef(it.kanriZuban, it.kakunoCD);
+                return (
+                  <tr key={ref} className="break-inside-avoid">
+                    <td className={`${td} text-center`}>
+                      <div className="flex justify-center">
+                        <QrImage value={ref} />
+                      </div>
+                    </td>
+                    <td className={`${td} text-base font-bold`}>{it.hinmei || it.kanriZuban}</td>
+                    <td className={`${td} font-mono text-base`}>{it.kanriZuban}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </section>

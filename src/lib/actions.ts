@@ -161,6 +161,7 @@ export async function importItemsAction(
 export async function saveScaleAction(input: {
   id?: string | null;
   qrCode: string;
+  equipNo: string;
   name: string;
   kind: string;
   factory: string;
@@ -179,6 +180,7 @@ export async function saveScaleAction(input: {
     await upsertScale(s.companyId, {
       id: input.id ?? null,
       qrCode,
+      equipNo: asStr(input.equipNo, 50),
       name,
       kind,
       factory: asStr(input.factory, 50),

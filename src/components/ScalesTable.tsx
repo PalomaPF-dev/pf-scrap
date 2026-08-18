@@ -14,6 +14,7 @@ const input =
 type Draft = {
   id: string | null;
   qrCode: string;
+  equipNo: string;
   name: string;
   kind: string;
   factory: string;
@@ -21,12 +22,13 @@ type Draft = {
   active: boolean;
 };
 
-const emptyDraft = (): Draft => ({
+const emptyDraft = (factory: string): Draft => ({
   id: null,
   qrCode: "",
+  equipNo: "",
   name: "",
   kind: "上銅",
-  factory: "",
+  factory,
   sort: "0",
   active: true,
 });
@@ -58,7 +60,16 @@ function QrImage({ value, size = 96 }: { value: string; size?: number }) {
   return <img src={url} alt={value} width={size} height={size} />;
 }
 
-export default function ScalesTable({ scales }: { scales: Scale[] }) {
+export default function ScalesTable({
+  scales,
+  factory,
+  factoryOptions,
+}: {
+  scales: Scale[];
+  /** 絞り込み中の工場（新規登録の既定値にも使う） */
+  factory: string;
+  factoryOptions: string[];
+}) {
   const router = useRouter();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState("");
@@ -94,7 +105,7 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
         <button
           onClick={() => {
             setError("");
-            setDraft({ ...emptyDraft(), qrCode: genCode() });
+            setDraft({ ...emptyDraft(factory), qrCode: genCode() });
           }}
           className="inline-flex items-center gap-1.5 rounded-lg bg-[#b4632c] px-3 py-2 text-sm font-semibold text-white hover:bg-[#96521f]"
         >
@@ -107,11 +118,12 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr>
-              <th className={th}>QRコード</th>
-              <th className={th}>QR値</th>
+              <th className={th}>工場</th>
+              <th className={th}>設備番号</th>
               <th className={th}>名称</th>
               <th className={th}>種類</th>
-              <th className={th}>工場</th>
+              <th className={th}>QRコード</th>
+              <th className={th}>QR値</th>
               <th className={th}>状態</th>
               <th className={th}></th>
             </tr>
@@ -119,17 +131,15 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
           <tbody>
             {scales.length === 0 && (
               <tr>
-                <td className={td} colSpan={7}>
+                <td className={td} colSpan={8}>
                   重量計が未登録です。「新規登録」から、上銅・銅ダライそれぞれのスクラップ箱の重量計を登録してください。
                 </td>
               </tr>
             )}
             {scales.map((s) => (
               <tr key={s.id}>
-                <td className={td}>
-                  <QrImage value={s.qrCode} size={72} />
-                </td>
-                <td className={`${td} font-mono text-xs`}>{s.qrCode}</td>
+                <td className={td}>{s.factory || "（全工場）"}</td>
+                <td className={`${td} font-mono font-semibold`}>{s.equipNo || "-"}</td>
                 <td className={`${td} font-semibold`}>{s.name}</td>
                 <td className={td}>
                   <span
@@ -140,7 +150,10 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
                     {s.kind}
                   </span>
                 </td>
-                <td className={td}>{s.factory || "（全工場）"}</td>
+                <td className={td}>
+                  <QrImage value={s.qrCode} size={72} />
+                </td>
+                <td className={`${td} font-mono text-xs`}>{s.qrCode}</td>
                 <td className={td}>
                   {s.active ? (
                     "使用中"
@@ -164,6 +177,7 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
                         setDraft({
                           id: s.id,
                           qrCode: s.qrCode,
+                          equipNo: s.equipNo,
                           name: s.name,
                           kind: s.kind,
                           factory: s.factory,
@@ -209,6 +223,15 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
             </div>
             <div className="space-y-3">
               <label className="flex flex-col gap-1 text-xs text-[#707070]">
+                設備番号（重量計の管理番号。一覧・ラベルに出ます）
+                <input
+                  value={draft.equipNo}
+                  onChange={(e) => setDraft({ ...draft, equipNo: e.target.value })}
+                  className={`${input} font-mono`}
+                  placeholder="例: SC-001"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-[#707070]">
                 名称*（例: 上銅スクラップ箱①）
                 <input
                   value={draft.name}
@@ -245,12 +268,21 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
               </label>
               <label className="flex flex-col gap-1 text-xs text-[#707070]">
                 工場（空欄で全工場から選択可）
-                <input
+                <select
                   value={draft.factory}
                   onChange={(e) => setDraft({ ...draft, factory: e.target.value })}
                   className={input}
-                  placeholder="大口工場"
-                />
+                >
+                  <option value="">（全工場）</option>
+                  {!factoryOptions.includes(draft.factory) && draft.factory !== "" && (
+                    <option value={draft.factory}>{draft.factory}</option>
+                  )}
+                  {factoryOptions.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </select>
               </label>
               <div className="flex items-center gap-4">
                 <label className="flex flex-col gap-1 text-xs text-[#707070]">
@@ -313,6 +345,9 @@ export default function ScalesTable({ scales }: { scales: Scale[] }) {
             </div>
             <div className="flex flex-col items-center gap-2">
               <QrImage value={printTarget.qrCode} size={220} />
+              {printTarget.equipNo && (
+                <div className="font-mono text-xl font-bold text-[#333333]">{printTarget.equipNo}</div>
+              )}
               <div className="text-lg font-bold text-[#333333]">{printTarget.name}</div>
               <div className="text-sm text-[#707070]">
                 {printTarget.kind} ／ {printTarget.factory || "全工場"}

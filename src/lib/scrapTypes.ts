@@ -109,6 +109,8 @@ export interface FirstArticle {
 export interface Scale {
   id: string;
   qrCode: string;
+  /** 設備番号（重量計の管理番号） */
+  equipNo: string;
   name: string;
   kind: string;
   factory: string;

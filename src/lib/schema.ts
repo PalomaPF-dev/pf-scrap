@@ -99,6 +99,8 @@ async function buildSchema(): Promise<void> {
       UNIQUE (company_id, qr_code)
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_scales_company_idx ON scrap_scales(company_id)`);
+  // 設備番号（重量計そのものの管理番号）。一覧・ラベルに出して現物と突き合わせる。
+  await safeDdl(() => sql`ALTER TABLE scrap_scales ADD COLUMN IF NOT EXISTS equip_no TEXT NOT NULL DEFAULT ''`);
 
   // ① 日次記録票（日付×工場で1枚）。
   await safeDdl(() => sql`

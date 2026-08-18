@@ -6,7 +6,7 @@ import { Printer } from "lucide-react";
 import type { ScrapItem } from "@/lib/scrapTypes";
 
 /** QRコード画像（値=品目KEY）。qrcode ライブラリでクライアント側生成。 */
-function QrImage({ value, size = 110 }: { value: string; size?: number }) {
+function QrImage({ value, size = 88 }: { value: string; size?: number }) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -24,9 +24,12 @@ function QrImage({ value, size = 110 }: { value: string; size?: number }) {
   return <img src={url} alt={value} width={size} height={size} />;
 }
 
+const td = "border border-[#333333] px-3 py-2 align-middle";
+const th = "border border-[#333333] bg-[#f0f0ee] px-3 py-2 text-left font-bold whitespace-nowrap";
+
 /**
- * 品目QRカード一覧。まず工場を選び、次に職場（製造場所）で絞り込んで印刷する。
- * 印刷レイアウトは1ページ4列。
+ * 品目QR一覧。まず工場を選び、次に職場（製造場所）で絞り込んで印刷する。
+ * 現場で見るのはQR・品名・管理図番だけなので、表形式でその3列に絞る。
  */
 export default function ItemQrSheet({
   factory,
@@ -126,27 +129,32 @@ export default function ItemQrSheet({
         </p>
       )}
       {groups.map((g) => (
-        <section key={g.workplace} className="mb-8 break-inside-avoid">
-          <h2 className="mb-3 border-b-2 border-[#b4632c] pb-1 text-base font-bold text-[#333333]">
+        <section key={g.workplace} className="mb-8">
+          <h2 className="mb-2 border-b-2 border-[#b4632c] pb-1 text-base font-bold text-[#333333]">
             {factory}／{g.workplace}（{g.items.length}品目）
           </h2>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 print:grid-cols-4">
-            {g.items.map((it) => (
-              <div
-                key={it.key}
-                className="break-inside-avoid rounded-xl border border-[#e5e5e5] bg-white p-3 text-center"
-              >
-                <div className="flex justify-center">
-                  <QrImage value={it.key} />
-                </div>
-                <div className="mt-1 text-sm font-bold text-[#333333]">{it.hinmei || it.key}</div>
-                <div className="text-xs text-[#707070]">
-                  {it.kanriZuban} ／ {it.kubun}
-                </div>
-                <div className="font-mono text-[10px] text-[#909090]">{it.key}</div>
-              </div>
-            ))}
-          </div>
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr>
+                <th className={`${th} w-[120px] text-center`}>QRコード</th>
+                <th className={th}>品名</th>
+                <th className={`${th} w-[180px]`}>管理図番</th>
+              </tr>
+            </thead>
+            <tbody>
+              {g.items.map((it) => (
+                <tr key={it.key} className="break-inside-avoid">
+                  <td className={`${td} text-center`}>
+                    <div className="flex justify-center">
+                      <QrImage value={it.key} />
+                    </div>
+                  </td>
+                  <td className={`${td} text-base font-bold`}>{it.hinmei || it.key}</td>
+                  <td className={`${td} font-mono text-base`}>{it.kanriZuban}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       ))}
     </div>

@@ -77,7 +77,13 @@ function mapItem(r: any): ScrapItem {
 
 export async function listItems(
   companyId: string,
-  opts: { q?: string; factory?: string | null; limit?: number } = {}
+  opts: {
+    q?: string;
+    factory?: string | null;
+    /** 製造場所名（職場）での絞り込み。null/空なら絞り込まない */
+    workplace?: string | null;
+    limit?: number;
+  } = {}
 ): Promise<{ items: ScrapItem[]; total: number }> {
   await ensureSchema();
   const sql = getSql();
@@ -85,6 +91,7 @@ export async function listItems(
   const q = (opts.q ?? "").trim();
   const like = `%${q}%`;
   const factory = opts.factory ?? null;
+  const workplace = (opts.workplace ?? "").trim() || null;
   // 子図番・親図番・管理図番・KEY・品名で検索（子図番での呼び出しが主用途）
   const rows = await sql`
     SELECT *, COUNT(*) OVER() AS total FROM scrap_items
@@ -93,9 +100,27 @@ export async function listItems(
            OR kanri_zuban ILIKE ${like} OR key ILIKE ${like}
            OR hinmei ILIKE ${like} OR ko_hinmei ILIKE ${like} OR oya_hinmei ILIKE ${like})
       AND (${factory}::text IS NULL OR factory = ${factory} OR factory = '')
+      AND (${workplace}::text IS NULL OR seizo_basho_mei = ${workplace})
     ORDER BY kanri_zuban, ko_zuban
     LIMIT ${limit}`;
   return { items: rows.map(mapItem), total: rows.length ? Number(rows[0].total) : 0 };
+}
+
+/** 品目マスターに登録されている製造場所名（職場）の一覧。工場を指定すればその工場ぶんだけ。 */
+export async function listItemWorkplaces(
+  companyId: string,
+  factory: string | null = null
+): Promise<{ name: string; count: number }[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT seizo_basho_mei AS name, COUNT(DISTINCT key) AS cnt
+    FROM scrap_items
+    WHERE company_id = ${companyId} AND seizo_basho_mei <> ''
+      AND (${factory}::text IS NULL OR factory = ${factory} OR factory = '')
+    GROUP BY seizo_basho_mei
+    ORDER BY seizo_basho_mei`;
+  return rows.map((r: any) => ({ name: String(r.name), count: Number(r.cnt) || 0 }));
 }
 
 export async function getItemById(companyId: string, id: string): Promise<ScrapItem | null> {
@@ -207,6 +232,7 @@ function mapScale(r: any): Scale {
   return {
     id: r.id,
     qrCode: r.qr_code,
+    equipNo: r.equip_no ?? "",
     name: r.name,
     kind: r.kind,
     factory: r.factory,
@@ -229,7 +255,7 @@ export async function listScales(
     WHERE company_id = ${companyId}
       AND (${factory}::text IS NULL OR factory = ${factory} OR factory = '')
       AND (${activeOnly} = false OR active = true)
-    ORDER BY kind, sort ASC, name ASC`;
+    ORDER BY factory ASC, kind ASC, sort ASC, equip_no ASC, name ASC`;
   return rows.map(mapScale);
 }
 
@@ -261,17 +287,17 @@ export async function upsertScale(
   if (s.id) {
     await sql`
       UPDATE scrap_scales SET
-        qr_code = ${s.qrCode}, name = ${s.name}, kind = ${s.kind},
+        qr_code = ${s.qrCode}, equip_no = ${s.equipNo}, name = ${s.name}, kind = ${s.kind},
         factory = ${s.factory}, sort = ${s.sort}, active = ${s.active}
       WHERE company_id = ${companyId} AND id = ${s.id}`;
     return s.id;
   }
   const rows = await sql`
-    INSERT INTO scrap_scales (company_id, qr_code, name, kind, factory, sort, active)
-    VALUES (${companyId}, ${s.qrCode}, ${s.name}, ${s.kind}, ${s.factory}, ${s.sort}, ${s.active})
+    INSERT INTO scrap_scales (company_id, qr_code, equip_no, name, kind, factory, sort, active)
+    VALUES (${companyId}, ${s.qrCode}, ${s.equipNo}, ${s.name}, ${s.kind}, ${s.factory}, ${s.sort}, ${s.active})
     ON CONFLICT (company_id, qr_code) DO UPDATE SET
-      name = EXCLUDED.name, kind = EXCLUDED.kind, factory = EXCLUDED.factory,
-      sort = EXCLUDED.sort, active = EXCLUDED.active
+      equip_no = EXCLUDED.equip_no, name = EXCLUDED.name, kind = EXCLUDED.kind,
+      factory = EXCLUDED.factory, sort = EXCLUDED.sort, active = EXCLUDED.active
     RETURNING id`;
   return rows[0].id as string;
 }

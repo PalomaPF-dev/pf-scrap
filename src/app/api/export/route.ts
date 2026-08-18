@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionWithRole } from "@/lib/session";
-import { DAILY_STATUS_LABEL, listDailyAgg, listItems } from "@/lib/db";
+import { DAILY_STATUS_LABEL, listDailyAgg, listItems, listScales } from "@/lib/db";
 import { monthlyItemRows, yearSummary } from "@/lib/calc";
 import { toCsv } from "@/lib/csv";
 import { isYmStr } from "@/lib/format";
@@ -124,7 +124,16 @@ export async function GET(req: NextRequest) {
       if (s.role !== "admin") {
         return NextResponse.json({ message: "管理者のみ出力できます" }, { status: 403 });
       }
-      const { items } = await listItems(s.companyId, { limit: 2000 });
+      // 画面の絞り込み（工場・製造場所・検索語）をそのまま出力に反映する
+      const itemFactory = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
+      const itemWorkplace = (req.nextUrl.searchParams.get("workplace") ?? "").trim() || null;
+      const itemQ = (req.nextUrl.searchParams.get("q") ?? "").trim();
+      const { items } = await listItems(s.companyId, {
+        q: itemQ,
+        factory: itemFactory,
+        workplace: itemWorkplace,
+        limit: 2000,
+      });
       const rows: (string | number | null)[][] = [
         ["管理図番", "品名", "KEY", "区分", "親図番", "親品名", "子図番", "子品名", "単位", "構成重量", "完成重量(理論)", "製造場所CD", "製造場所名", "工場"],
       ];
@@ -146,7 +155,31 @@ export async function GET(req: NextRequest) {
           it.factory,
         ]);
       }
-      return csvResponse("品目マスター.csv", rows);
+      const suffix = [itemFactory, itemWorkplace].filter(Boolean).join("_");
+      return csvResponse(`品目マスター${suffix ? "_" + suffix : ""}.csv`, rows);
+    }
+
+    if (type === "scales") {
+      // テプラ（差し込み印刷）用。QR値の列をQRオブジェクトに割り当てて刷る。
+      if (s.role !== "admin") {
+        return NextResponse.json({ message: "管理者のみ出力できます" }, { status: 403 });
+      }
+      const scaleFactory = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
+      const scales = await listScales(s.companyId, { factory: scaleFactory });
+      const rows: (string | number | null)[][] = [
+        ["工場", "設備番号", "名称", "種類", "QR値", "状態"],
+      ];
+      for (const sc of scales) {
+        rows.push([
+          sc.factory,
+          sc.equipNo,
+          sc.name,
+          sc.kind,
+          sc.qrCode,
+          sc.active ? "使用中" : "停止",
+        ]);
+      }
+      return csvResponse(`重量計QR${scaleFactory ? "_" + scaleFactory : ""}.csv`, rows);
     }
 
     return NextResponse.json({ message: "typeが不正です" }, { status: 400 });

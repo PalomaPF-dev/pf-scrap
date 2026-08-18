@@ -2,6 +2,7 @@ import { FileDown } from "lucide-react";
 import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
 import {
   DAILY_STATUS_LABEL,
+  KUBUN_LIST,
   getDailyRecord,
   listDailyAgg,
   listFactoryOptions,
@@ -10,6 +11,7 @@ import {
   type DailyRecord,
   type Scale,
 } from "@/lib/db";
+import { dailyBomTotals, type DailyBom } from "@/lib/calc";
 import { fmt, fmtPct, isDateStr, isYmStr, thisMonthStr, todayStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -40,6 +42,7 @@ export default async function DailyPage({
   let record: DailyRecord | null;
   let agg: DailyAggRow[];
   let scales: Scale[];
+  let bom: DailyBom;
   try {
     const restriction = await getFactoryRestriction(session);
     const factories = await listFactoryOptions(session.companyId);
@@ -49,13 +52,15 @@ export default async function DailyPage({
     factory = restriction.restricted
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
-    [record, agg, scales] = await Promise.all([
+    [record, agg, scales, bom] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listDailyAgg(session.companyId, ym, restriction.restricted ? restriction.factory : null),
       listScales(session.companyId, {
         factory: restriction.restricted ? restriction.factory : factory,
         activeOnly: true,
       }),
+      // McFrameの日別加工数 × 単品完成重量（初品実測を優先）＝ その日の完成品重量
+      dailyBomTotals(session.companyId, date, factory),
     ]);
   } catch (e) {
     console.error("[daily]", e);
@@ -68,6 +73,8 @@ export default async function DailyPage({
   }
 
   const isAdmin = session.role === "admin";
+  // 当日の記録スクラップ合計（理論値との突合に使う）
+  const dayTotal = (record?.entries ?? []).reduce((t, e) => t + e.weight, 0);
   const monthTotal = {
     jodo: agg.reduce((t, r) => t + r.byKind["上銅"], 0),
     darai: agg.reduce((t, r) => t + r.byKind["銅ダライ"], 0),
@@ -93,6 +100,56 @@ export default async function DailyPage({
         userName={session.userName}
         isAdmin={isAdmin}
       />
+
+      {/* 当日の理論値（McFrame日別加工数 × 単品完成重量） */}
+      <section className="mt-3 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:mt-4 sm:p-5">
+        <h2 className="mb-1 text-base font-bold text-[#333333] sm:text-sm">
+          {date} の完成品重量（McFrame加工数 × 初品重量）
+        </h2>
+        <p className="mb-3 text-xs text-[#909090]">
+          完成品重量 = Σ(その日の加工数 × 単品完成重量)。単品完成重量は承認済みの初品実測を優先し、
+          無ければ品目マスターの理論値を使います。
+        </p>
+        {bom.items === 0 ? (
+          <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
+            この日のMcFrame加工数が取り込まれていません。「McFrame取込」から
+            日付つきの加工数（KEY, 日付, 加工数）を取り込むと、当日の完成品重量が算出されます。
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="rounded-xl bg-[#f7f7f5] px-3 py-2.5">
+              <div className="text-xs text-[#707070]">完成品重量</div>
+              <div className="text-lg font-bold tabular-nums">{fmt(bom.finished)} kg</div>
+            </div>
+            <div className="rounded-xl bg-[#f7f7f5] px-3 py-2.5">
+              <div className="text-xs text-[#707070]">使用量（構成法）</div>
+              <div className="text-lg font-bold tabular-nums">{fmt(bom.usage)} kg</div>
+            </div>
+            <div className="rounded-xl bg-[#faf6ef] px-3 py-2.5">
+              <div className="text-xs text-[#707070]">理論スクラップ</div>
+              <div className="text-lg font-bold tabular-nums">{fmt(bom.usage - bom.finished)} kg</div>
+            </div>
+            <div className="rounded-xl bg-[#f7f7f5] px-3 py-2.5">
+              <div className="text-xs text-[#707070]">日次記録 − 理論</div>
+              <div
+                className={`text-lg font-bold tabular-nums ${
+                  Math.abs(dayTotal - (bom.usage - bom.finished)) > (bom.usage - bom.finished) * 0.05
+                    ? "text-[#dc000c]"
+                    : ""
+                }`}
+              >
+                {fmt(dayTotal - (bom.usage - bom.finished))} kg
+              </div>
+            </div>
+          </div>
+        )}
+        {bom.items > 0 && (
+          <p className="mt-2 text-xs text-[#909090]">
+            対象品目 {bom.items} 件 ／ 区分別 完成品重量:{" "}
+            {KUBUN_LIST.map((k) => `${k} ${fmt(bom.byKubun[k].finished)}`).join(" ／ ")} kg
+          </p>
+        )}
+      </section>
 
       {/* 月間集計 */}
       <section className="mt-6 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">

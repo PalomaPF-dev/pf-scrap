@@ -7,9 +7,17 @@ import { importMcframeAction } from "@/lib/actions";
 import { parseCsv, readTextFile } from "@/lib/csv";
 import { normYm } from "@/lib/format";
 
+/** 日付として読める値か（2026-08-05 / 2026/8/5 / 20260805）。年月だけなら false。 */
+function isDailyValue(v: unknown): boolean {
+  const s = String(v ?? "").trim();
+  if (!s) return false;
+  return /^\d{4}\D?\d{1,2}\D+\d{1,2}$/.test(s) || /^\d{8}$/.test(s);
+}
+
 /**
- * McFrame 完成品数量（加工数）のCSV取込。
- * 「KEY,年月,加工数」または「管理図番,製造場所CD,年月,加工数」の形式（1行目ヘッダー可）。
+ * McFrame 完成品数量（加工数）のCSV取込。品目マスターのKEY単位で取り込む。
+ * 「KEY,日付,加工数」（日別）または「KEY,年月,加工数」（月次）。
+ * 「管理図番,製造場所CD,日付/年月,加工数」の4列も可。1行目ヘッダー可。
  * UTF-8 / Shift_JIS 自動判定。
  */
 export default function McframeImportButton() {
@@ -28,9 +36,10 @@ export default function McframeImportButton() {
     // ヘッダー検出と列位置の判定
     let start = 0;
     const h = rows[0].map((v) => String(v).trim());
-    const looksHeader = h.some((v) => /key|年月|加工数|図番|数量|qty/i.test(v));
+    const looksHeader = h.some((v) => /key|年月|日付|加工数|図番|数量|qty/i.test(v));
     let idxKey = 0;
     let idxYm = 1;
+    let idxDate = -1;
     let idxQty = 2;
     let idxBasho = -1;
     if (looksHeader) {
@@ -39,25 +48,34 @@ export default function McframeImportButton() {
         h.findIndex((v) => names.some((n) => v.toLowerCase() === n || v.includes(n)));
       const k = find("key", "管理図番");
       const b = find("製造場所");
-      const y = find("年月", "日付");
+      const d = find("日付", "完成日", "実績日");
+      const y = find("年月");
       const q = find("加工数", "数量", "qty");
       if (k >= 0) idxKey = k;
       if (b >= 0) idxBasho = b;
+      if (d >= 0) idxDate = d;
       if (y >= 0) idxYm = y;
       if (q >= 0) idxQty = q;
     } else if (rows[0].length >= 4 && normYm(rows[0][2])) {
-      // ヘッダー無し4列: 管理図番, 製造場所CD, 年月, 加工数
+      // ヘッダー無し4列: 管理図番, 製造場所CD, 年月(または日付), 加工数
       idxKey = 0;
       idxBasho = 1;
       idxYm = 2;
       idxQty = 3;
     }
-    const records = rows.slice(start).map((r) => ({
-      itemKey:
-        String(r[idxKey] ?? "").trim() + (idxBasho >= 0 ? String(r[idxBasho] ?? "").trim() : ""),
-      ym: String(r[idxYm] ?? "").trim(),
-      qty: String(r[idxQty] ?? "").trim(),
-    }));
+    // 日付列があれば日別、無ければ年月列を見る（年月列に日付が入っていれば日別として扱う）
+    const idxPeriod = idxDate >= 0 ? idxDate : idxYm;
+    const isDaily = idxDate >= 0 || rows.slice(start, start + 5).some((r) => isDailyValue(r[idxYm]));
+    const records = rows.slice(start).map((r) => {
+      const period = String(r[idxPeriod] ?? "").trim();
+      return {
+        itemKey:
+          String(r[idxKey] ?? "").trim() + (idxBasho >= 0 ? String(r[idxBasho] ?? "").trim() : ""),
+        date: isDaily ? period : "",
+        ym: isDaily ? "" : period,
+        qty: String(r[idxQty] ?? "").trim(),
+      };
+    });
     startTransition(async () => {
       const res = await importMcframeAction(records);
       setMessage(res.message ?? "");

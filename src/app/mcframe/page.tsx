@@ -1,6 +1,6 @@
 import { FileDown } from "lucide-react";
 import { requireAdminPage } from "@/lib/session";
-import { monthlyItemRows } from "@/lib/calc";
+import { mcframeDayTotals, monthlyItemRows, type McframeDayTotal } from "@/lib/calc";
 import { fmt, isYmStr, thisMonthStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -25,8 +25,12 @@ export default async function McframePage({
   const ym = isYmStr(sp.ym) ? sp.ym : thisMonthStr();
 
   let rows: Awaited<ReturnType<typeof monthlyItemRows>>;
+  let dayTotals: McframeDayTotal[];
   try {
-    rows = await monthlyItemRows(session.companyId, ym);
+    [rows, dayTotals] = await Promise.all([
+      monthlyItemRows(session.companyId, ym),
+      mcframeDayTotals(session.companyId, ym),
+    ]);
   } catch (e) {
     console.error("[mcframe]", e);
     return (
@@ -44,7 +48,7 @@ export default async function McframePage({
       <div className="p-4 sm:p-6">
         <PageHeader
           title="McFrame取込"
-          description="CSV形式: KEY,年月,加工数（1行目ヘッダー可 / 「管理図番,製造場所CD,年月,加工数」の4列も可 / 年月は 2026/08・2026-08・202608 いずれも可）。同じ年月×KEYは上書きされます。"
+          description="品目マスターのKEY単位で完成品数量（加工数）を取り込みます。CSV形式: KEY,日付,加工数（日別）または KEY,年月,加工数（月次）。「管理図番,製造場所CD,日付/年月,加工数」の4列も可。日付は 2026/8/5・2026-08-05、年月は 2026/08・202608 いずれも可。同じ日付(年月)×KEYは上書きされます。"
           action={
             <>
               <McframeImportButton />
@@ -59,6 +63,61 @@ export default async function McframePage({
             </>
           }
         />
+
+        {/* 日別の完成品重量（日付つきで取り込んだ月のみ） */}
+        <section className="mb-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+          <h2 className="mb-1 text-sm font-bold text-[#333333]">{ym} 日別の完成品重量</h2>
+          <p className="mb-3 text-xs text-[#909090]">
+            完成品重量 = その日の加工数 × 単品完成重量（初品実測を優先）。日付つきで取り込んだ月だけ表示されます。
+          </p>
+          {dayTotals.length === 0 ? (
+            <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
+              この月は日別の加工数がありません（月次の取込値で集計しています）。
+              CSVに「日付」列を付けて取り込むと、日ごとの完成品重量が出せます。
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="print-table w-full border-collapse text-sm">
+                <thead>
+                  <tr>
+                    <th className={th}>日付</th>
+                    <th className={thNum}>加工数</th>
+                    <th className={thNum}>完成品重量(kg)</th>
+                    <th className={thNum}>使用量(kg)</th>
+                    <th className={thNum}>理論スクラップ(kg)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dayTotals.map((d) => (
+                    <tr key={d.date}>
+                      <td className={td}>
+                        <a
+                          href={`/daily?date=${d.date}`}
+                          className="text-[#b4632c] hover:underline"
+                        >
+                          {d.date}
+                        </a>
+                      </td>
+                      <td className={tdNum}>{fmt(d.qty, 0)}</td>
+                      <td className={`${tdNum} font-semibold`}>{fmt(d.finished)}</td>
+                      <td className={tdNum}>{fmt(d.usage)}</td>
+                      <td className={tdNum}>{fmt(d.usage - d.finished)}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-[#faf6ef] font-semibold">
+                    <td className={td}>月間合計（{dayTotals.length}日分）</td>
+                    <td className={tdNum}>{fmt(dayTotals.reduce((t, d) => t + d.qty, 0), 0)}</td>
+                    <td className={tdNum}>{fmt(dayTotals.reduce((t, d) => t + d.finished, 0))}</td>
+                    <td className={tdNum}>{fmt(dayTotals.reduce((t, d) => t + d.usage, 0))}</td>
+                    <td className={tdNum}>
+                      {fmt(dayTotals.reduce((t, d) => t + d.usage - d.finished, 0))}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
         <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
           <h2 className="mb-1 text-sm font-bold text-[#333333]">

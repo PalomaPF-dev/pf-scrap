@@ -30,6 +30,7 @@ import {
   upsertItem,
   bulkUpsertItems,
   upsertMcframeQty,
+  upsertMcframeDays,
   upsertProcureDays,
   upsertScale,
   type DailyEntry,
@@ -532,29 +533,52 @@ export async function rejectFirstArticleAction(
 
 // ===== ④ McFrame取込（管理者のみ） =====
 
-/** 加工数CSVの取込。行はクライアント側でパース済み（{ itemKey, ym, qty }）。 */
+/**
+ * 加工数CSVの取込。行はクライアント側でパース済み（{ itemKey, date?, ym?, qty }）。
+ * 日付があれば日別（scrap_mcframe_days）、年月だけなら月次（scrap_mcframe_qty）に入れる。
+ * 日別が入っている月は、月次集計でも日別の合計を使う。
+ */
 export async function importMcframeAction(
-  rows: { itemKey?: unknown; ym?: unknown; qty?: unknown }[]
+  rows: { itemKey?: unknown; date?: unknown; ym?: unknown; qty?: unknown }[]
 ): Promise<ActionResult> {
   try {
     const s = await requireAdminSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 10000) return fail("一度に取込できるのは10,000行までです。");
-    const clean: { ym: string; itemKey: string; qty: number }[] = [];
+    const days: { qdate: string; itemKey: string; qty: number }[] = [];
+    const months: { ym: string; itemKey: string; qty: number }[] = [];
     let bad = 0;
     for (const r of rows) {
       const itemKey = asStr(r.itemKey, 100);
-      const ym = normYm(r.ym);
-      if (!itemKey || !ym) {
+      if (!itemKey) {
         bad++;
         continue;
       }
-      clean.push({ ym, itemKey, qty: toNum(r.qty) });
+      const qdate = normDateStr(r.date);
+      if (qdate) {
+        days.push({ qdate, itemKey, qty: toNum(r.qty) });
+        continue;
+      }
+      const ym = normYm(r.ym);
+      if (!ym) {
+        bad++;
+        continue;
+      }
+      months.push({ ym, itemKey, qty: toNum(r.qty) });
     }
-    const count = await upsertMcframeQty(s.companyId, clean);
+    const dayCount = days.length ? await upsertMcframeDays(s.companyId, days) : 0;
+    const monthCount = months.length ? await upsertMcframeQty(s.companyId, months) : 0;
     revalidatePath("/mcframe");
+    revalidatePath("/daily");
     revalidatePath("/");
-    return { ok: true, message: `取込完了: ${count}件（読取不可行: ${bad}件）` };
+    const parts = [
+      dayCount ? `日別 ${dayCount}件` : "",
+      monthCount ? `月次 ${monthCount}件` : "",
+    ].filter(Boolean);
+    return {
+      ok: true,
+      message: `取込完了: ${parts.join(" / ") || "0件"}（読取不可行: ${bad}件）`,
+    };
   } catch (e) {
     return fail((e as Error).message);
   }

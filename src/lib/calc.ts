@@ -36,23 +36,55 @@ export interface MonthlyItemRow {
   scrap: number;
 }
 
+/** YYYY-MM の月末日（YYYY-MM-DD） */
+function monthEnd(ym: string): string {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(y, m, 0);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
 /**
- * 対象月の品目別計算。加工数があるKEYごとに1行。
+ * 品目別計算の本体。加工数があるKEYごとに1行。
+ *
+ * 加工数の取り方:
+ *   - mode='day'   … その日の日別加工数（scrap_mcframe_days）
+ *   - mode='month' … その月に日別加工数があれば日別の合計、無ければ月次取込値
+ * 単品完成重量は「対象日（月なら月末）以前の最新の承認済み初品実測」を優先（無ければマスター理論値）。
  * factory 指定でその工場の品目のみ（null=全社）。
- * 単品完成重量は「対象月末以前の最新の承認済み初品実測」を優先（無ければマスター理論値）。
  */
-export async function monthlyItemRows(
+async function itemRows(
   companyId: string,
+  mode: "day" | "month",
   ym: string,
-  factory: string | null = null
+  qdate: string,
+  factory: string | null
 ): Promise<MonthlyItemRow[]> {
   await ensureSchema();
   const sql = getSql();
+  // 単品完成重量の基準日（月なら月末）
+  const asOf = mode === "day" ? qdate : monthEnd(ym);
   const rows = await sql`
+    WITH src AS (
+      SELECT item_key, SUM(qty)::numeric AS qty
+      FROM scrap_mcframe_days
+      WHERE company_id = ${companyId}
+        AND ((${mode} = 'day' AND qdate = ${qdate}::date)
+          OR (${mode} = 'month' AND to_char(qdate, 'YYYY-MM') = ${ym}))
+      GROUP BY item_key
+      UNION ALL
+      -- 日別が1件も無い月だけ、月次取込値を使う（二重計上を避ける）
+      SELECT item_key, qty FROM scrap_mcframe_qty q
+      WHERE q.company_id = ${companyId} AND ${mode} = 'month' AND q.ym = ${ym}
+        AND NOT EXISTS (
+          SELECT 1 FROM scrap_mcframe_days d
+          WHERE d.company_id = ${companyId} AND to_char(d.qdate, 'YYYY-MM') = ${ym})
+    )
     SELECT m.item_key, m.qty,
       i.kubun, i.hinmei, i.kansei_juryo AS theo_unit, i.kosei_sum, i.cnt, i.all_cnt,
       fa.weight AS fa_weight, fa.measured_on AS fa_date
-    FROM scrap_mcframe_qty m
+    FROM src m
     LEFT JOIN LATERAL (
       SELECT (ARRAY_AGG(kubun ORDER BY ko_zuban)) [1] AS kubun,
              (ARRAY_AGG(hinmei ORDER BY ko_zuban)) [1] AS hinmei,
@@ -61,17 +93,16 @@ export async function monthlyItemRows(
              COUNT(*) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS cnt,
              COUNT(*) AS all_cnt
       FROM scrap_items s
-      WHERE s.company_id = m.company_id AND s.key = m.item_key
+      WHERE s.company_id = ${companyId} AND s.key = m.item_key
     ) i ON true
     LEFT JOIN LATERAL (
       SELECT weight, measured_on FROM scrap_first_articles f
-      WHERE f.company_id = m.company_id AND f.item_key = m.item_key
+      WHERE f.company_id = ${companyId} AND f.item_key = m.item_key
         AND f.status = 'approved'
-        AND f.measured_on <= ((m.ym || '-01')::date + interval '1 month' - interval '1 day')
+        AND f.measured_on <= ${asOf}::date
       ORDER BY f.measured_on DESC LIMIT 1
     ) fa ON true
-    WHERE m.company_id = ${companyId} AND m.ym = ${ym}
-      AND (${factory}::text IS NULL OR COALESCE(i.cnt, 0) > 0)`;
+    WHERE (${factory}::text IS NULL OR COALESCE(i.cnt, 0) > 0)`;
   const out: MonthlyItemRow[] = rows.map((r: any) => {
     const qty = Number(r.qty) || 0;
     const found = Number(r.all_cnt) > 0;
@@ -101,6 +132,101 @@ export async function monthlyItemRows(
   });
   out.sort((a, b) => b.scrap - a.scrap);
   return out;
+}
+
+/** 対象月の品目別計算（日別加工数がある月は日別の合計を使う）。 */
+export function monthlyItemRows(
+  companyId: string,
+  ym: string,
+  factory: string | null = null
+): Promise<MonthlyItemRow[]> {
+  return itemRows(companyId, "month", ym, `${ym}-01`, factory);
+}
+
+/** 対象日の品目別計算（日別加工数のみ）。 */
+export function dailyItemRows(
+  companyId: string,
+  date: string,
+  factory: string | null = null
+): Promise<MonthlyItemRow[]> {
+  return itemRows(companyId, "day", date.slice(0, 7), date, factory);
+}
+
+export interface DailyBom {
+  /** その日の完成品重量 = Σ(日別加工数 × 単品完成重量) */
+  finished: number;
+  /** その日の使用量（構成法） = Σ(日別加工数 × 構成重量) */
+  usage: number;
+  /** 加工数のあった品目数（0なら McFrame の日別データが未取込） */
+  items: number;
+  byKubun: Record<string, { finished: number; usage: number }>;
+}
+
+/** 対象日の完成品重量・使用量（区分別内訳つき）。日別加工数が無い日は items=0。 */
+export async function dailyBomTotals(
+  companyId: string,
+  date: string,
+  factory: string | null = null
+): Promise<DailyBom> {
+  const rows = await dailyItemRows(companyId, date, factory);
+  const byKubun: Record<string, { finished: number; usage: number }> = {};
+  for (const kb of KUBUN_LIST) byKubun[kb] = { finished: 0, usage: 0 };
+  let finished = 0;
+  let usage = 0;
+  for (const r of rows) {
+    const kb = (KUBUN_LIST as readonly string[]).includes(r.kubun) ? r.kubun : "その他";
+    byKubun[kb].finished += r.finished;
+    byKubun[kb].usage += r.usage;
+    finished += r.finished;
+    usage += r.usage;
+  }
+  return { finished, usage, items: rows.length, byKubun };
+}
+
+export interface McframeDayTotal {
+  date: string;
+  qty: number;
+  finished: number;
+  usage: number;
+}
+
+/** 対象月の日別合計（McFrame取込の確認用）。日別加工数が無い月は空配列。 */
+export async function mcframeDayTotals(
+  companyId: string,
+  ym: string,
+  factory: string | null = null
+): Promise<McframeDayTotal[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT to_char(m.qdate, 'YYYY-MM-DD') AS d,
+      SUM(m.qty) AS qty,
+      SUM(m.qty * COALESCE(fa.weight, i.kansei_juryo, 0)) AS finished,
+      SUM(m.qty * COALESCE(i.kosei_sum, 0)) AS usage
+    FROM scrap_mcframe_days m
+    LEFT JOIN LATERAL (
+      SELECT (ARRAY_AGG(kansei_juryo ORDER BY ko_zuban)) [1] AS kansei_juryo,
+             SUM(kosei_juryo) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS kosei_sum,
+             COUNT(*) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS cnt
+      FROM scrap_items s
+      WHERE s.company_id = ${companyId} AND s.key = m.item_key
+    ) i ON true
+    LEFT JOIN LATERAL (
+      SELECT weight FROM scrap_first_articles f
+      WHERE f.company_id = ${companyId} AND f.item_key = m.item_key
+        AND f.status = 'approved' AND f.measured_on <= m.qdate
+      ORDER BY f.measured_on DESC LIMIT 1
+    ) fa ON true
+    WHERE m.company_id = ${companyId} AND to_char(m.qdate, 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR COALESCE(i.cnt, 0) > 0)
+    GROUP BY m.qdate
+    ORDER BY m.qdate`;
+  return rows.map((r: any) => ({
+    date: r.d,
+    qty: Number(r.qty) || 0,
+    finished: Number(r.finished) || 0,
+    usage: Number(r.usage) || 0,
+  }));
 }
 
 export interface KubunSummary {

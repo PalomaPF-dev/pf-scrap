@@ -680,6 +680,44 @@ export async function upsertMcframeQty(
   return count;
 }
 
+/** 日付×KEY で upsert（再取込は上書き）。取込件数を返す。 */
+export async function upsertMcframeDays(
+  companyId: string,
+  rows: { qdate: string; itemKey: string; qty: number }[]
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  const uniq = new Map<string, { qdate: string; itemKey: string; qty: number }>();
+  for (const r of rows) uniq.set(`${r.qdate}\t${r.itemKey}`, r);
+  const list = [...uniq.values()];
+  const chunkSize = 500;
+  let count = 0;
+  for (let i = 0; i < list.length; i += chunkSize) {
+    const c = list.slice(i, i + chunkSize);
+    await sql`
+      INSERT INTO scrap_mcframe_days (company_id, qdate, item_key, qty)
+      SELECT ${companyId}, * FROM unnest(
+        ${c.map((x) => x.qdate)}::date[],
+        ${c.map((x) => x.itemKey)}::text[],
+        ${c.map((x) => x.qty)}::numeric[]
+      )
+      ON CONFLICT (company_id, qdate, item_key) DO UPDATE SET
+        qty = EXCLUDED.qty, updated_at = NOW()`;
+    count += c.length;
+  }
+  return count;
+}
+
+/** 対象月に日別の加工数が入っているか（月次集計で日別を優先するかの判定）。 */
+export async function hasMcframeDays(companyId: string, ym: string): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT 1 FROM scrap_mcframe_days
+    WHERE company_id = ${companyId} AND to_char(qdate, 'YYYY-MM') = ${ym} LIMIT 1`;
+  return rows.length > 0;
+}
+
 // ===== ⑤ 月次入力 =====
 
 function mapMonthly(r: any): MonthlyInput {

@@ -204,6 +204,21 @@ async function buildSchema(): Promise<void> {
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_mcframe_qty_ym_idx ON scrap_mcframe_qty(company_id, ym)`);
 
+  // ④' McFrame取込の完成品数量（日付×KEY）。
+  // 日別の加工数があれば、その日の完成品重量 = Σ(加工数 × 単品完成重量) を日単位で出せる。
+  // 月次集計は、その月に日別データがあれば日別の合計を優先する（過去データは月次のみ）。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_mcframe_days (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      qdate      DATE NOT NULL,
+      item_key   TEXT NOT NULL,
+      qty        NUMERIC NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, qdate, item_key)
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_mcframe_days_date_idx ON scrap_mcframe_days(company_id, qdate)`);
+
   // ⑤ 月次入力（年月×工場で1行）。区分別の月初在庫・購入重量と、スクラップ売却数量。
   // 工場別シート（大口/直方）の運用に合わせて工場単位で持ち、照合は全社合算/工場別を切り替える。
   await safeDdl(() => sql`

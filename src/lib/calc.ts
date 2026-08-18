@@ -3,9 +3,10 @@ import { ensureSchema } from "./schema";
 import {
   dailyMonthTotals,
   getMonthlyInput,
+  monthlyAdjSums,
+  monthlyProcureSums,
   KUBUN_LIST,
   type Kubun,
-  type MonthlyInput,
 } from "./db";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -35,35 +36,45 @@ export interface MonthlyItemRow {
   scrap: number;
 }
 
-/** 対象月の品目別計算。加工数があるKEYごとに1行。 */
-export async function monthlyItemRows(companyId: string, ym: string): Promise<MonthlyItemRow[]> {
+/**
+ * 対象月の品目別計算。加工数があるKEYごとに1行。
+ * factory 指定でその工場の品目のみ（null=全社）。
+ * 単品完成重量は「対象月末以前の最新の承認済み初品実測」を優先（無ければマスター理論値）。
+ */
+export async function monthlyItemRows(
+  companyId: string,
+  ym: string,
+  factory: string | null = null
+): Promise<MonthlyItemRow[]> {
   await ensureSchema();
   const sql = getSql();
-  // 単品完成重量は「対象月末以前の最新」の初品実測値を使う（未測定はマスター理論値）
   const rows = await sql`
     SELECT m.item_key, m.qty,
-      i.kubun, i.hinmei, i.kansei_juryo AS theo_unit, i.kosei_sum, i.cnt,
+      i.kubun, i.hinmei, i.kansei_juryo AS theo_unit, i.kosei_sum, i.cnt, i.all_cnt,
       fa.weight AS fa_weight, fa.measured_on AS fa_date
     FROM scrap_mcframe_qty m
     LEFT JOIN LATERAL (
-      SELECT (ARRAY_AGG(kubun ORDER BY ko_zuban))[1] AS kubun,
-             (ARRAY_AGG(hinmei ORDER BY ko_zuban))[1] AS hinmei,
-             (ARRAY_AGG(kansei_juryo ORDER BY ko_zuban))[1] AS kansei_juryo,
-             SUM(kosei_juryo) AS kosei_sum,
-             COUNT(*) AS cnt
+      SELECT (ARRAY_AGG(kubun ORDER BY ko_zuban)) [1] AS kubun,
+             (ARRAY_AGG(hinmei ORDER BY ko_zuban)) [1] AS hinmei,
+             (ARRAY_AGG(kansei_juryo ORDER BY ko_zuban)) [1] AS kansei_juryo,
+             SUM(kosei_juryo) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS kosei_sum,
+             COUNT(*) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS cnt,
+             COUNT(*) AS all_cnt
       FROM scrap_items s
       WHERE s.company_id = m.company_id AND s.key = m.item_key
     ) i ON true
     LEFT JOIN LATERAL (
       SELECT weight, measured_on FROM scrap_first_articles f
       WHERE f.company_id = m.company_id AND f.item_key = m.item_key
+        AND f.status = 'approved'
         AND f.measured_on <= ((m.ym || '-01')::date + interval '1 month' - interval '1 day')
       ORDER BY f.measured_on DESC LIMIT 1
     ) fa ON true
-    WHERE m.company_id = ${companyId} AND m.ym = ${ym}`;
+    WHERE m.company_id = ${companyId} AND m.ym = ${ym}
+      AND (${factory}::text IS NULL OR COALESCE(i.cnt, 0) > 0)`;
   const out: MonthlyItemRow[] = rows.map((r: any) => {
     const qty = Number(r.qty) || 0;
-    const found = Number(r.cnt) > 0;
+    const found = Number(r.all_cnt) > 0;
     const theoUnit = Number(r.theo_unit) || 0;
     const faWeight = r.fa_weight === null || r.fa_weight === undefined ? null : Number(r.fa_weight);
     const unitFinished = faWeight ?? theoUnit;
@@ -122,28 +133,93 @@ const nextYm = (ym: string): string => {
   return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
 };
 
-const zaikoOf = (m: MonthlyInput | null, kb: Kubun): number | null => {
-  if (!m) return null;
-  const v = kb === "銅条" ? m.zaikoDojo : kb === "銅管" ? m.zaikoDokan : m.zaikoSonota;
-  return v ?? 0;
+const prevYmOf = (ym: string): string => {
+  const [y, m] = ym.split("-").map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
 };
-const konyuOf = (m: MonthlyInput | null, kb: Kubun): number | null => {
-  if (!m) return null;
-  const v = kb === "銅条" ? m.konyuDojo : kb === "銅管" ? m.konyuDokan : m.konyuSonota;
-  return v ?? 0;
-};
-const sumZaiko = (m: MonthlyInput | null): number | null =>
-  m ? (m.zaikoDojo ?? 0) + (m.zaikoDokan ?? 0) + (m.zaikoSonota ?? 0) : null;
-const sumKonyu = (m: MonthlyInput | null): number | null =>
-  m ? (m.konyuDojo ?? 0) + (m.konyuDokan ?? 0) + (m.konyuSonota ?? 0) : null;
 
-/** 月次サマリー（区分別 + 全体）と ⑥⑦ の突合結果。 */
-export async function monthlySummary(companyId: string, ym: string): Promise<MonthlySummary> {
-  const [inp, inpNext, itemRows, daily] = await Promise.all([
-    getMonthlyInput(companyId, ym),
-    getMonthlyInput(companyId, nextYm(ym)),
-    monthlyItemRows(companyId, ym),
-    dailyMonthTotals(companyId, ym),
+type KubunAmounts = { 銅条: number; 銅管: number; その他: number };
+
+/** 対象月の使用量(構成法)を区分別に集計。 */
+async function usageBomByKubun(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<KubunAmounts> {
+  const rows = await monthlyItemRows(companyId, ym, factory);
+  const out: KubunAmounts = { 銅条: 0, 銅管: 0, その他: 0 };
+  for (const r of rows) {
+    const kb = (KUBUN_LIST as readonly string[]).includes(r.kubun) ? (r.kubun as Kubun) : "その他";
+    out[kb] += r.usage;
+  }
+  return out;
+}
+
+/**
+ * 対象月の購入重量（区分別）。日次調達データがあればその月間集計を優先し、
+ * 無い月は月次保存値（過去データ取込分）を使う。どちらも無ければ null。
+ */
+async function effectiveKonyu(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<KubunAmounts | null> {
+  const p = await monthlyProcureSums(companyId, ym, factory);
+  if (p.cnt > 0) return { 銅条: p.konyuDojo, 銅管: p.konyuDokan, その他: p.konyuSonota };
+  const inp = await getMonthlyInput(companyId, ym, factory);
+  if (inp && (inp.konyuDojo !== null || inp.konyuDokan !== null || inp.konyuSonota !== null)) {
+    return { 銅条: inp.konyuDojo ?? 0, 銅管: inp.konyuDokan ?? 0, その他: inp.konyuSonota ?? 0 };
+  }
+  return null;
+}
+
+/**
+ * 月初在庫（区分別）の解決。
+ * - 月次保存値（棚卸で確定した月初在庫＝アンカー）があればそれを使う
+ * - 無ければ前月から理論ロール: 前月月初 + 前月購入 − 前月使用量(構成法) + 前月在庫補正
+ * - アンカーが見つからない場合（18か月まで遡索）は null（不明）
+ */
+async function resolveZaiko(
+  companyId: string,
+  ym: string,
+  factory: string | null,
+  depth = 0
+): Promise<KubunAmounts | null> {
+  const inp = await getMonthlyInput(companyId, ym, factory);
+  if (inp && (inp.zaikoDojo !== null || inp.zaikoDokan !== null || inp.zaikoSonota !== null)) {
+    return { 銅条: inp.zaikoDojo ?? 0, 銅管: inp.zaikoDokan ?? 0, その他: inp.zaikoSonota ?? 0 };
+  }
+  if (depth >= 18) return null;
+  const pm = prevYmOf(ym);
+  const prev = await resolveZaiko(companyId, pm, factory, depth + 1);
+  if (!prev) return null;
+  const konyu = await effectiveKonyu(companyId, pm, factory);
+  if (!konyu) return null; // 前月の購入が不明なら理論ロールできない
+  const usage = await usageBomByKubun(companyId, pm, factory);
+  const adj = await monthlyAdjSums(companyId, pm, factory);
+  return {
+    銅条: prev.銅条 + konyu.銅条 - usage.銅条 + adj.銅条,
+    銅管: prev.銅管 + konyu.銅管 - usage.銅管 + adj.銅管,
+    その他: prev.その他 + konyu.その他 - usage.その他 + adj.その他,
+  };
+}
+
+/** 月次サマリー（区分別 + 全体）と ⑥⑦ の突合結果。factory 指定でその工場、null=全社合算。 */
+export async function monthlySummary(
+  companyId: string,
+  ym: string,
+  factory: string | null = null
+): Promise<MonthlySummary> {
+  const [inp, itemRows, daily, procure] = await Promise.all([
+    getMonthlyInput(companyId, ym, factory),
+    monthlyItemRows(companyId, ym, factory),
+    dailyMonthTotals(companyId, ym, factory),
+    monthlyProcureSums(companyId, ym, factory),
+  ]);
+  const [zaiko, zaikoNext, konyu] = await Promise.all([
+    resolveZaiko(companyId, ym, factory),
+    resolveZaiko(companyId, nextYm(ym), factory),
+    effectiveKonyu(companyId, ym, factory),
   ]);
 
   const perKubun: Record<string, KubunSummary> = {};
@@ -162,15 +238,15 @@ export async function monthlySummary(companyId: string, ym: string): Promise<Mon
   for (const r of itemRows) {
     const kb = (KUBUN_LIST as readonly string[]).includes(r.kubun) ? r.kubun : "その他";
     perKubun[kb].usageBom += r.usage;
-    perKubun[kb].finished += r.finished;
     perKubun["全体"].usageBom += r.usage;
+    perKubun[kb].finished += r.finished;
     perKubun["全体"].finished += r.finished;
   }
   for (const kb of KUBUN_LIST) {
     const t = perKubun[kb];
-    t.zaiko = zaikoOf(inp, kb);
-    t.konyu = konyuOf(inp, kb);
-    t.zaikoNext = zaikoOf(inpNext, kb);
+    t.zaiko = zaiko ? zaiko[kb] : null;
+    t.konyu = konyu ? konyu[kb] : null;
+    t.zaikoNext = zaikoNext ? zaikoNext[kb] : null;
     if (t.zaiko !== null && t.konyu !== null && t.zaikoNext !== null) {
       t.usageInv = t.zaiko + t.konyu - t.zaikoNext;
     }
@@ -180,9 +256,10 @@ export async function monthlySummary(companyId: string, ym: string): Promise<Mon
   }
   {
     const t = perKubun["全体"];
-    t.zaiko = sumZaiko(inp);
-    t.konyu = sumKonyu(inp);
-    t.zaikoNext = sumZaiko(inpNext);
+    const sum = (a: KubunAmounts | null) => (a ? a.銅条 + a.銅管 + a.その他 : null);
+    t.zaiko = sum(zaiko);
+    t.konyu = sum(konyu);
+    t.zaikoNext = sum(zaikoNext);
     if (t.zaiko !== null && t.konyu !== null && t.zaikoNext !== null) {
       t.usageInv = t.zaiko + t.konyu - t.zaikoNext;
     }
@@ -191,7 +268,9 @@ export async function monthlySummary(companyId: string, ym: string): Promise<Mon
     t.scrapTheo = usage - t.finished;
   }
 
-  const baikyaku = inp?.baikyaku ?? null;
+  // 売却数量: 日次調達の月間集計を優先（無い月は月次保存値）
+  const baikyaku =
+    procure.cnt > 0 && procure.baikyaku !== null ? procure.baikyaku : (inp?.baikyaku ?? null);
   const dailyTotal = daily.total;
   const scrapTheo = perKubun["全体"].scrapTheo;
 
@@ -226,12 +305,16 @@ export interface YearRow {
   diff6: number | null;
 }
 
-/** 年間推移（全体）。データのある月だけ返す。 */
-export async function yearSummary(companyId: string, year: number): Promise<YearRow[]> {
+/** 年間推移（全体）。データのある月だけ返す。factory 指定でその工場、null=全社合算。 */
+export async function yearSummary(
+  companyId: string,
+  year: number,
+  factory: string | null = null
+): Promise<YearRow[]> {
   const out: YearRow[] = [];
   for (let m = 1; m <= 12; m++) {
     const ym = `${year}-${String(m).padStart(2, "0")}`;
-    const s = await monthlySummary(companyId, ym);
+    const s = await monthlySummary(companyId, ym, factory);
     const g = s.perKubun["全体"];
     const hasData = s.baikyaku !== null || g.zaiko !== null || s.itemRows.length > 0 || s.daily.days > 0;
     if (!hasData) continue;

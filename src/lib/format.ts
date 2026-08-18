@@ -56,6 +56,22 @@ export function normYm(s: unknown): string | null {
   return null;
 }
 
+/** 2026/8/5, 2026-08-05, Excelのシリアル日付表示等を 'YYYY-MM-DD' に正規化。失敗時 null。 */
+export function normDateStr(s: unknown): string | null {
+  if (s === null || s === undefined) return null;
+  const t = String(s).trim();
+  const m = t.match(/^(\d{4})[/\-年](\d{1,2})[/\-月](\d{1,2})日?/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+  }
+  return null;
+}
+
 /** 'YYYY-MM-DD' 形式か。 */
 export function isDateStr(s: unknown): s is string {
   return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);

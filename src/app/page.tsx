@@ -1,12 +1,14 @@
 import Link from "next/link";
 import { FileDown } from "lucide-react";
-import { requireEntitledSession } from "@/lib/session";
+import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
 import { monthlySummary, yearSummary, type KubunSummary } from "@/lib/calc";
 import { KUBUN_LIST } from "@/lib/db";
 import { fmt, fmtPct, isYmStr, thisMonthStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import MonthPicker from "@/components/MonthPicker";
+import FactorySelect from "@/components/FactorySelect";
+import { listFactoryOptions } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -36,18 +38,25 @@ function MethodBadge({ method }: { method: KubunSummary["method"] }) {
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ ym?: string }>;
+  searchParams: Promise<{ ym?: string; factory?: string }>;
 }) {
   const session = await requireEntitledSession();
   const sp = await searchParams;
   const ym = isYmStr(sp.ym) ? sp.ym : thisMonthStr();
   const year = Number(ym.slice(0, 4));
 
-  let s, years;
+  let s, years, factoryOptions: string[], factory: string | null, factoryLocked: boolean;
   try {
+    // 所属工場ユーザーは自工場に固定。未所属は 全社(合算)/工場 を切替可能
+    const restriction = await getFactoryRestriction(session);
+    factoryOptions = await listFactoryOptions(session.companyId);
+    factoryLocked = restriction.restricted;
+    factory = restriction.restricted
+      ? restriction.factory
+      : (sp.factory ?? "").trim() || null;
     [s, years] = await Promise.all([
-      monthlySummary(session.companyId, ym),
-      yearSummary(session.companyId, year),
+      monthlySummary(session.companyId, ym, factory),
+      yearSummary(session.companyId, year, factory),
     ]);
   } catch (e) {
     console.error("[dashboard]", e);
@@ -71,12 +80,19 @@ export default async function DashboardPage({
     <div className="p-4 sm:p-6">
       <PageHeader
         title="照合ダッシュボード"
-        description={`${session.companyName} スクラップ重量の突合（全社集計）`}
+        description={`${session.companyName} スクラップ重量の突合（${factory ?? "全社合算"}）`}
         action={
           <>
+            {factoryLocked ? (
+              <span className="rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm">
+                {factory}
+              </span>
+            ) : (
+              <FactorySelect factory={factory ?? ""} options={factoryOptions} />
+            )}
             <MonthPicker ym={ym} />
             <a
-              href={`/api/export?type=recon&year=${year}`}
+              href={`/api/export?type=recon&year=${year}${factory ? `&factory=${encodeURIComponent(factory)}` : ""}`}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
             >
               <FileDown className="h-4 w-4" />
@@ -189,9 +205,9 @@ export default async function DashboardPage({
         </section>
       </div>
 
-      {/* 年間推移（全体） */}
+      {/* 年間推移 */}
       <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-        <h2 className="mb-3 text-sm font-bold text-[#333333]">{year}年 年間推移（全体）</h2>
+        <h2 className="mb-3 text-sm font-bold text-[#333333]">{year}年 年間推移（{factory ?? "全社合算"}）</h2>
         <div className="overflow-x-auto">
           <table className="print-table w-full border-collapse text-sm">
             <thead>

@@ -172,6 +172,24 @@ async function buildSchema(): Promise<void> {
       UNIQUE (company_id, measured_on, item_key)
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_first_articles_key_idx ON scrap_first_articles(company_id, item_key, measured_on)`);
+  // 初品測定の承認ワークフロー（2026-08）: 登録と同時に管理者へ申請（pending）し、
+  // 承認（approved）された測定値だけを完成重量の計算に採用する。
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'`);
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS approved_by TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`);
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS reject_comment TEXT NOT NULL DEFAULT ''`);
+  // ワークフロー導入前の既存測定値は承認済みとして扱う（計算結果を変えない）
+  {
+    const applied = await sql`SELECT 1 FROM pf_scrap_migrations WHERE key = 'fa_status_backfill_v1' LIMIT 1`.catch(() => []);
+    if (!Array.isArray(applied) || applied.length === 0) {
+      await safeDdl(() => sql`CREATE TABLE IF NOT EXISTS pf_scrap_migrations (key TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+      const done = await sql`SELECT 1 FROM pf_scrap_migrations WHERE key = 'fa_status_backfill_v1' LIMIT 1`;
+      if (done.length === 0) {
+        await sql`UPDATE scrap_first_articles SET status = 'approved' WHERE status = 'pending' AND created_at < NOW() - interval '1 minute'`;
+        await sql`INSERT INTO pf_scrap_migrations (key) VALUES ('fa_status_backfill_v1') ON CONFLICT DO NOTHING`;
+      }
+    }
+  }
 
   // ④ McFrame取込の完成品数量（年月×KEYで1件。再取込は上書き）。ym は 'YYYY-MM'。
   await safeDdl(() => sql`
@@ -186,7 +204,8 @@ async function buildSchema(): Promise<void> {
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_mcframe_qty_ym_idx ON scrap_mcframe_qty(company_id, ym)`);
 
-  // ⑤ 月次入力（年月で1行）。区分別の月初在庫・購入重量と、スクラップ売却数量。
+  // ⑤ 月次入力（年月×工場で1行）。区分別の月初在庫・購入重量と、スクラップ売却数量。
+  // 工場別シート（大口/直方）の運用に合わせて工場単位で持ち、照合は全社合算/工場別を切り替える。
   await safeDdl(() => sql`
     CREATE TABLE IF NOT EXISTS scrap_monthly_inputs (
       id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -202,6 +221,47 @@ async function buildSchema(): Promise<void> {
       updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (company_id, ym)
     )`);
+  // 工場別化（2026-08）: factory 列を追加し、一意制約を (company_id, ym, factory) へ移行。
+  // 既存行は factory=''（全社扱い）として残る。
+  await safeDdl(() => sql`ALTER TABLE scrap_monthly_inputs ADD COLUMN IF NOT EXISTS factory TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_monthly_inputs DROP CONSTRAINT IF EXISTS scrap_monthly_inputs_company_id_ym_key`);
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_monthly_inputs_ym_factory_idx ON scrap_monthly_inputs(company_id, ym, factory)`);
+
+  // 調達入力（日次）: 調達担当者が毎日、入荷（購入実績）とスクラップ売却数を入力する。
+  // 月次照合の購入重量・売却数量は、この日次データの月間集計を優先して使う
+  // （日次データが無い月は scrap_monthly_inputs の値 = 過去データ取込分を使う）。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_procure_days (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id   UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      pdate        DATE NOT NULL,
+      factory      TEXT NOT NULL,
+      konyu_dojo   NUMERIC,
+      konyu_dokan  NUMERIC,
+      konyu_sonota NUMERIC,
+      baikyaku     NUMERIC,
+      note         TEXT NOT NULL DEFAULT '',
+      recorded_by  TEXT NOT NULL DEFAULT '',
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, pdate, factory)
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_procure_days_ym_idx ON scrap_procure_days(company_id, factory, pdate)`);
+
+  // 棚卸等の在庫補正。理論在庫（前日在庫+購入−使用の積み上げ）と実棚のズレを
+  // 理由付きで記録し、月次照合の在庫チェーンに反映する。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_inventory_adjustments (
+      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      adate       DATE NOT NULL,
+      factory     TEXT NOT NULL,
+      kubun       TEXT NOT NULL DEFAULT '銅条',
+      amount      NUMERIC NOT NULL,
+      reason      TEXT NOT NULL,
+      recorded_by TEXT NOT NULL DEFAULT '',
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_inventory_adjustments_idx ON scrap_inventory_adjustments(company_id, factory, adate)`);
 
   // ポータル配信の工場・職場マスタ（/api/portal-masters）。code で突合して upsert する。
   // このアプリでは日次記録・品目の「工場」の入力候補に使う（記録の値は文字列のまま）。

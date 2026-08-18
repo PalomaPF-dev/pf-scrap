@@ -8,6 +8,9 @@ export {
   KUBUN_LIST,
   SCALE_KIND_LIST,
   DAILY_STATUS_LABEL,
+  FA_STATUS_LABEL,
+  type FaStatus,
+  type FirstArticle,
   type Kubun,
   type ScaleKind,
   type DailyStatus,
@@ -17,28 +20,24 @@ export {
   type Scale,
 } from "./scrapTypes";
 import {
+  type FirstArticle as _FirstArticle,
+  type FaStatus as _FaStatus,
   type ScrapItem as _ScrapItem,
   type DailyRecord as _DailyRecord,
   type DailyStatus as _DailyStatus,
   type Scale as _Scale,
 } from "./scrapTypes";
 type ScrapItem = _ScrapItem;
+type FirstArticle = _FirstArticle;
+type FaStatus = _FaStatus;
 type DailyRecord = _DailyRecord;
 type DailyStatus = _DailyStatus;
 type Scale = _Scale;
 
-export interface FirstArticle {
-  measuredOn: string;
-  itemKey: string;
-  weight: number;
-  sokuteisha: string;
-  /** 品目マスターの表示用（品名・理論値）。未登録は null */
-  hinmei: string | null;
-  kanseiJuryo: number | null;
-}
-
 export interface MonthlyInput {
   ym: string;
+  /** 工場（大口工場/直方工場…）。旧データは ''（全社扱い） */
+  factory: string;
   zaikoDojo: number | null;
   zaikoDokan: number | null;
   zaikoSonota: number | null;
@@ -503,6 +502,7 @@ export async function listFirstArticles(
   const sql = getSql();
   const rows = await sql`
     SELECT f.measured_on, f.item_key, f.weight, f.sokuteisha,
+      f.status, f.approved_by, f.reject_comment,
       (SELECT hinmei FROM scrap_items i
         WHERE i.company_id = f.company_id AND i.key = f.item_key
         ORDER BY i.ko_zuban LIMIT 1) AS hinmei,
@@ -518,11 +518,15 @@ export async function listFirstArticles(
     itemKey: r.item_key,
     weight: num(r.weight),
     sokuteisha: r.sokuteisha,
+    status: (r.status ?? "approved") as FaStatus,
+    approvedBy: r.approved_by ?? "",
+    rejectComment: r.reject_comment ?? "",
     hinmei: r.hinmei ?? null,
     kanseiJuryo: numOrNull(r.kansei_juryo),
   }));
 }
 
+/** 登録＝管理者への申請（status='pending'）。再登録は再申請扱い。 */
 export async function upsertFirstArticle(
   companyId: string,
   fa: { measuredOn: string; itemKey: string; weight: number; sokuteisha: string }
@@ -530,10 +534,46 @@ export async function upsertFirstArticle(
   await ensureSchema();
   const sql = getSql();
   await sql`
-    INSERT INTO scrap_first_articles (company_id, measured_on, item_key, weight, sokuteisha)
-    VALUES (${companyId}, ${fa.measuredOn}, ${fa.itemKey}, ${fa.weight}, ${fa.sokuteisha})
+    INSERT INTO scrap_first_articles (company_id, measured_on, item_key, weight, sokuteisha, status)
+    VALUES (${companyId}, ${fa.measuredOn}, ${fa.itemKey}, ${fa.weight}, ${fa.sokuteisha}, 'pending')
     ON CONFLICT (company_id, measured_on, item_key) DO UPDATE SET
-      weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha`;
+      weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
+      status = 'pending', approved_by = '', approved_at = NULL, reject_comment = ''`;
+}
+
+/** 初品測定の承認/差し戻し（管理者のみが呼ぶ）。 */
+export async function updateFirstArticleStatus(
+  companyId: string,
+  measuredOn: string,
+  itemKey: string,
+  patch:
+    | { status: "approved"; approvedBy: string }
+    | { status: "rejected"; approvedBy: string; rejectComment: string }
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  if (patch.status === "approved") {
+    await sql`
+      UPDATE scrap_first_articles SET status = 'approved',
+        approved_by = ${patch.approvedBy}, approved_at = NOW(), reject_comment = ''
+      WHERE company_id = ${companyId} AND measured_on = ${measuredOn} AND item_key = ${itemKey}`;
+  } else {
+    await sql`
+      UPDATE scrap_first_articles SET status = 'rejected',
+        approved_by = ${patch.approvedBy}, approved_at = NOW(),
+        reject_comment = ${patch.rejectComment}
+      WHERE company_id = ${companyId} AND measured_on = ${measuredOn} AND item_key = ${itemKey}`;
+  }
+}
+
+/** 申請中（pending）の初品測定の件数。ポータルの承認待ちバッジ用。 */
+export async function countPendingFirstArticles(companyId: string): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT COUNT(*)::int AS n FROM scrap_first_articles
+    WHERE company_id = ${companyId} AND status = 'pending'`;
+  return Number(rows[0]?.n ?? 0);
 }
 
 export async function deleteFirstArticle(
@@ -571,42 +611,10 @@ export async function upsertMcframeQty(
 
 // ===== ⑤ 月次入力 =====
 
-export async function listMonthlyInputs(
-  companyId: string,
-  year: number
-): Promise<MonthlyInput[]> {
-  await ensureSchema();
-  const sql = getSql();
-  const prefix = `${year}-%`;
-  const rows = await sql`
-    SELECT * FROM scrap_monthly_inputs
-    WHERE company_id = ${companyId} AND ym LIKE ${prefix}
-    ORDER BY ym`;
-  return rows.map((r: any) => ({
-    ym: r.ym,
-    zaikoDojo: numOrNull(r.zaiko_dojo),
-    zaikoDokan: numOrNull(r.zaiko_dokan),
-    zaikoSonota: numOrNull(r.zaiko_sonota),
-    konyuDojo: numOrNull(r.konyu_dojo),
-    konyuDokan: numOrNull(r.konyu_dokan),
-    konyuSonota: numOrNull(r.konyu_sonota),
-    baikyaku: numOrNull(r.baikyaku),
-  }));
-}
-
-export async function getMonthlyInput(
-  companyId: string,
-  ym: string
-): Promise<MonthlyInput | null> {
-  await ensureSchema();
-  const sql = getSql();
-  const rows = await sql`
-    SELECT * FROM scrap_monthly_inputs
-    WHERE company_id = ${companyId} AND ym = ${ym} LIMIT 1`;
-  const r = rows[0];
-  if (!r) return null;
+function mapMonthly(r: any): MonthlyInput {
   return {
     ym: r.ym,
+    factory: r.factory ?? "",
     zaikoDojo: numOrNull(r.zaiko_dojo),
     zaikoDokan: numOrNull(r.zaiko_dokan),
     zaikoSonota: numOrNull(r.zaiko_sonota),
@@ -617,18 +625,73 @@ export async function getMonthlyInput(
   };
 }
 
+/** 月次入力の一覧（年×工場）。 */
+export async function listMonthlyInputs(
+  companyId: string,
+  year: number,
+  factory: string
+): Promise<MonthlyInput[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const prefix = `${year}-%`;
+  const rows = await sql`
+    SELECT * FROM scrap_monthly_inputs
+    WHERE company_id = ${companyId} AND ym LIKE ${prefix} AND factory = ${factory}
+    ORDER BY ym`;
+  return rows.map(mapMonthly);
+}
+
+/** 月次入力に存在する工場の一覧（工場切替の選択肢用）。 */
+export async function listMonthlyFactories(companyId: string): Promise<string[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT DISTINCT factory FROM scrap_monthly_inputs
+    WHERE company_id = ${companyId} ORDER BY factory`;
+  return rows.map((r: any) => String(r.factory));
+}
+
+/**
+ * 対象月の月次入力。factory 指定でその工場、null で全社（全工場の合算）。
+ * 合算では各値を SUM する（全行 NULL の列は NULL のまま）。
+ */
+export async function getMonthlyInput(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<MonthlyInput | null> {
+  await ensureSchema();
+  const sql = getSql();
+  if (factory !== null) {
+    const rows = await sql`
+      SELECT * FROM scrap_monthly_inputs
+      WHERE company_id = ${companyId} AND ym = ${ym} AND factory = ${factory} LIMIT 1`;
+    return rows[0] ? mapMonthly(rows[0]) : null;
+  }
+  const rows = await sql`
+    SELECT ${ym} AS ym, '' AS factory,
+      SUM(zaiko_dojo) AS zaiko_dojo, SUM(zaiko_dokan) AS zaiko_dokan, SUM(zaiko_sonota) AS zaiko_sonota,
+      SUM(konyu_dojo) AS konyu_dojo, SUM(konyu_dokan) AS konyu_dokan, SUM(konyu_sonota) AS konyu_sonota,
+      SUM(baikyaku) AS baikyaku, COUNT(*) AS cnt
+    FROM scrap_monthly_inputs
+    WHERE company_id = ${companyId} AND ym = ${ym}`;
+  const r = rows[0];
+  if (!r || Number(r.cnt) === 0) return null;
+  return mapMonthly(r);
+}
+
 export async function saveMonthlyInput(companyId: string, m: MonthlyInput): Promise<void> {
   await ensureSchema();
   const sql = getSql();
   await sql`
     INSERT INTO scrap_monthly_inputs (
-      company_id, ym, zaiko_dojo, zaiko_dokan, zaiko_sonota,
+      company_id, ym, factory, zaiko_dojo, zaiko_dokan, zaiko_sonota,
       konyu_dojo, konyu_dokan, konyu_sonota, baikyaku
     ) VALUES (
-      ${companyId}, ${m.ym}, ${m.zaikoDojo}, ${m.zaikoDokan}, ${m.zaikoSonota},
+      ${companyId}, ${m.ym}, ${m.factory}, ${m.zaikoDojo}, ${m.zaikoDokan}, ${m.zaikoSonota},
       ${m.konyuDojo}, ${m.konyuDokan}, ${m.konyuSonota}, ${m.baikyaku}
     )
-    ON CONFLICT (company_id, ym) DO UPDATE SET
+    ON CONFLICT (company_id, ym, factory) DO UPDATE SET
       zaiko_dojo = EXCLUDED.zaiko_dojo,
       zaiko_dokan = EXCLUDED.zaiko_dokan,
       zaiko_sonota = EXCLUDED.zaiko_sonota,
@@ -637,6 +700,197 @@ export async function saveMonthlyInput(companyId: string, m: MonthlyInput): Prom
       konyu_sonota = EXCLUDED.konyu_sonota,
       baikyaku = EXCLUDED.baikyaku,
       updated_at = NOW()`;
+}
+
+// ===== 調達入力（日次）と在庫補正 =====
+
+export interface ProcureDay {
+  pdate: string; // YYYY-MM-DD
+  factory: string;
+  konyuDojo: number | null;
+  konyuDokan: number | null;
+  konyuSonota: number | null;
+  baikyaku: number | null;
+  note: string;
+  recordedBy: string;
+}
+
+export interface InventoryAdjustment {
+  id: string;
+  adate: string;
+  factory: string;
+  kubun: string;
+  amount: number;
+  reason: string;
+  recordedBy: string;
+}
+
+function mapProcure(r: any): ProcureDay {
+  return {
+    pdate: dateStr(r.pdate),
+    factory: r.factory,
+    konyuDojo: numOrNull(r.konyu_dojo),
+    konyuDokan: numOrNull(r.konyu_dokan),
+    konyuSonota: numOrNull(r.konyu_sonota),
+    baikyaku: numOrNull(r.baikyaku),
+    note: r.note ?? "",
+    recordedBy: r.recorded_by ?? "",
+  };
+}
+
+/** 対象月×工場の日次調達データ。 */
+export async function listProcureDays(
+  companyId: string,
+  ym: string,
+  factory: string
+): Promise<ProcureDay[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT * FROM scrap_procure_days
+    WHERE company_id = ${companyId} AND factory = ${factory}
+      AND to_char(pdate, 'YYYY-MM') = ${ym}
+    ORDER BY pdate`;
+  return rows.map(mapProcure);
+}
+
+/** 日次調達の upsert（日付×工場）。recordedBy はログインユーザー。件数を返す。 */
+export async function upsertProcureDays(
+  companyId: string,
+  rows: Omit<ProcureDay, "recordedBy">[],
+  recordedBy: string
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  let count = 0;
+  for (const r of rows) {
+    await sql`
+      INSERT INTO scrap_procure_days (
+        company_id, pdate, factory, konyu_dojo, konyu_dokan, konyu_sonota, baikyaku, note, recorded_by
+      ) VALUES (
+        ${companyId}, ${r.pdate}, ${r.factory}, ${r.konyuDojo}, ${r.konyuDokan},
+        ${r.konyuSonota}, ${r.baikyaku}, ${r.note}, ${recordedBy}
+      )
+      ON CONFLICT (company_id, pdate, factory) DO UPDATE SET
+        konyu_dojo = EXCLUDED.konyu_dojo,
+        konyu_dokan = EXCLUDED.konyu_dokan,
+        konyu_sonota = EXCLUDED.konyu_sonota,
+        baikyaku = EXCLUDED.baikyaku,
+        note = EXCLUDED.note,
+        recorded_by = EXCLUDED.recorded_by,
+        updated_at = NOW()`;
+    count++;
+  }
+  return count;
+}
+
+export async function deleteProcureDay(
+  companyId: string,
+  pdate: string,
+  factory: string
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`
+    DELETE FROM scrap_procure_days
+    WHERE company_id = ${companyId} AND pdate = ${pdate} AND factory = ${factory}`;
+}
+
+/** 対象月の日次調達の月間集計。factory null で全社。cnt=日次行数（0なら未使用）。 */
+export async function monthlyProcureSums(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<{
+  cnt: number;
+  konyuDojo: number;
+  konyuDokan: number;
+  konyuSonota: number;
+  baikyaku: number | null;
+}> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT COUNT(*)::int AS cnt,
+      COALESCE(SUM(konyu_dojo), 0) AS k_dojo,
+      COALESCE(SUM(konyu_dokan), 0) AS k_dokan,
+      COALESCE(SUM(konyu_sonota), 0) AS k_sonota,
+      SUM(baikyaku) AS baikyaku
+    FROM scrap_procure_days
+    WHERE company_id = ${companyId}
+      AND to_char(pdate, 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR factory = ${factory})`;
+  const r = rows[0] ?? {};
+  return {
+    cnt: Number(r.cnt) || 0,
+    konyuDojo: num(r.k_dojo),
+    konyuDokan: num(r.k_dokan),
+    konyuSonota: num(r.k_sonota),
+    baikyaku: numOrNull(r.baikyaku),
+  };
+}
+
+/** 在庫補正の一覧（対象月×工場。factory null で全社）。 */
+export async function listAdjustments(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<InventoryAdjustment[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT * FROM scrap_inventory_adjustments
+    WHERE company_id = ${companyId}
+      AND to_char(adate, 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR factory = ${factory})
+    ORDER BY adate, created_at`;
+  return rows.map((r: any) => ({
+    id: r.id,
+    adate: dateStr(r.adate),
+    factory: r.factory,
+    kubun: r.kubun,
+    amount: num(r.amount),
+    reason: r.reason,
+    recordedBy: r.recorded_by ?? "",
+  }));
+}
+
+export async function addAdjustment(
+  companyId: string,
+  adj: Omit<InventoryAdjustment, "id">
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`
+    INSERT INTO scrap_inventory_adjustments (company_id, adate, factory, kubun, amount, reason, recorded_by)
+    VALUES (${companyId}, ${adj.adate}, ${adj.factory}, ${adj.kubun}, ${adj.amount}, ${adj.reason}, ${adj.recordedBy})`;
+}
+
+export async function deleteAdjustment(companyId: string, id: string): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`DELETE FROM scrap_inventory_adjustments WHERE company_id = ${companyId} AND id = ${id}`;
+}
+
+/** 対象月の在庫補正の区分別合計。factory null で全社。 */
+export async function monthlyAdjSums(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<{ 銅条: number; 銅管: number; その他: number }> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT
+      COALESCE(SUM(amount) FILTER (WHERE kubun = '銅条'), 0) AS a_dojo,
+      COALESCE(SUM(amount) FILTER (WHERE kubun = '銅管'), 0) AS a_dokan,
+      COALESCE(SUM(amount) FILTER (WHERE kubun NOT IN ('銅条', '銅管')), 0) AS a_sonota
+    FROM scrap_inventory_adjustments
+    WHERE company_id = ${companyId}
+      AND to_char(adate, 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR factory = ${factory})`;
+  const r = rows[0] ?? {};
+  return { 銅条: num(r.a_dojo), 銅管: num(r.a_dokan), その他: num(r.a_sonota) };
 }
 
 // ===== ポータル配信の工場・職場マスタ =====

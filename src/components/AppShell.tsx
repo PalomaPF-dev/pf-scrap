@@ -19,11 +19,11 @@ import type { SidebarUser } from "@/lib/sidebarUser";
 const NAV: NavItem[] = [
   { href: "/", label: "照合ダッシュボード", icon: LayoutDashboard },
   { href: "/daily", label: "日次記録", icon: ClipboardList },
+  { href: "/procurement", label: "調達入力", icon: CalendarRange },
   { href: "/first", label: "初品重量測定", icon: Scale },
   { href: "/items", label: "品目マスター", icon: Package, adminOnly: true },
   { href: "/scales", label: "重量計マスター", icon: QrCode, adminOnly: true },
   { href: "/mcframe", label: "McFrame取込", icon: Download, adminOnly: true },
-  { href: "/monthly", label: "月次入力", icon: CalendarRange, adminOnly: true },
 ];
 
 /** スクラップアプリのテーマ（銅色、アクティブは角丸＋丸バー）。 */

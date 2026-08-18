@@ -7,6 +7,8 @@ import {
   getFactoryRestriction,
 } from "./session";
 import {
+  addAdjustment,
+  deleteAdjustment,
   deleteDailyRecord,
   deleteFirstArticle,
   deleteItem,
@@ -14,22 +16,27 @@ import {
   getDailyRecord,
   getDailyStatus,
   getItemById,
+  getMonthlyInput,
   getScaleById,
   getScaleByQr,
   KUBUN_LIST,
+  listItems,
   SCALE_KIND_LIST,
   saveDailyRecord,
   saveMonthlyInput,
   updateDailyStatus,
+  updateFirstArticleStatus,
   upsertFirstArticle,
   upsertItem,
   upsertMcframeQty,
+  upsertProcureDays,
   upsertScale,
   type DailyEntry,
+  type ProcureDay,
   type Scale,
   type ScrapItem,
 } from "./db";
-import { isDateStr, isYmStr, normYm, toNum, toNumOrNull } from "./format";
+import { isDateStr, isYmStr, normDateStr, normYm, todayStr, toNum, toNumOrNull } from "./format";
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; message: string };
 
@@ -416,30 +423,49 @@ export async function loadDailyRecordAction(recordDate: string, factory: string)
   return getDailyRecord(s.companyId, recordDate, asStr(factory, 50));
 }
 
-// ===== ③ 初品重量測定（全員） =====
+// ===== ③ 初品重量測定（全員。登録＝管理者へ申請） =====
 
+/** QRコード（品目KEY）から品目を引く（初品測定のQR読み取り用）。 */
+export async function lookupItemByQrAction(code: string) {
+  const s = await requireEntitledSession();
+  const key = asStr(code, 100);
+  if (!key) return null;
+  const { items } = await listItems(s.companyId, { q: key, limit: 10 });
+  // KEY 完全一致を優先、なければ子図番一致
+  return (
+    items.find((it) => it.key === key) ??
+    items.find((it) => it.koZuban === key) ??
+    null
+  );
+}
+
+/**
+ * 初品測定の登録。測定日はサーバー側の当日（JST）、測定者はログインユーザーを自動記録。
+ * 登録と同時に管理者へ申請（pending）となり、承認された測定値のみ完成重量の計算に採用される。
+ */
 export async function saveFirstArticleAction(input: {
-  measuredOn: string;
   itemKey: string;
   weight: unknown;
-  sokuteisha: string;
 }): Promise<ActionResult> {
   try {
     const s = await requireEntitledSession();
-    if (!isDateStr(input.measuredOn)) return fail("測定日を入力してください。");
     const itemKey = asStr(input.itemKey, 100);
     if (!itemKey) return fail("品目を選択してください。");
     const weight = toNum(input.weight);
     if (weight <= 0) return fail("実測完成品重量を入力してください。");
+    const measuredOn = todayStr();
     await upsertFirstArticle(s.companyId, {
-      measuredOn: input.measuredOn,
+      measuredOn,
       itemKey,
       weight,
-      sokuteisha: asStr(input.sokuteisha, 50) || (s.userName || ""),
+      sokuteisha: s.userName || s.loginId || "",
     });
     revalidatePath("/first");
     revalidatePath("/");
-    return { ok: true, message: "登録しました。" };
+    return {
+      ok: true,
+      message: `登録し、管理者へ申請しました（${measuredOn} / ${weight} kg）。承認後に計算へ反映されます。`,
+    };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -455,6 +481,48 @@ export async function deleteFirstArticleAction(
     await deleteFirstArticle(s.companyId, measuredOn, asStr(itemKey, 100));
     revalidatePath("/first");
     return { ok: true, message: "削除しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 初品測定の承認（管理者のみ）。承認された値が完成重量の計算に使われる。 */
+export async function approveFirstArticleAction(
+  measuredOn: string,
+  itemKey: string
+): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    if (!isDateStr(measuredOn)) return fail("日付が正しくありません。");
+    await updateFirstArticleStatus(s.companyId, measuredOn, asStr(itemKey, 100), {
+      status: "approved",
+      approvedBy: s.userName || s.loginId || "",
+    });
+    revalidatePath("/first");
+    revalidatePath("/");
+    return { ok: true, message: "承認しました。計算に反映されます。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 初品測定の差し戻し（管理者のみ）。 */
+export async function rejectFirstArticleAction(
+  measuredOn: string,
+  itemKey: string,
+  comment: string
+): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    if (!isDateStr(measuredOn)) return fail("日付が正しくありません。");
+    await updateFirstArticleStatus(s.companyId, measuredOn, asStr(itemKey, 100), {
+      status: "rejected",
+      approvedBy: s.userName || s.loginId || "",
+      rejectComment: asStr(comment, 500),
+    });
+    revalidatePath("/first");
+    revalidatePath("/");
+    return { ok: true, message: "差し戻しました。" };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -490,19 +558,204 @@ export async function importMcframeAction(
   }
 }
 
-// ===== ⑤ 月次入力（管理者のみ） =====
+// ===== ⑤ 調達入力（日次。調達担当者=全員入力可） =====
 
-export async function saveMonthlyInputsAction(
-  rows: { ym: string; [k: string]: unknown }[]
+/** 対象月×工場の日次調達データを一括保存。入力者はログインユーザーを自動記録。 */
+export async function saveProcureDaysAction(input: {
+  factory: string;
+  days: Record<string, unknown>[];
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を選択してください。");
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）のデータのみ入力できます。`);
+    }
+    const rows: Omit<ProcureDay, "recordedBy">[] = [];
+    for (const d of Array.isArray(input.days) ? input.days : []) {
+      const pdate = asStr(d.pdate, 10);
+      if (!isDateStr(pdate)) continue;
+      const konyuDojo = toNumOrNull(d.konyuDojo);
+      const konyuDokan = toNumOrNull(d.konyuDokan);
+      const konyuSonota = toNumOrNull(d.konyuSonota);
+      const baikyaku = toNumOrNull(d.baikyaku);
+      const note = asStr(d.note, 500);
+      // 全て空の日はスキップ（保存対象は値のある日だけ）
+      if (
+        konyuDojo === null &&
+        konyuDokan === null &&
+        konyuSonota === null &&
+        baikyaku === null &&
+        !note
+      ) {
+        continue;
+      }
+      rows.push({ pdate, factory, konyuDojo, konyuDokan, konyuSonota, baikyaku, note });
+    }
+    const count = await upsertProcureDays(s.companyId, rows, s.userName || s.loginId || "");
+    revalidatePath("/procurement");
+    revalidatePath("/");
+    return { ok: true, message: `${count}日分を保存しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 日次調達データのCSV一括取込（週単位でのExcel取込用）。
+ * 列: 日付, 工場, 購入_銅条, 購入_銅管, 購入_その他, 売却数量, 備考（1行目ヘッダー可）。
+ */
+export async function importProcureCsvAction(
+  rows: Record<string, unknown>[]
+): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
+    if (rows.length > 5000) return fail("一度に取込できるのは5,000行までです。");
+    const restriction = await getFactoryRestriction(s);
+    const clean: Omit<ProcureDay, "recordedBy">[] = [];
+    let bad = 0;
+    for (const r of rows) {
+      const pdate = normDateStr(r.pdate);
+      const factory = asStr(r.factory, 50);
+      if (!pdate || !factory) {
+        bad++;
+        continue;
+      }
+      if (restriction.restricted && factory !== restriction.factory) {
+        bad++;
+        continue;
+      }
+      clean.push({
+        pdate,
+        factory,
+        konyuDojo: toNumOrNull(r.konyuDojo),
+        konyuDokan: toNumOrNull(r.konyuDokan),
+        konyuSonota: toNumOrNull(r.konyuSonota),
+        baikyaku: toNumOrNull(r.baikyaku),
+        note: asStr(r.note, 500),
+      });
+    }
+    const count = await upsertProcureDays(s.companyId, clean, s.userName || s.loginId || "");
+    revalidatePath("/procurement");
+    revalidatePath("/");
+    return { ok: true, message: `取込完了: ${count}日分（読取不可・対象外: ${bad}行）` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 在庫補正の追加（棚卸等。理由必須。入力者はログインユーザー）。 */
+export async function addAdjustmentAction(input: {
+  adate: string;
+  factory: string;
+  kubun: string;
+  amount: unknown;
+  reason: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    if (!isDateStr(input.adate)) return fail("日付を入力してください。");
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を選択してください。");
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）のデータのみ入力できます。`);
+    }
+    const reason = asStr(input.reason, 500);
+    if (!reason) return fail("補正の理由を入力してください（棚卸差異など）。");
+    const amount = toNumOrNull(input.amount);
+    if (amount === null || amount === 0) return fail("補正量（±kg）を入力してください。");
+    await addAdjustment(s.companyId, {
+      adate: input.adate,
+      factory,
+      kubun: asKubun(input.kubun),
+      amount,
+      reason,
+      recordedBy: s.userName || s.loginId || "",
+    });
+    revalidatePath("/procurement");
+    revalidatePath("/");
+    return { ok: true, message: "在庫補正を登録しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+export async function deleteAdjustmentAction(id: string): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    await deleteAdjustment(s.companyId, asStr(id, 50));
+    revalidatePath("/procurement");
+    revalidatePath("/");
+    return { ok: true, message: "削除しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 月初在庫アンカー（棚卸で確定した月初在庫）の保存（管理者のみ）。
+ * 空欄はアンカー無し＝前月からの理論ロールで自動計算される。
+ */
+export async function saveMonthlyAnchorAction(input: {
+  ym: string;
+  factory: string;
+  zaikoDojo: unknown;
+  zaikoDokan: unknown;
+  zaikoSonota: unknown;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    if (!isYmStr(input.ym)) return fail("年月が正しくありません。");
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を選択してください。");
+    const prev = await getMonthlyInput(s.companyId, input.ym, factory);
+    await saveMonthlyInput(s.companyId, {
+      ym: input.ym,
+      factory,
+      zaikoDojo: toNumOrNull(input.zaikoDojo),
+      zaikoDokan: toNumOrNull(input.zaikoDokan),
+      zaikoSonota: toNumOrNull(input.zaikoSonota),
+      konyuDojo: prev?.konyuDojo ?? null,
+      konyuDokan: prev?.konyuDokan ?? null,
+      konyuSonota: prev?.konyuSonota ?? null,
+      baikyaku: prev?.baikyaku ?? null,
+    });
+    revalidatePath("/procurement");
+    revalidatePath("/");
+    return { ok: true, message: "月初在庫（棚卸アンカー）を保存しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 月次データのCSV一括取込（過去データ移行用・管理者のみ）。
+ * 列: 年月, 工場, 月初在庫_銅条, 月初在庫_銅管, 月初在庫_その他,
+ *     購入_銅条, 購入_銅管, 購入_その他, 売却数量（1行目ヘッダー可）。
+ */
+export async function importMonthlyCsvAction(
+  rows: Record<string, unknown>[]
 ): Promise<ActionResult> {
   try {
     const s = await requireAdminSession();
-    if (!Array.isArray(rows)) return fail("保存データがありません。");
+    if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
+    if (rows.length > 1000) return fail("一度に取込できるのは1,000行までです。");
     let count = 0;
+    let bad = 0;
     for (const r of rows) {
-      if (!isYmStr(r.ym)) continue;
+      const ym = normYm(r.ym);
+      const factory = asStr(r.factory, 50);
+      if (!ym || !factory) {
+        bad++;
+        continue;
+      }
       await saveMonthlyInput(s.companyId, {
-        ym: r.ym,
+        ym,
+        factory,
         zaikoDojo: toNumOrNull(r.zaikoDojo),
         zaikoDokan: toNumOrNull(r.zaikoDokan),
         zaikoSonota: toNumOrNull(r.zaikoSonota),
@@ -513,9 +766,9 @@ export async function saveMonthlyInputsAction(
       });
       count++;
     }
-    revalidatePath("/monthly");
+    revalidatePath("/procurement");
     revalidatePath("/");
-    return { ok: true, message: `${count}か月分を保存しました。` };
+    return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行）` };
   } catch (e) {
     return fail((e as Error).message);
   }

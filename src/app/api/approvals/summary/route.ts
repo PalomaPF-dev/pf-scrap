@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { getSql } from "@/lib/neon";
 import { ensureAuthSchema } from "@/lib/authDb";
-import { countPendingDaily } from "@/lib/db";
+import { countPendingDaily, countPendingFirstArticles } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,8 +44,11 @@ export async function POST(req: Request) {
     if (!u || u.disabled === true || (u.role ?? "member") !== "admin") {
       return NextResponse.json({ pending: 0 });
     }
-    const pending = await countPendingDaily(u.company_id as string, (u.factory ?? null) as string | null);
-    return NextResponse.json({ pending }, { headers: { "Cache-Control": "no-store" } });
+    const [daily, fa] = await Promise.all([
+      countPendingDaily(u.company_id as string, (u.factory ?? null) as string | null),
+      countPendingFirstArticles(u.company_id as string),
+    ]);
+    return NextResponse.json({ pending: daily + fa }, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[approvals/summary]", e);
     return NextResponse.json({ pending: 0 });

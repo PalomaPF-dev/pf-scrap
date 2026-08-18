@@ -15,5 +15,5 @@ export function middleware() {
 }
 
 export const config = {
-  matcher: ["/", "/daily", "/first", "/items", "/mcframe", "/monthly"],
+  matcher: ["/", "/daily", "/first", "/items", "/scales", "/mcframe", "/procurement"],
 };

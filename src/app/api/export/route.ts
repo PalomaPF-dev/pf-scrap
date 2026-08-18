@@ -96,7 +96,8 @@ export async function GET(req: NextRequest) {
         Number.isInteger(yearParam) && yearParam >= 2000 && yearParam <= 2100
           ? yearParam
           : new Date().getFullYear();
-      const years = await yearSummary(s.companyId, year);
+      const factoryParam = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
+      const years = await yearSummary(s.companyId, year, factoryParam);
       const rows: (string | number | null)[][] = [
         ["年月", "月初在庫", "購入重量", "使用量", "構成重量", "完成重量", "理論SCP", "SCP売量", "日次記録SCP", "売量vs理論", "売却vs日次記録"],
       ];

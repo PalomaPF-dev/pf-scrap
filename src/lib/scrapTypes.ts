@@ -83,6 +83,28 @@ export interface DailyRecord {
   entries: DailyEntry[];
 }
 
+/** 初品測定の承認状態（登録と同時に申請＝pending。承認済みのみ計算に採用）。 */
+export type FaStatus = "pending" | "approved" | "rejected";
+
+export const FA_STATUS_LABEL: Record<FaStatus, string> = {
+  pending: "申請中",
+  approved: "承認済み",
+  rejected: "差し戻し",
+};
+
+export interface FirstArticle {
+  measuredOn: string;
+  itemKey: string;
+  weight: number;
+  sokuteisha: string;
+  status: FaStatus;
+  approvedBy: string;
+  rejectComment: string;
+  /** 品目マスターの表示用（品名・理論値）。未登録は null */
+  hinmei: string | null;
+  kanseiJuryo: number | null;
+}
+
 /** 重量計（スクラップ箱）マスター。QRコードで呼び出す。 */
 export interface Scale {
   id: string;

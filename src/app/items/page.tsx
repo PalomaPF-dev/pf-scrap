@@ -1,4 +1,4 @@
-import { FileDown } from "lucide-react";
+import { FileDown, QrCode } from "lucide-react";
 import { requireAdminPage } from "@/lib/session";
 import { listItems, type ScrapItem } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
@@ -39,6 +39,13 @@ export default async function ItemsPage({
         description="KEY = 管理図番 + 製造場所CD（McFrameの設定）。子図番で検索して呼び出せます。"
         action={
           <>
+            <a
+              href="/items/qr"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
+            >
+              <QrCode className="h-4 w-4" />
+              品目QR一覧
+            </a>
             <ItemImportButton />
             <a
               href="/api/export?type=items"

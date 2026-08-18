@@ -1,5 +1,5 @@
 import { FileDown, Tag } from "lucide-react";
-import { requireOperationsPage } from "@/lib/session";
+import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
 import { listFactoryOptions, listScales, type Scale } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -20,7 +20,10 @@ export default async function ScalesPage({
 }) {
   const session = await requireOperationsPage();
   const sp = await searchParams;
-  const factory = (sp.factory ?? "").trim();
+  // 所属工場が設定されている人は自工場が自動で選ばれる（他工場は選べない）
+  const restriction = await getFactoryRestriction(session);
+  const factoryLocked = restriction.restricted;
+  const factory = factoryLocked ? restriction.factory! : (sp.factory ?? "").trim();
 
   let scales: Scale[];
   let factoryOptions: string[];
@@ -66,9 +69,17 @@ export default async function ScalesPage({
         }
       />
       <div className="mb-3">
-        <ScaleFactoryFilter factory={factory} factoryOptions={factoryOptions} />
+        <ScaleFactoryFilter
+          factory={factory}
+          factoryOptions={factoryLocked ? [factory] : factoryOptions}
+          factoryLocked={factoryLocked}
+        />
       </div>
-      <ScalesTable scales={scales} factory={factory} factoryOptions={factoryOptions} />
+      <ScalesTable
+        scales={scales}
+        factory={factory}
+        factoryOptions={factoryLocked ? [factory] : factoryOptions}
+      />
     </div>
   );
 }

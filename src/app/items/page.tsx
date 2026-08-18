@@ -1,5 +1,5 @@
 import { FileDown, QrCode } from "lucide-react";
-import { requireOperationsPage } from "@/lib/session";
+import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
 import {
   listFactoryOptions,
   listItemWorkplaces,
@@ -24,14 +24,19 @@ export default async function ItemsPage({
   const session = await requireOperationsPage();
   const sp = await searchParams;
   const q = (sp.q ?? "").trim();
-  const factory = (sp.factory ?? "").trim();
   const workplace = (sp.workplace ?? "").trim();
 
   let items: ScrapItem[];
   let total: number;
   let factoryOptions: string[];
   let workplaceOptions: { name: string; count: number }[];
+  let factory: string;
+  let factoryLocked: boolean;
   try {
+    // 所属工場が設定されている人は自工場が自動で選ばれる（他工場は選べない）
+    const restriction = await getFactoryRestriction(session);
+    factoryLocked = restriction.restricted;
+    factory = restriction.restricted ? restriction.factory! : (sp.factory ?? "").trim();
     [{ items, total }, factoryOptions, workplaceOptions] = await Promise.all([
       listItems(session.companyId, {
         q,
@@ -39,7 +44,7 @@ export default async function ItemsPage({
         workplace: workplace || null,
         limit: 500,
       }),
-      listFactoryOptions(session.companyId),
+      listFactoryOptions(session.companyId).then((f) => (factoryLocked ? [factory] : f)),
       // 製造場所の選択肢は、選んだ工場のぶんだけに絞る
       listItemWorkplaces(session.companyId, factory || null),
     ]);
@@ -89,6 +94,7 @@ export default async function ItemsPage({
         <ItemFilters
           factory={factory}
           factoryOptions={factoryOptions}
+          factoryLocked={factoryLocked}
           workplace={workplace}
           workplaceOptions={workplaceOptions}
         />

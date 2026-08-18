@@ -1,4 +1,4 @@
-import { requireOperationsPage } from "@/lib/session";
+import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
 import { listFactoryOptions, listItems, type ScrapItem } from "@/lib/db";
 import { itemRef } from "@/lib/scrapTypes";
 import PageHeader from "@/components/PageHeader";
@@ -22,9 +22,16 @@ export default async function ItemsQrPage({
   let items: ScrapItem[];
   let factoryOptions: string[];
   let factory: string;
+  let factoryLocked: boolean;
   try {
     factoryOptions = await listFactoryOptions(session.companyId);
-    factory = (sp.factory ?? "").trim() || factoryOptions[0] || "";
+    // 所属工場が設定されている人は自工場が自動で選ばれる（他工場は選べない）
+    const restriction = await getFactoryRestriction(session);
+    factoryLocked = restriction.restricted;
+    if (factoryLocked) factoryOptions = [restriction.factory!];
+    factory = factoryLocked
+      ? restriction.factory!
+      : (sp.factory ?? "").trim() || factoryOptions[0] || "";
     ({ items } = await listItems(session.companyId, {
       factory: factory || null,
       limit: 2000,
@@ -72,6 +79,7 @@ export default async function ItemsQrPage({
       <ItemQrSheet
         factory={factory}
         factoryOptions={factoryOptions}
+        factoryLocked={factoryLocked}
         workplace={workplace}
         workplaces={grouped.map((g) => ({ name: g.workplace, count: g.items.length }))}
         groups={shown}

@@ -496,6 +496,38 @@ export async function lookupItemByQrAction(code: string, factory?: string | null
 }
 
 /**
+ * 品目CD（または品名・子図番）で品目を探す（初品測定の候補表示用）。
+ * 同じ品目CDが格納場所ごとに存在するため、品目CD×格納場所CDで1件に畳んで返す。
+ * 入力した文字で始まる品目CDを先に出す（打った番号そのものが上に来るように）。
+ */
+export async function searchItemsAction(
+  query: string,
+  factory?: string | null
+): Promise<ScrapItem[]> {
+  const s = await requireEntitledSession();
+  const q = asStr(query, 50);
+  if (q.length < 2) return [];
+  const f = asStr(factory ?? "", 50) || null;
+  const { items } = await listItems(s.companyId, { q, factory: f, limit: 300 });
+  const uniq = new Map<string, ScrapItem>();
+  for (const it of items) {
+    // 子図番ごとに行があるので、品目（品目CD×格納場所CD）単位に畳む
+    const k = `${it.kanriZuban}\t${it.kakunoCD}`;
+    if (!uniq.has(k)) uniq.set(k, it);
+  }
+  const rank = (it: ScrapItem) =>
+    it.kanriZuban === q ? 0 : it.kanriZuban.startsWith(q) ? 1 : 2;
+  return [...uniq.values()]
+    .sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        a.kanriZuban.localeCompare(b.kanriZuban) ||
+        a.kakunoCD.localeCompare(b.kakunoCD)
+    )
+    .slice(0, 20);
+}
+
+/**
  * 初品測定の登録。測定日はサーバー側の当日（JST）、測定者はログインユーザーを自動記録。
  * 登録と同時に管理者へ申請（pending）となり、承認された測定値のみ完成重量の計算に採用される。
  */

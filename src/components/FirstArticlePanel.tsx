@@ -1,12 +1,13 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Camera, CheckCircle2, QrCode, Save, Stamp, Trash2, Undo2, X } from "lucide-react";
+import { Camera, CheckCircle2, QrCode, Save, Search, Stamp, Trash2, Undo2, X } from "lucide-react";
 import {
   approveFirstArticleAction,
   deleteFirstArticleAction,
   lookupItemByQrAction,
+  searchItemsAction,
   rejectFirstArticleAction,
   saveFirstArticleAction,
 } from "@/lib/actions";
@@ -97,6 +98,10 @@ export default function FirstArticlePanel({
   const [scanOpen, setScanOpen] = useState(false);
   const scannerRef = useRef<{ stop: () => Promise<void>; clear: () => void } | null>(null);
   const [weight, setWeight] = useState("");
+  // 品目CDでの検索（QRが読めない・手元に一覧が無いとき）。
+  // 結果は問い合わせた文字列と一緒に持ち、入力が変わったら古い結果を出さない。
+  const [cdQuery, setCdQuery] = useState("");
+  const [found, setFound] = useState<{ query: string; rows: ScrapItem[] } | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, startTransition] = useTransition();
 
@@ -105,6 +110,38 @@ export default function FirstArticlePanel({
     q.set("factory", next);
     router.push(`${pathname}?${q.toString()}`);
   }
+
+  /** 品目を選ぶ（QR読み取り・品目CDの候補選択のどちらからも通る）。 */
+  function chooseItem(item: ScrapItem) {
+    setSelected(item);
+    setCdQuery("");
+    // 工場名の表記ゆれ（「大口」/「大口工場」など）もあるため、
+    // 違っていても作業は止めず、取り違えに気付けるよう注意だけ出す
+    if (factory && item.factory && item.factory !== factory) {
+      setMessage({
+        ok: false,
+        text: `注意: この品目はマスター上「${item.factory}」の品目です（選択中の工場は「${factory}」）。取り違えでなければそのまま登録できます。`,
+      });
+    } else {
+      setMessage({ ok: true, text: `品目「${item.hinmei || item.kanriZuban}」を選択しました。` });
+    }
+  }
+
+  // 品目CDを打つたびに候補を引く（打ち終わりを待ってから1回だけ問い合わせる）
+  useEffect(() => {
+    const q = cdQuery.trim();
+    if (q.length < 2) return;
+    let alive = true;
+    const timer = setTimeout(() => {
+      void searchItemsAction(q, factory || null).then((rows) => {
+        if (alive) setFound({ query: q, rows });
+      });
+    }, 250);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [cdQuery, factory]);
 
   function onQrCode(code: string) {
     const trimmed = code.trim();
@@ -120,17 +157,7 @@ export default function FirstArticlePanel({
         });
         return;
       }
-      setSelected(item);
-      // 工場名の表記ゆれ（「大口」/「大口工場」など）もあるため、
-      // 違っていても作業は止めず、取り違えに気付けるよう注意だけ出す
-      if (factory && item.factory && item.factory !== factory) {
-        setMessage({
-          ok: false,
-          text: `注意: この品目はマスター上「${item.factory}」の品目です（選択中の工場は「${factory}」）。取り違えでなければそのまま登録できます。`,
-        });
-      } else {
-        setMessage({ ok: true, text: `品目「${item.hinmei || item.kanriZuban}」を選択しました。` });
-      }
+      chooseItem(item);
     });
   }
 
@@ -219,6 +246,10 @@ export default function FirstArticlePanel({
     });
   }
 
+  // 2文字以上で検索する。結果が今の入力に追いつくまでは「検索中」を出す。
+  const cdSearchable = cdQuery.trim().length >= 2;
+  const candidates = found && found.query === cdQuery.trim() ? found.rows : null;
+
   return (
     <div className="space-y-3 sm:space-y-4">
       {/* 【1】工場を選ぶ */}
@@ -251,11 +282,11 @@ export default function FirstArticlePanel({
         )}
       </Step>
 
-      {/* 【2】品目QRを読み取る */}
+      {/* 【2】品目を選ぶ（QR読み取り or 品目CD入力） */}
       <Step
         n={2}
-        title="品目QRを読み取る"
-        hint="QR一覧は品目マスターの「品目QR一覧」から印刷できます（QRの値＝品目KEY）。"
+        title="品目を選ぶ"
+        hint="品目QRを読み取るか、品目CDを入力して候補から選びます。QR一覧は品目マスターの「品目QR一覧」から印刷できます。"
       >
         {selected ? (
           <div className="mb-3 flex items-start justify-between gap-2 rounded-xl border border-[#b4632c] bg-[#faf6ef] px-3 py-2.5">
@@ -309,6 +340,67 @@ export default function FirstArticlePanel({
             placeholder="品目QRを読み取り（スキャナ/手入力→Enter）"
             className={`${input} w-full pl-9 sm:w-96`}
           />
+        </div>
+
+        {/* 品目CDで探す。同じ品目CDが格納場所ごとにあるため、候補から選んでもらう */}
+        <div className="mt-3">
+          <label className="flex flex-col gap-1 text-xs font-bold text-[#707070]">
+            品目CDで探す（QRが読めないとき）
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#909090]" />
+              <input
+                type="text"
+                inputMode="numeric"
+                value={cdQuery}
+                onChange={(e) => setCdQuery(e.target.value)}
+                placeholder="品目CDの一部を入力（例 4116）"
+                className={`${input} w-full pl-9 sm:w-96`}
+              />
+            </div>
+          </label>
+
+          {cdSearchable && (
+            <div className="mt-2">
+              {candidates === null ? (
+                <p className="text-xs text-[#909090]">検索中…</p>
+              ) : candidates.length === 0 ? (
+                <p className="rounded-lg bg-[#fff3e0] px-3 py-2 text-sm text-[#a15c00]">
+                  該当する品目がありません。品目CDと、選択中の工場（{factory || "未選択"}）をご確認ください。
+                </p>
+              ) : (
+                <ul className="max-h-72 divide-y divide-[#eeeeee] overflow-y-auto rounded-xl border border-[#e5e5e5]">
+                  {candidates.map((it) => (
+                    <li key={`${it.kanriZuban}|${it.kakunoCD}`}>
+                      <button
+                        onClick={() => chooseItem(it)}
+                        className="flex w-full items-start justify-between gap-3 px-3 py-2.5 text-left hover:bg-[#faf6ef]"
+                      >
+                        <span className="min-w-0">
+                          <span className="block font-mono text-sm font-bold text-[#333333]">
+                            {it.kanriZuban}
+                          </span>
+                          <span className="mt-0.5 block truncate text-sm text-[#555555]">
+                            {it.hinmei || "（品名なし）"}
+                          </span>
+                          <span className="mt-0.5 block text-xs text-[#909090]">
+                            格納場所 {it.kakunoCD}
+                            {it.kakunoMei ? `（${it.kakunoMei}）` : ""}
+                            {it.seizoBashoMei ? ` ／ ${it.seizoBashoMei}` : ""}
+                          </span>
+                        </span>
+                        <span className="shrink-0 text-right">
+                          <span className="block text-xs text-[#909090]">完成重量(理論)</span>
+                          <span className="block text-sm font-bold tabular-nums text-[#333333]">
+                            {fmt(it.kanseiJuryo, 6)} kg
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       </Step>
 

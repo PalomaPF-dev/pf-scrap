@@ -6,9 +6,12 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 export default function ScaleFactoryFilter({
   factory,
   factoryOptions,
+  factoryLocked,
 }: {
   factory: string;
   factoryOptions: string[];
+  /** 所属工場が設定された人は自工場に固定（選び直せない） */
+  factoryLocked: boolean;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -21,6 +24,16 @@ export default function ScaleFactoryFilter({
     router.push(`${pathname}?${q.toString()}`);
   }
 
+  if (factoryLocked) {
+    return (
+      <label className="flex items-center gap-1.5 text-xs text-[#707070]">
+        工場
+        <span className="flex h-10 items-center rounded-lg border border-[#e5e5e5] bg-[#f7f7f5] px-3 text-sm text-[#333333]">
+          {factory}
+        </span>
+      </label>
+    );
+  }
   return (
     <label className="flex items-center gap-1.5 text-xs text-[#707070]">
       工場

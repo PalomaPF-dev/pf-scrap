@@ -34,12 +34,15 @@ const th = "border border-[#333333] bg-[#f0f0ee] px-3 py-2 text-left font-bold w
 export default function ItemQrSheet({
   factory,
   factoryOptions,
+  factoryLocked,
   workplace,
   workplaces,
   groups,
 }: {
   factory: string;
   factoryOptions: string[];
+  /** 所属工場が設定された人は自工場に固定（選び直せない） */
+  factoryLocked: boolean;
   workplace: string;
   workplaces: { name: string; count: number }[];
   groups: { workplace: string; items: ScrapItem[] }[];
@@ -80,20 +83,28 @@ export default function ItemQrSheet({
           <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
             <label className="flex flex-col gap-1 text-xs font-bold text-[#707070]">
               1. 工場を選ぶ
-              <select
-                value={factory}
-                onChange={(e) => go({ factory: e.target.value })}
-                className={select}
-              >
-                {!factoryOptions.includes(factory) && factory !== "" && (
-                  <option value={factory}>{factory}</option>
-                )}
-                {factoryOptions.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-              </select>
+              {factoryLocked ? (
+                <span
+                  className={`${select} flex items-center bg-[#f7f7f5] font-normal text-[#333333]`}
+                >
+                  {factory}
+                </span>
+              ) : (
+                <select
+                  value={factory}
+                  onChange={(e) => go({ factory: e.target.value })}
+                  className={select}
+                >
+                  {!factoryOptions.includes(factory) && factory !== "" && (
+                    <option value={factory}>{factory}</option>
+                  )}
+                  {factoryOptions.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </select>
+              )}
             </label>
             <label className="flex flex-col gap-1 text-xs font-bold text-[#707070]">
               2. 職場を選ぶ（任意）

@@ -11,11 +11,14 @@ import { X } from "lucide-react";
 export default function ItemFilters({
   factory,
   factoryOptions,
+  factoryLocked,
   workplace,
   workplaceOptions,
 }: {
   factory: string;
   factoryOptions: string[];
+  /** 所属工場が設定された人は自工場に固定（選び直せない） */
+  factoryLocked: boolean;
   workplace: string;
   workplaceOptions: { name: string; count: number }[];
 }) {
@@ -44,17 +47,23 @@ export default function ItemFilters({
     <div className="flex flex-wrap items-center gap-2">
       <label className="flex items-center gap-1.5 text-xs text-[#707070]">
         工場
-        <select value={factory} onChange={(e) => go({ factory: e.target.value })} className={select}>
-          <option value="">すべて</option>
-          {!factoryOptions.includes(factory) && factory !== "" && (
-            <option value={factory}>{factory}</option>
-          )}
-          {factoryOptions.map((f) => (
-            <option key={f} value={f}>
-              {f}
-            </option>
-          ))}
-        </select>
+        {factoryLocked ? (
+          <span className="flex h-10 items-center rounded-lg border border-[#e5e5e5] bg-[#f7f7f5] px-3 text-sm text-[#333333]">
+            {factory}
+          </span>
+        ) : (
+          <select value={factory} onChange={(e) => go({ factory: e.target.value })} className={select}>
+            <option value="">すべて</option>
+            {!factoryOptions.includes(factory) && factory !== "" && (
+              <option value={factory}>{factory}</option>
+            )}
+            {factoryOptions.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        )}
       </label>
       <label className="flex items-center gap-1.5 text-xs text-[#707070]">
         製造場所
@@ -74,15 +83,15 @@ export default function ItemFilters({
           ))}
         </select>
       </label>
-      {(factory || workplace) && (
+      {(!factoryLocked && factory) || workplace ? (
         <button
-          onClick={() => go({ factory: "", workplace: "" })}
+          onClick={() => go(factoryLocked ? { workplace: "" } : { factory: "", workplace: "" })}
           className="inline-flex h-10 items-center gap-1 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm text-[#555555] hover:bg-[#f7f7f5]"
         >
           <X className="h-4 w-4" />
           絞り込み解除
         </button>
-      )}
+      ) : null}
     </div>
   );
 }

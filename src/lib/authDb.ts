@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { getSql } from "./neon";
+import { formatAffiliation } from "@paloma-pf/ui";
 
 /**
  * ユーザーの役割（ポータルの3段階のうちアプリ側は2種）。
@@ -175,10 +176,11 @@ export async function getUserAffiliation(userId: string): Promise<string | null>
   const rows = await sql`
     SELECT portal_department, portal_workplace FROM users WHERE id = ${userId} LIMIT 1`;
   if (rows.length === 0) return null;
-  const parts = [rows[0].portal_department, rows[0].portal_workplace]
-    .map((v) => (v ?? "").toString().trim())
-    .filter(Boolean);
-  return parts.length > 0 ? parts.join(" ") : null;
+  // 並べ方（部署名＋半角スペース＋職場名）は全PFアプリ共通なので @paloma-pf/ui に置いてある。
+  return formatAffiliation({
+    department: rows[0].portal_department,
+    workplace: rows[0].portal_workplace,
+  });
 }
 
 /**

@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
-    "@paloma-pf/ui": "github:PalomaPF-dev/pf-ui#07b96461ec0235d430186bc7fbaeb430d622a825",
+    "@paloma-pf/ui": "github:PalomaPF-dev/pf-ui#3315ebfd4f55f9e3b42425cae694091d099f4da6",
     "bcryptjs": "^3.0.3",
     "lucide-react": "^1.8.0",
     "next": "16.2.4",

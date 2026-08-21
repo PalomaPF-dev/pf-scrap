@@ -1,6 +1,6 @@
 import { FileDown, Tag } from "lucide-react";
 import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
-import { listFactoryOptions, listScales, type Scale } from "@/lib/db";
+import { listFactoryOptions, listScales, listScrapKinds, type Scale, type ScrapKind } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import ScaleFactoryFilter from "@/components/ScaleFactoryFilter";
@@ -27,10 +27,13 @@ export default async function ScalesPage({
 
   let scales: Scale[];
   let factoryOptions: string[];
+  let kinds: ScrapKind[];
   try {
-    [scales, factoryOptions] = await Promise.all([
+    [scales, factoryOptions, kinds] = await Promise.all([
       listScales(session.companyId, { factory: factory || null }),
       listFactoryOptions(session.companyId),
+      // 種類の選択肢は設定マスタから（使用中のものだけ）
+      listScrapKinds(session.companyId, { activeOnly: true }),
     ]);
   } catch (e) {
     console.error("[scales]", e);
@@ -48,7 +51,7 @@ export default async function ScalesPage({
     <div className="p-4 sm:p-6">
       <PageHeader
         title="重量計マスター"
-        description="スクラップ箱（上銅 / 銅ダライ）の重量計を工場・設備番号で管理します。QRコードはラベル印刷、またはテプラ用CSVを書き出して差し込み印刷し、重量計に貼り付けます。"
+        description="スクラップ箱の重量計を工場・設備番号で管理します。種類は「設定」で追加できます。QRコードはラベル印刷、またはテプラ用CSVを書き出して差し込み印刷し、重量計に貼り付けます。"
         action={
           <>
             <a
@@ -79,6 +82,7 @@ export default async function ScalesPage({
         scales={scales}
         factory={factory}
         factoryOptions={factoryLocked ? [factory] : factoryOptions}
+        kinds={kinds}
       />
     </div>
   );

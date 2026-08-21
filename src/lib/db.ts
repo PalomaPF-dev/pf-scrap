@@ -15,6 +15,7 @@ export {
   type ScaleKind,
   type DailyStatus,
   type ScrapItem,
+  type ScrapKind,
   type DailyEntry,
   type DailyRecord,
   type Scale,
@@ -23,11 +24,13 @@ import {
   type FirstArticle as _FirstArticle,
   type FaStatus as _FaStatus,
   type ScrapItem as _ScrapItem,
+  type ScrapKind as _ScrapKind,
   type DailyRecord as _DailyRecord,
   type DailyStatus as _DailyStatus,
   type Scale as _Scale,
 } from "./scrapTypes";
 type ScrapItem = _ScrapItem;
+type ScrapKind = _ScrapKind;
 type FirstArticle = _FirstArticle;
 type FaStatus = _FaStatus;
 type DailyRecord = _DailyRecord;
@@ -230,6 +233,103 @@ export async function deleteItem(companyId: string, id: string): Promise<void> {
   await ensureSchema();
   const sql = getSql();
   await sql`DELETE FROM scrap_items WHERE company_id = ${companyId} AND id = ${id}`;
+}
+
+// ===== スクラップ種類マスター =====
+
+/** 既定のスクラップ種類。会社に1件も無いときだけ、この2種を初期登録する。 */
+const DEFAULT_KINDS = ["上銅", "銅ダライ"];
+
+function mapKind(r: any): ScrapKind {
+  return {
+    id: r.id,
+    name: r.name,
+    sort: Number(r.sort) || 0,
+    active: Boolean(r.active),
+  };
+}
+
+/**
+ * スクラップ種類の一覧（並び順）。
+ * 未登録の会社には既定の2種を入れてから返す（設定画面を開かなくても従来どおり使える）。
+ */
+export async function listScrapKinds(
+  companyId: string,
+  opts: { activeOnly?: boolean } = {}
+): Promise<ScrapKind[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const read = () => sql`
+    SELECT id, name, sort, active FROM scrap_kinds
+    WHERE company_id = ${companyId}
+      AND (${opts.activeOnly ?? false} = false OR active = true)
+    ORDER BY sort ASC, name ASC`;
+  let rows = await read();
+  if (rows.length === 0) {
+    const any = await sql`SELECT 1 FROM scrap_kinds WHERE company_id = ${companyId} LIMIT 1`;
+    if (any.length === 0) {
+      await sql`
+        INSERT INTO scrap_kinds (company_id, name, sort)
+        SELECT ${companyId}, * FROM unnest(
+          ${DEFAULT_KINDS}::text[], ${DEFAULT_KINDS.map((_, i) => i + 1)}::int[]
+        )
+        ON CONFLICT (company_id, name) DO NOTHING`;
+      rows = await read();
+    }
+  }
+  return rows.map(mapKind);
+}
+
+/** 種類の登録・更新（id があれば更新）。名称は会社内で一意。 */
+export async function upsertScrapKind(
+  companyId: string,
+  k: { id?: string | null; name: string; sort: number; active: boolean }
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  if (k.id) {
+    await sql`
+      UPDATE scrap_kinds SET name = ${k.name}, sort = ${k.sort}, active = ${k.active}
+      WHERE company_id = ${companyId} AND id = ${k.id}`;
+    return;
+  }
+  await sql`
+    INSERT INTO scrap_kinds (company_id, name, sort, active)
+    VALUES (${companyId}, ${k.name}, ${k.sort}, ${k.active})
+    ON CONFLICT (company_id, name) DO UPDATE SET
+      sort = EXCLUDED.sort, active = EXCLUDED.active`;
+}
+
+export async function getScrapKindById(
+  companyId: string,
+  id: string
+): Promise<ScrapKind | null> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, name, sort, active FROM scrap_kinds
+    WHERE company_id = ${companyId} AND id = ${id} LIMIT 1`;
+  return rows[0] ? mapKind(rows[0]) : null;
+}
+
+/** この種類を使っている重量計・日次記録の件数（削除可否の判定に使う）。 */
+export async function countScrapKindUsage(
+  companyId: string,
+  name: string
+): Promise<{ scales: number; entries: number }> {
+  await ensureSchema();
+  const sql = getSql();
+  const [sc, en] = await Promise.all([
+    sql`SELECT COUNT(*)::int AS n FROM scrap_scales WHERE company_id = ${companyId} AND kind = ${name}`,
+    sql`SELECT COUNT(*)::int AS n FROM scrap_daily_entries WHERE company_id = ${companyId} AND hinshu = ${name}`,
+  ]);
+  return { scales: Number(sc[0]?.n ?? 0), entries: Number(en[0]?.n ?? 0) };
+}
+
+export async function deleteScrapKind(companyId: string, id: string): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`DELETE FROM scrap_kinds WHERE company_id = ${companyId} AND id = ${id}`;
 }
 
 // ===== 重量計（スクラップ箱）マスター =====
@@ -531,12 +631,31 @@ export interface DailyAggRow {
   approvedBy: string;
   kaishuSokuteichi: number | null;
   total: number;
-  /** 箱の種類（上銅/銅ダライ）別の合計。それ以外（旧様式の記録）は「その他」 */
-  byKind: { 上銅: number; 銅ダライ: number; その他: number };
+  /** 種類名 → 合計kg。種類は設定で増やせるので固定の列は持たない */
+  byKind: Record<string, number>;
   ijoCount: number;
 }
 
-/** 月間の日次記録集計（1日1工場1行、箱の種類別合計つき）。 */
+/** JSONB の {種類名: 重量} を Record<string, number> に正規化。 */
+function mapByKind(raw: any): Record<string, number> {
+  let obj = raw;
+  if (typeof obj === "string") {
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return {};
+    }
+  }
+  if (!obj || typeof obj !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    const n = Number(v);
+    if (Number.isFinite(n)) out[k] = n;
+  }
+  return out;
+}
+
+/** 月間の日次記録集計（1日1工場1行、種類別合計つき）。 */
 export async function listDailyAgg(
   companyId: string,
   ym: string,
@@ -544,13 +663,24 @@ export async function listDailyAgg(
 ): Promise<DailyAggRow[]> {
   await ensureSchema();
   const sql = getSql();
+  // 種類は設定で増やせるので、まず記録×種類で合計してから JSONB に畳む
   const rows = await sql`
+    WITH per_kind AS (
+      SELECT e.record_id AS rid, e.hinshu, SUM(e.weight) AS w
+      FROM scrap_daily_entries e
+      JOIN scrap_daily_records r2 ON r2.id = e.record_id
+      WHERE r2.company_id = ${companyId}
+        AND to_char(r2.record_date, 'YYYY-MM') = ${ym}
+        AND (${factory}::text IS NULL OR r2.factory = ${factory})
+      GROUP BY e.record_id, e.hinshu
+    )
     SELECT r.record_date, r.factory, r.sekininsha, r.shonin, r.status, r.applied_by, r.approved_by,
       r.kaishu_sokuteichi,
       COALESCE(SUM(e.weight), 0) AS total,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '上銅'), 0) AS w_jodo,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅ダライ'), 0) AS w_darai,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu NOT IN ('上銅', '銅ダライ')), 0) AS w_sonota,
+      COALESCE(
+        (SELECT jsonb_object_agg(p.hinshu, p.w) FROM per_kind p WHERE p.rid = r.id),
+        '{}'::jsonb
+      ) AS by_kind,
       COUNT(*) FILTER (WHERE e.ijo <> '') AS ijo_count
     FROM scrap_daily_records r
     LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
@@ -569,37 +699,40 @@ export async function listDailyAgg(
     approvedBy: r.approved_by ?? "",
     kaishuSokuteichi: numOrNull(r.kaishu_sokuteichi),
     total: num(r.total),
-    byKind: { 上銅: num(r.w_jodo), 銅ダライ: num(r.w_darai), その他: num(r.w_sonota) },
+    byKind: mapByKind(r.by_kind),
     ijoCount: Number(r.ijo_count) || 0,
   }));
 }
 
-/** 月間の日次記録合計（箱の種類別）。⑥の突合に使う。factory 指定で自工場のみ。 */
+/** 月間の日次記録合計（種類別）。⑥の突合に使う。factory 指定で自工場のみ。 */
 export async function dailyMonthTotals(
   companyId: string,
   ym: string,
   factory: string | null = null
-): Promise<{ total: number; byKind: { 上銅: number; 銅ダライ: number; その他: number }; days: number }> {
+): Promise<{ total: number; byKind: Record<string, number>; days: number }> {
   await ensureSchema();
   const sql = getSql();
-  const rows = await sql`
-    SELECT
-      COALESCE(SUM(e.weight), 0) AS total,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '上銅'), 0) AS w_jodo,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu = '銅ダライ'), 0) AS w_darai,
-      COALESCE(SUM(e.weight) FILTER (WHERE e.hinshu NOT IN ('上銅', '銅ダライ')), 0) AS w_sonota,
-      COUNT(DISTINCT r.id) AS days
-    FROM scrap_daily_records r
-    LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
-    WHERE r.company_id = ${companyId}
-      AND to_char(r.record_date, 'YYYY-MM') = ${ym}
-      AND (${factory}::text IS NULL OR r.factory = ${factory})`;
-  const r = rows[0] ?? {};
-  return {
-    total: num(r.total),
-    byKind: { 上銅: num(r.w_jodo), 銅ダライ: num(r.w_darai), その他: num(r.w_sonota) },
-    days: Number(r.days) || 0,
-  };
+  const [totals, kinds] = await Promise.all([
+    sql`
+      SELECT COALESCE(SUM(e.weight), 0) AS total, COUNT(DISTINCT r.id) AS days
+      FROM scrap_daily_records r
+      LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
+      WHERE r.company_id = ${companyId}
+        AND to_char(r.record_date, 'YYYY-MM') = ${ym}
+        AND (${factory}::text IS NULL OR r.factory = ${factory})`,
+    sql`
+      SELECT e.hinshu, SUM(e.weight) AS w
+      FROM scrap_daily_entries e
+      JOIN scrap_daily_records r ON r.id = e.record_id
+      WHERE r.company_id = ${companyId}
+        AND to_char(r.record_date, 'YYYY-MM') = ${ym}
+        AND (${factory}::text IS NULL OR r.factory = ${factory})
+      GROUP BY e.hinshu`,
+  ]);
+  const byKind: Record<string, number> = {};
+  for (const k of kinds) byKind[String((k as any).hinshu)] = num((k as any).w);
+  const t = totals[0] ?? {};
+  return { total: num((t as any).total), byKind, days: Number((t as any).days) || 0 };
 }
 
 // ===== ③ 初品重量測定 =====

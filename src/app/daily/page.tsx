@@ -7,9 +7,11 @@ import {
   listDailyAgg,
   listFactoryOptions,
   listScales,
+  listScrapKinds,
   type DailyAggRow,
   type DailyRecord,
   type Scale,
+  type ScrapKind,
 } from "@/lib/db";
 import { dailyBomTotals, type DailyBom } from "@/lib/calc";
 import { fmt, fmtPct, isDateStr, isYmStr, thisMonthStr, todayStr } from "@/lib/format";
@@ -42,6 +44,7 @@ export default async function DailyPage({
   let record: DailyRecord | null;
   let agg: DailyAggRow[];
   let scales: Scale[];
+  let kinds: ScrapKind[];
   let bom: DailyBom;
   try {
     const restriction = await getFactoryRestriction(session);
@@ -52,13 +55,15 @@ export default async function DailyPage({
     factory = restriction.restricted
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
-    [record, agg, scales, bom] = await Promise.all([
+    [record, agg, scales, kinds, bom] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listDailyAgg(session.companyId, ym, restriction.restricted ? restriction.factory : null),
       listScales(session.companyId, {
         factory: restriction.restricted ? restriction.factory : factory,
         activeOnly: true,
       }),
+      // 種類は「設定」で増やせるので、集計の列もマスタから作る
+      listScrapKinds(session.companyId),
       // McFrameの日別加工数 × 単品完成重量（初品実測を優先）＝ その日の完成品重量
       dailyBomTotals(session.companyId, date, factory),
     ]);
@@ -75,10 +80,17 @@ export default async function DailyPage({
   const isAdmin = session.role === "admin";
   // 当日の記録スクラップ合計（理論値との突合に使う）
   const dayTotal = (record?.entries ?? []).reduce((t, e) => t + e.weight, 0);
+  // 集計に出す種類の列。マスタの並び順を基本に、マスタに無い種類（過去の記録）は末尾に足す。
+  const kindNames = [
+    ...kinds.map((k) => k.name),
+    ...[...new Set(agg.flatMap((r) => Object.keys(r.byKind)))]
+      .filter((n) => !kinds.some((k) => k.name === n))
+      .sort(),
+  ];
   const monthTotal = {
-    jodo: agg.reduce((t, r) => t + r.byKind["上銅"], 0),
-    darai: agg.reduce((t, r) => t + r.byKind["銅ダライ"], 0),
-    sonota: agg.reduce((t, r) => t + r.byKind["その他"], 0),
+    byKind: Object.fromEntries(
+      kindNames.map((n) => [n, agg.reduce((t, r) => t + (r.byKind[n] ?? 0), 0)])
+    ) as Record<string, number>,
     total: agg.reduce((t, r) => t + r.total, 0),
   };
 
@@ -97,6 +109,7 @@ export default async function DailyPage({
         factoryLocked={factoryLocked}
         initial={record}
         scales={scales}
+        kinds={kinds}
         userName={session.userName}
         isAdmin={isAdmin}
       />
@@ -184,7 +197,10 @@ export default async function DailyPage({
                   <span className="text-sm font-bold text-[#b4632c]">{r.recordDate}</span>
                   <span className="ml-2 text-xs text-[#707070]">{r.factory}</span>
                   <span className="mt-0.5 block text-xs text-[#909090]">
-                    上銅 {fmt(r.byKind["上銅"])} ／ 銅ダライ {fmt(r.byKind["銅ダライ"])}
+                    {kindNames
+                      .filter((n) => (r.byKind[n] ?? 0) !== 0)
+                      .map((n) => `${n} ${fmt(r.byKind[n] ?? 0)}`)
+                      .join(" ／ ") || "記録なし"}
                   </span>
                 </span>
                 <span className="shrink-0 text-right">
@@ -221,9 +237,11 @@ export default async function DailyPage({
                 <th className={th}>日付</th>
                 <th className={th}>工場</th>
                 <th className={th}>責任者</th>
-                <th className={thNum}>上銅(kg)</th>
-                <th className={thNum}>銅ダライ(kg)</th>
-                <th className={thNum}>その他(kg)</th>
+                {kindNames.map((n) => (
+                  <th key={n} className={thNum}>
+                    {n}(kg)
+                  </th>
+                ))}
                 <th className={thNum}>合計(kg)</th>
                 <th className={thNum}>回収箱測定値</th>
                 <th className={thNum}>差異率</th>
@@ -235,7 +253,7 @@ export default async function DailyPage({
             <tbody>
               {agg.length === 0 && (
                 <tr>
-                  <td className={td} colSpan={isAdmin ? 12 : 11}>
+                  <td className={td} colSpan={8 + kindNames.length + (isAdmin ? 1 : 0)}>
                     対象月の記録がありません
                   </td>
                 </tr>
@@ -257,9 +275,11 @@ export default async function DailyPage({
                     </td>
                     <td className={td}>{r.factory}</td>
                     <td className={td}>{r.sekininsha}</td>
-                    <td className={tdNum}>{fmt(r.byKind["上銅"])}</td>
-                    <td className={tdNum}>{fmt(r.byKind["銅ダライ"])}</td>
-                    <td className={tdNum}>{fmt(r.byKind["その他"])}</td>
+                    {kindNames.map((n) => (
+                      <td key={n} className={tdNum}>
+                        {fmt(r.byKind[n] ?? 0)}
+                      </td>
+                    ))}
                     <td className={`${tdNum} font-semibold`}>{fmt(r.total)}</td>
                     <td className={tdNum}>{fmt(r.kaishuSokuteichi)}</td>
                     <td
@@ -299,9 +319,11 @@ export default async function DailyPage({
                   <td className={td} colSpan={3}>
                     月間合計（{agg.length}日分）
                   </td>
-                  <td className={tdNum}>{fmt(monthTotal.jodo)}</td>
-                  <td className={tdNum}>{fmt(monthTotal.darai)}</td>
-                  <td className={tdNum}>{fmt(monthTotal.sonota)}</td>
+                  {kindNames.map((n) => (
+                    <td key={n} className={tdNum}>
+                      {fmt(monthTotal.byKind[n] ?? 0)}
+                    </td>
+                  ))}
                   <td className={tdNum}>{fmt(monthTotal.total)}</td>
                   <td className={td} colSpan={isAdmin ? 5 : 4}></td>
                 </tr>

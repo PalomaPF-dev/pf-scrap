@@ -20,8 +20,13 @@ import {
   getMonthlyInput,
   getScaleById,
   getScaleByQr,
+  countScrapKindUsage,
+  deleteScrapKind,
+  getScrapKindById,
   KUBUN_LIST,
   listItems,
+  listScrapKinds,
+  upsertScrapKind,
   SCALE_KIND_LIST,
   saveDailyRecord,
   saveMonthlyInput,
@@ -163,6 +168,63 @@ export async function importItemsAction(
   }
 }
 
+// ===== 設定: スクラップ種類マスター（生産管理部・調達部のメンバーと管理者のみ） =====
+
+export async function saveScrapKindAction(input: {
+  id?: string | null;
+  name: string;
+  sort: unknown;
+  active: boolean;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const name = asStr(input.name, 30);
+    if (!name) return fail("種類名を入力してください。");
+    const kinds = await listScrapKinds(s.companyId);
+    // 同じ名前は作れない（日次記録は種類名で集計するため、名前が識別子になる）
+    const dup = kinds.find((k) => k.name === name && k.id !== (input.id ?? ""));
+    if (dup) return fail(`「${name}」は既に登録されています。`);
+    await upsertScrapKind(s.companyId, {
+      id: input.id ?? null,
+      name,
+      sort: Math.trunc(toNum(input.sort)),
+      active: Boolean(input.active),
+    });
+    revalidatePath("/settings");
+    revalidatePath("/scales");
+    revalidatePath("/daily");
+    return { ok: true, message: "保存しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 種類の削除。重量計や過去の記録で使われている種類は消せない
+ * （消すと集計名だけが残って対応が取れなくなるため、「使用しない」に変更してもらう）。
+ */
+export async function deleteScrapKindAction(id: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const kind = await getScrapKindById(s.companyId, id);
+    if (!kind) return fail("対象の種類が見つかりません。");
+    const used = await countScrapKindUsage(s.companyId, kind.name);
+    if (used.scales > 0 || used.entries > 0) {
+      return fail(
+        `「${kind.name}」は使用中のため削除できません（重量計 ${used.scales}件 / 記録 ${used.entries}件）。` +
+          "「使用しない」に切り替えると、新規の選択肢から外れます。"
+      );
+    }
+    await deleteScrapKind(s.companyId, id);
+    revalidatePath("/settings");
+    revalidatePath("/scales");
+    revalidatePath("/daily");
+    return { ok: true, message: "削除しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
 // ===== 重量計（スクラップ箱）マスター（生産管理部・調達部のメンバーと管理者のみ） =====
 
 export async function saveScaleAction(input: {
@@ -181,9 +243,12 @@ export async function saveScaleAction(input: {
     const name = asStr(input.name, 100);
     if (!qrCode) return fail("QRコード値を入力してください。");
     if (!name) return fail("名称を入力してください。");
-    const kind = (SCALE_KIND_LIST as readonly string[]).includes(String(input.kind))
+    // 種類は設定マスタにあるものだけ受け付ける（先頭を既定にする）
+    const kinds = await listScrapKinds(s.companyId, { activeOnly: true });
+    const names = kinds.map((k) => k.name);
+    const kind = names.includes(String(input.kind))
       ? String(input.kind)
-      : "上銅";
+      : names[0] ?? SCALE_KIND_LIST[0];
     await upsertScale(s.companyId, {
       id: input.id ?? null,
       qrCode,
@@ -272,6 +337,9 @@ export async function saveDailyRecordAction(input: {
     if (lockMsg) return fail(lockMsg);
 
     const prev = await getDailyRecord(s.companyId, input.recordDate, factory);
+    // 種類は設定マスタにあるものだけ通す。過去の記録に残っている種類名は
+    // そのまま活かしたいので、無効なものも含めた全件で判定する。
+    const kindNames = (await listScrapKinds(s.companyId)).map((k) => k.name);
 
     // 箱ごとの朝礼後の累積値。これがその日の最初の投入の「累積(投入前)」になる。
     const kaishiCum: Record<string, number> = {};
@@ -304,7 +372,7 @@ export async function saveDailyRecordAction(input: {
           kind = scale.kind;
         }
       }
-      if (!(SCALE_KIND_LIST as readonly string[]).includes(kind)) kind = "上銅";
+      if (!kindNames.includes(kind)) kind = kindNames[0] ?? SCALE_KIND_LIST[0];
 
       // 累積(投入前)は自動値（朝礼後の累積値／同じ箱の直前の投入後累積）が入る。
       // 違う値にするのは訂正なので、理由が無ければ受け付けない（画面と同じ判定をサーバーでも行う）。

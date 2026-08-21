@@ -8,9 +8,44 @@
 export const KUBUN_LIST = ["銅条", "銅管", "その他"] as const;
 export type Kubun = (typeof KUBUN_LIST)[number];
 
-/** スクラップ箱（重量計）の種類。日次記録は投入先の箱をこの2種から選ぶ。 */
+/**
+ * スクラップの種類（上銅 / 銅ダライ / 銅スクラップ …）。
+ * 現場の運用で増えるため、設定画面（scrap_kinds）で追加できる。
+ * 下の SCALE_KIND_LIST は、種類が1件も登録されていないときの既定値としてだけ使う。
+ */
+export interface ScrapKind {
+  id: string;
+  name: string;
+  /** 表示順（小さいほど先） */
+  sort: number;
+  /** 使用中か。無効にすると新規の選択肢から消えるが、過去の記録は残る */
+  active: boolean;
+}
+
+/** 種類マスターが空のときの既定値。 */
 export const SCALE_KIND_LIST = ["上銅", "銅ダライ"] as const;
 export type ScaleKind = (typeof SCALE_KIND_LIST)[number];
+
+/**
+ * 種類ごとの色。設定で自由に増やせるので、並び順で色を割り当てる。
+ * 記録票・一覧・タグで同じ色になるよう、表示側は必ずこれを使う。
+ */
+const KIND_COLORS = [
+  "bg-[#faf6ef] text-[#b4632c]",
+  "bg-[#eef1f4] text-[#0b5ca8]",
+  "bg-[#eef4ee] text-[#2f6b2f]",
+  "bg-[#f4eef4] text-[#7b2f7b]",
+  "bg-[#fdf3e6] text-[#a15c00]",
+  "bg-[#eef4f4] text-[#0b7a7a]",
+];
+
+/** 種類名から色を決める（並び順が分かるときは order を渡す）。 */
+export function kindColor(name: string, order?: number): string {
+  if (order !== undefined && order >= 0) return KIND_COLORS[order % KIND_COLORS.length];
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return KIND_COLORS[h % KIND_COLORS.length];
+}
 
 /** 日次記録票の承認状態。 */
 export type DailyStatus = "draft" | "pending" | "approved" | "rejected";

@@ -4,7 +4,7 @@ import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Pencil, Plus, Printer, Trash2, X } from "lucide-react";
 import { deleteScaleAction, saveScaleAction } from "@/lib/actions";
-import type { Scale } from "@/lib/scrapTypes";
+import { kindColor, type Scale, type ScrapKind } from "@/lib/scrapTypes";
 
 const td = "border border-[#e5e5e5] px-2.5 py-1.5 whitespace-nowrap align-middle";
 const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2.5 py-1.5 text-left font-semibold whitespace-nowrap";
@@ -27,7 +27,7 @@ const emptyDraft = (factory: string): Draft => ({
   qrCode: "",
   equipNo: "",
   name: "",
-  kind: "上銅",
+  kind: "",
   factory,
   sort: "0",
   active: true,
@@ -64,11 +64,14 @@ export default function ScalesTable({
   scales,
   factory,
   factoryOptions,
+  kinds,
 }: {
   scales: Scale[];
   /** 絞り込み中の工場（新規登録の既定値にも使う） */
   factory: string;
   factoryOptions: string[];
+  /** スクラップ種類（設定マスタ。使用中のものだけ） */
+  kinds: ScrapKind[];
 }) {
   const router = useRouter();
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -105,7 +108,7 @@ export default function ScalesTable({
         <button
           onClick={() => {
             setError("");
-            setDraft({ ...emptyDraft(factory), qrCode: genCode() });
+            setDraft({ ...emptyDraft(factory), kind: kinds[0]?.name ?? "", qrCode: genCode() });
           }}
           className="inline-flex items-center gap-1.5 rounded-lg bg-[#b4632c] px-3 py-2 text-sm font-semibold text-white hover:bg-[#96521f]"
         >
@@ -132,7 +135,7 @@ export default function ScalesTable({
             {scales.length === 0 && (
               <tr>
                 <td className={td} colSpan={8}>
-                  重量計が未登録です。「新規登録」から、上銅・銅ダライそれぞれのスクラップ箱の重量計を登録してください。
+                  重量計が未登録です。「新規登録」から、種類ごとのスクラップ箱の重量計を登録してください。
                 </td>
               </tr>
             )}
@@ -144,7 +147,7 @@ export default function ScalesTable({
                 <td className={td}>
                   <span
                     className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
-                      s.kind === "上銅" ? "bg-[#faf6ef] text-[#b4632c]" : "bg-[#eef1f4] text-[#0b5ca8]"
+                      kindColor(s.kind, kinds.findIndex((k) => k.name === s.kind))
                     }`}
                   >
                     {s.kind}
@@ -246,8 +249,15 @@ export default function ScalesTable({
                   onChange={(e) => setDraft({ ...draft, kind: e.target.value })}
                   className={input}
                 >
-                  <option>上銅</option>
-                  <option>銅ダライ</option>
+                  {/* 種類は「設定」で追加できる。使用中のものだけ選べる */}
+                  {!kinds.some((k) => k.name === draft.kind) && draft.kind !== "" && (
+                    <option value={draft.kind}>{draft.kind}（使用しない）</option>
+                  )}
+                  {kinds.map((k) => (
+                    <option key={k.id} value={k.name}>
+                      {k.name}
+                    </option>
+                  ))}
                 </select>
               </label>
               <label className="flex flex-col gap-1 text-xs text-[#707070]">

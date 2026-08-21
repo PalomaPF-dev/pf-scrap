@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { canUseOperations, getSessionWithRole } from "@/lib/session";
-import { DAILY_STATUS_LABEL, listDailyAgg, listItems, listScales } from "@/lib/db";
+import {
+  DAILY_STATUS_LABEL,
+  listDailyAgg,
+  listItems,
+  listScales,
+  listScrapKinds,
+} from "@/lib/db";
 import { monthlyItemRows, yearSummary } from "@/lib/calc";
 import { toCsv } from "@/lib/csv";
 import { isYmStr } from "@/lib/format";
@@ -55,9 +61,19 @@ export async function GET(req: NextRequest) {
       if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
       // 所属工場ユーザーは自工場分のみ（画面と同じ範囲）
       const factory = s.isDemo ? null : s.factory;
-      const agg = await listDailyAgg(s.companyId, ymParam, factory);
+      const [agg, kinds] = await Promise.all([
+        listDailyAgg(s.companyId, ymParam, factory),
+        listScrapKinds(s.companyId),
+      ]);
+      // 種類は設定で増やせるので、列もマスタから作る（マスタに無い種類は末尾）
+      const kindNames = [
+        ...kinds.map((k) => k.name),
+        ...[...new Set(agg.flatMap((r) => Object.keys(r.byKind)))]
+          .filter((n) => !kinds.some((k) => k.name === n))
+          .sort(),
+      ];
       const rows: (string | number | null)[][] = [
-        ["日付", "工場", "責任者", "上銅(kg)", "銅ダライ(kg)", "その他(kg)", "合計(kg)", "回収箱測定値", "差異率", "状態", "承認者", "異常件数"],
+        ["日付", "工場", "責任者", ...kindNames.map((n) => `${n}(kg)`), "合計(kg)", "回収箱測定値", "差異率", "状態", "承認者", "異常件数"],
       ];
       for (const r of agg) {
         const sai =
@@ -68,9 +84,7 @@ export async function GET(req: NextRequest) {
           r.recordDate,
           r.factory,
           r.sekininsha,
-          r.byKind["上銅"],
-          r.byKind["銅ダライ"],
-          r.byKind["その他"],
+          ...kindNames.map((n) => r.byKind[n] ?? 0),
           r.total,
           r.kaishuSokuteichi ?? "",
           pct(sai),

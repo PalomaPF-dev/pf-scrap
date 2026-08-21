@@ -22,11 +22,11 @@ import {
 } from "@/lib/actions";
 import {
   DAILY_STATUS_LABEL,
-  SCALE_KIND_LIST,
+  kindColor,
   type DailyRecord,
   type DailyStatus,
   type Scale,
-  type ScaleKind,
+  type ScrapKind,
 } from "@/lib/scrapTypes";
 import { fmt, fmtPct, toNum, toNumOrNull } from "@/lib/format";
 import DateNav from "@/components/DateNav";
@@ -81,13 +81,10 @@ function StatusBadge({ status }: { status: DailyStatus }) {
   );
 }
 
-function KindTag({ kind }: { kind: string }) {
+/** 種類タグ。色は種類マスタの並び順で決まる（order を渡すと一覧と同じ色になる）。 */
+function KindTag({ kind, order }: { kind: string; order?: number }) {
   return (
-    <span
-      className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
-        kind === "上銅" ? "bg-[#faf6ef] text-[#b4632c]" : "bg-[#eef1f4] text-[#0b5ca8]"
-      }`}
-    >
+    <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${kindColor(kind, order)}`}>
       {kind}
     </span>
   );
@@ -128,7 +125,7 @@ function Step({
 
 /**
  * スクラップ日次記録票（モバイル優先）。計量の流れ:
- *   1. 投入先のスクラップ箱（重量計）をQR読み取り or ボタンで選択（上銅/銅ダライ）
+ *   1. 投入先のスクラップ箱（重量計）をQR読み取り or 一覧から選択
  *   2. 投入前重量(箱含む) − 箱重量(空き箱) = スクラップ重量（自動計算）
  *   3. 「この投入を記録」→ 時刻・記録者は自動
  *   4. 終礼後に「管理者へ申請」→ 管理者が承認
@@ -141,6 +138,7 @@ export default function DailyRecordForm({
   factoryLocked,
   initial,
   scales,
+  kinds,
   userName,
   isAdmin,
 }: {
@@ -150,6 +148,8 @@ export default function DailyRecordForm({
   factoryLocked: boolean;
   initial: DailyRecord | null;
   scales: Scale[];
+  /** スクラップ種類（設定マスタ。並び順＝表示順・色の順） */
+  kinds: ScrapKind[];
   userName: string;
   isAdmin: boolean;
 }) {
@@ -454,17 +454,18 @@ export default function DailyRecordForm({
     });
   }
 
-  // 一覧選択用。種類（上銅／銅ダライ）ごとにまとめ、マスター未定義の種類も末尾に出す
+  // 一覧選択用。種類ごとにまとめ、種類マスタの並び順で出す（マスタに無い種類は末尾）
+  const kindOrder = useMemo(() => new Map(kinds.map((k, i) => [k.name, i])), [kinds]);
   const scaleGroups = useMemo(() => {
     const map = new Map<string, Scale[]>();
     for (const s of scales.filter((s) => s.active)) {
       if (!map.has(s.kind)) map.set(s.kind, []);
       map.get(s.kind)!.push(s);
     }
-    const known = SCALE_KIND_LIST.filter((k) => map.has(k));
-    const others = [...map.keys()].filter((k) => !SCALE_KIND_LIST.includes(k as ScaleKind));
-    return [...known, ...others].map((kind) => ({ kind, items: map.get(kind)! }));
-  }, [scales]);
+    return [...map.keys()]
+      .sort((a, b) => (kindOrder.get(a) ?? 999) - (kindOrder.get(b) ?? 999) || a.localeCompare(b))
+      .map((kind) => ({ kind, items: map.get(kind)! }));
+  }, [scales, kindOrder]);
 
   /** 選択肢の表示名。設備番号があれば先頭に付けて現場の呼び名と一致させる */
   const scaleLabel = (s: Scale) => (s.equipNo ? `${s.equipNo}　${s.name}` : s.name);
@@ -620,7 +621,7 @@ export default function DailyRecordForm({
                       <span className="min-w-0 flex-1 truncate text-sm text-[#555555]">
                         {scaleLabel(s)}
                       </span>
-                      <KindTag kind={s.kind} />
+                      <KindTag kind={s.kind} order={kindOrder.get(s.kind)} />
                       <input
                         type="number"
                         inputMode="decimal"
@@ -658,7 +659,7 @@ export default function DailyRecordForm({
               <span className="flex min-w-0 items-center gap-2 text-sm font-bold text-[#b4632c]">
                 <CheckCircle2 className="h-5 w-5 shrink-0" />
                 <span className="truncate">{scaleLabel(selectedScale)}</span>
-                <KindTag kind={selectedScale.kind} />
+                <KindTag kind={selectedScale.kind} order={kindOrder.get(selectedScale.kind)} />
               </span>
               <button
                 onClick={() => setSelectedScale(null)}
@@ -962,7 +963,7 @@ export default function DailyRecordForm({
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-bold tabular-nums">{e.jikoku}</span>
-                          <KindTag kind={e.kind} />
+                          <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
                         </div>
                         <div className="mt-0.5 truncate text-sm text-[#555555]">{e.scaleName}</div>
                         <div className="mt-0.5 text-xs text-[#909090]">
@@ -1032,7 +1033,7 @@ export default function DailyRecordForm({
                         <td className={td}>{e.jikoku}</td>
                         <td className={td}>{e.scaleName}</td>
                         <td className={td}>
-                          <KindTag kind={e.kind} />
+                          <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
                         </td>
                         <td className={tdNum}>{fmt(g)}</td>
                         <td className={tdNum}>{fmt(ta)}</td>

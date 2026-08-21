@@ -9,6 +9,7 @@ import {
   Download,
   CalendarRange,
   QrCode,
+  Settings,
   LogOut,
   Mail,
 } from "lucide-react";
@@ -31,6 +32,7 @@ const NAV_OPERATIONS: NavItem[] = [
   { href: "/items", label: "品目マスター", icon: Package },
   { href: "/scales", label: "重量計マスター", icon: QrCode },
   { href: "/mcframe", label: "McFrame取込", icon: Download },
+  { href: "/settings", label: "設定", icon: Settings },
 ];
 
 /** 表示順は 照合 → 日次記録 → 調達入力 → 初品測定 → マスタ類。 */

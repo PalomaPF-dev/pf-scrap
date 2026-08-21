@@ -24,6 +24,7 @@ let schemaReady: Promise<void> | null = null;
 
 /**
  * スクラップ重量管理のドメインテーブルを冪等に作成。
+ * - scrap_kinds           … スクラップ種類マスター（上銅/銅ダライ…。設定画面で追加できる）
  * - scrap_items           … 品目マスター（品目CD×格納場所CDで識別、子図番、構成/完成重量）
  * - scrap_daily_records   … 日次記録票（日付×工場で1枚）
  * - scrap_daily_entries   … 日中記録の明細（発生のたびに1行）
@@ -82,6 +83,22 @@ async function buildSchema(): Promise<void> {
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_company_idx ON scrap_items(company_id)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_ko_zuban_idx ON scrap_items(company_id, ko_zuban)`);
+
+  // スクラップ種類マスター（上銅 / 銅ダライ / 銅スクラップ …）。
+  // 種類は現場の運用で増えるため、定数ではなく設定で足せるようにする。
+  // 日次記録の明細には種類名をそのまま保存する（scrap_daily_entries.hinshu）ので、
+  // 後から名称を変えても過去の記録の集計名は変わらない。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_kinds (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      name       TEXT NOT NULL,
+      sort       INTEGER NOT NULL DEFAULT 0,
+      active     BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, name)
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_kinds_company_idx ON scrap_kinds(company_id, sort)`);
 
   // 重量計（スクラップ箱）マスター。箱には 上銅 / 銅ダライ の2種類があり、
   // それぞれ重量計の上に常設されている。重量計にQRコードを貼り、日次記録では

@@ -80,6 +80,9 @@ export async function GET(req: NextRequest) {
   // ポータルは氏名・権限・所属もトークンに載せてくる（署名済みなので信頼できる）。
   // アカウント未発行のときの自動作成に使う。
   const tokenName = typeof data.name === "string" ? data.name.trim() : "";
+  // 権限はトークンに入っているときだけ見る。入っていないトークンで
+  // 「member」と決めつけると、ログインのたびに管理者が降格してしまう。
+  const hasRole = typeof data.role === "string" || typeof data.canManage === "boolean";
   const tokenRole: "admin" | "member" =
     data.role === "admin" || data.canManage === true ? "admin" : "member";
   const tokenDepartment = typeof data.department === "string" ? data.department.trim() : "";
@@ -96,7 +99,7 @@ export async function GET(req: NextRequest) {
     // 社員番号（login_id）でユーザー特定。pending でもログイン可（パスワードは触らない）。
     const sql = getSql();
     const findUser = () => sql`
-      SELECT u.id, u.login_id, u.email, u.name, u.role,
+      SELECT u.id, u.login_id, u.email, u.name, u.role, u.portal_department,
              c.id AS company_id, c.name AS company_name, c.is_demo
       FROM users u
       JOIN companies c ON c.id = u.company_id
@@ -123,6 +126,35 @@ export async function GET(req: NextRequest) {
     if (!user) return ssoFail(req);
     // 失効済み（退職・名簿からの削除）はポータル経由でも入れない
     if (await isUserDisabled(user.id as string)) return ssoFail(req);
+
+    // ポータルで部署・氏名・権限が変わっても、名簿の再連携を待たずに反映する。
+    // これらは署名済みトークンに毎回入っており、ポータルが正なので上書きしてよい。
+    // 部署は機能の利用権限（マスタ・取込・調達入力）の判定に使うため、ここがずれると
+    // 部署設定を直したのにタブが出ない、という食い違いが起きる。
+    // 所属工場はトークンに無いので、工場の絞り込みは従来どおり名簿の再連携で反映される。
+    {
+      // トークンに入っている項目だけを反映する（入っていない項目は現状維持）
+      const roleForSync = hasRole ? tokenRole : null;
+      const changed =
+        (tokenName && tokenName !== (user.name ?? "")) ||
+        (roleForSync !== null && roleForSync !== (user.role ?? "")) ||
+        (tokenDepartment && tokenDepartment !== (user.portal_department ?? ""));
+      if (changed) {
+        try {
+          await sql`
+            UPDATE users SET
+              name = COALESCE(NULLIF(${tokenName}, ''), name),
+              role = COALESCE(${roleForSync}::text, role),
+              portal_department = COALESCE(NULLIF(${tokenDepartment}, ''), portal_department)
+            WHERE id = ${user.id}`;
+          user.name = tokenName || user.name;
+          if (roleForSync) user.role = roleForSync;
+        } catch (e) {
+          // 反映に失敗してもログインは通す（次回のログインで再試行される）
+          console.error("[sso] profile sync failed:", e);
+        }
+      }
+    }
 
     const secret = process.env.NEXTAUTH_SECRET;
     if (!secret) return ssoFail(req);

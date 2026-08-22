@@ -25,3 +25,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 実パスワードを差し込んだ移行SQL（絶対にコミットしない）
+migration/*.local.sql

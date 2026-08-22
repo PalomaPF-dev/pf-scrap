@@ -66,6 +66,23 @@ LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
 - ホストに `db.<ref>.supabase.co` は使えません（IPv6のみで Vercel から届きません）。
 - 保存した時点で反映されます（効かなければ再デプロイ）。
 
+## おまけ: 使っていない ra_* を public から片づける
+
+本番の `public` には、pf-scrap とは無関係の `ra_*`（6表）が残っています。
+**pf-scrap の移行はこれらに触りません**（移動対象を17表に名指しで限定して
+いるため）。移行の前提条件でもありません。
+
+片づける場合は `8-archive-ra.sql` を SQL Editor で Run します。`DROP` では
+なく `archive` スキーマへ退避するので、`8b-restore-ra.sql` でいつでも戻せます。
+しばらく様子を見て何も起きなければ、最後に本当に消せます:
+
+```sql
+DROP SCHEMA archive CASCADE;   -- ★ここまで来ると戻せない
+```
+
+退避スクリプトは、他スキーマから `ra_*` を参照している外部キーがあれば
+「現役のアプリがある」と判断して中止します。
+
 ## 元に戻す場合
 
 `9-rollback.sql` を SQL Editor で Run し、Vercel の `DATABASE_URL` も

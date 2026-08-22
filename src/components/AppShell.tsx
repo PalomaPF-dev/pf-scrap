@@ -8,6 +8,7 @@ import {
   Package,
   Download,
   CalendarRange,
+  BarChart3,
   QrCode,
   Settings,
   LogOut,
@@ -16,10 +17,11 @@ import {
 import { AppShell as BaseAppShell, UserIdentity, type NavItem } from "@paloma-pf/ui";
 import type { SidebarUser } from "@/lib/sidebarUser";
 
-/** 全員が使うナビ（日次記録・初品測定・照合の閲覧）。 */
+/** 全員が使うナビ（日次記録・月間集計・初品測定・照合の閲覧）。 */
 const NAV_COMMON: NavItem[] = [
   { href: "/", label: "照合ダッシュボード", icon: LayoutDashboard },
   { href: "/daily", label: "日次記録", icon: ClipboardList },
+  { href: "/summary", label: "月間集計", icon: BarChart3 },
   { href: "/first", label: "初品重量測定", icon: Scale },
 ];
 
@@ -35,12 +37,12 @@ const NAV_OPERATIONS: NavItem[] = [
   { href: "/settings", label: "設定", icon: Settings },
 ];
 
-/** 表示順は 照合 → 日次記録 → 調達入力 → 初品測定 → マスタ類。 */
+/** 表示順は 照合 → 日次記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類。 */
 function navFor(canOperate: boolean): NavItem[] {
   if (!canOperate) return NAV_COMMON;
-  const [dashboard, daily, first] = NAV_COMMON;
+  const [dashboard, daily, summary, first] = NAV_COMMON;
   const [procurement, ...masters] = NAV_OPERATIONS;
-  return [dashboard, daily, procurement, first, ...masters];
+  return [dashboard, daily, summary, procurement, first, ...masters];
 }
 
 /** スクラップアプリのテーマ（銅色、アクティブは角丸＋丸バー）。 */

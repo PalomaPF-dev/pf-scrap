@@ -54,13 +54,16 @@ export async function GET(req: NextRequest) {
 
   const type = req.nextUrl.searchParams.get("type") ?? "";
   const ymParam = req.nextUrl.searchParams.get("ym") ?? "";
+  const factoryParam = (req.nextUrl.searchParams.get("factory") ?? "").trim();
+  const kindParam = (req.nextUrl.searchParams.get("kind") ?? "").trim();
   const yearParam = Number(req.nextUrl.searchParams.get("year"));
 
   try {
     if (type === "daily") {
       if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
-      // 所属工場ユーザーは自工場分のみ（画面と同じ範囲）
-      const factory = s.isDemo ? null : s.factory;
+      // 所属工場ユーザーは自工場分のみ（画面と同じ範囲）。それ以外は ?factory= の絞り込みに従う。
+      const restrictedFactory = s.isDemo ? null : s.factory;
+      const factory = restrictedFactory ?? (factoryParam || null);
       const [agg, kinds] = await Promise.all([
         listDailyAgg(s.companyId, ymParam, factory),
         listScrapKinds(s.companyId),
@@ -72,28 +75,40 @@ export async function GET(req: NextRequest) {
           .filter((n) => !kinds.some((k) => k.name === n))
           .sort(),
       ];
+      // 月間集計画面と同じ絞り込み。種類を指定したときは、その種類の列と投入があった日だけ出す
+      const kind = kindNames.includes(kindParam) ? kindParam : "";
+      const kindCols = kind ? [kind] : kindNames;
+      const days = kind ? agg.filter((r) => (r.byKind[kind] ?? 0) !== 0) : agg;
       const rows: (string | number | null)[][] = [
-        ["日付", "工場", "責任者", ...kindNames.map((n) => `${n}(kg)`), "合計(kg)", "回収箱測定値", "差異率", "状態", "承認者", "異常件数"],
+        kind
+          ? ["日付", "工場", "責任者", `${kind}(kg)`, "状態", "承認者"]
+          : ["日付", "工場", "責任者", ...kindCols.map((n) => `${n}(kg)`), "合計(kg)", "回収箱測定値", "差異率", "状態", "承認者", "異常件数"],
       ];
-      for (const r of agg) {
+      for (const r of days) {
         const sai =
           r.kaishuSokuteichi !== null && r.total > 0
             ? (r.kaishuSokuteichi - r.total) / r.total
             : null;
-        rows.push([
-          r.recordDate,
-          r.factory,
-          r.sekininsha,
-          ...kindNames.map((n) => r.byKind[n] ?? 0),
-          r.total,
-          r.kaishuSokuteichi ?? "",
-          pct(sai),
-          DAILY_STATUS_LABEL[r.status],
-          r.approvedBy,
-          r.ijoCount || "",
-        ]);
+        rows.push(
+          kind
+            ? [r.recordDate, r.factory, r.sekininsha, r.byKind[kind] ?? 0, DAILY_STATUS_LABEL[r.status], r.approvedBy]
+            : [
+                r.recordDate,
+                r.factory,
+                r.sekininsha,
+                ...kindCols.map((n) => r.byKind[n] ?? 0),
+                r.total,
+                r.kaishuSokuteichi ?? "",
+                pct(sai),
+                DAILY_STATUS_LABEL[r.status],
+                r.approvedBy,
+                r.ijoCount || "",
+              ]
+        );
       }
-      return csvResponse(`日次記録集計_${ymParam}.csv`, rows);
+      // ファイル名で絞り込み条件が分かるようにする（複数の条件で出しても取り違えない）
+      const suffix = [factory, kind].filter(Boolean).join("_");
+      return csvResponse(`日次記録集計_${ymParam}${suffix ? `_${suffix}` : ""}.csv`, rows);
     }
 
     if (type === "mcframe") {

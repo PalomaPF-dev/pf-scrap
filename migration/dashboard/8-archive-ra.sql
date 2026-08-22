@@ -24,20 +24,41 @@ DECLARE
     'ra_components','ra_reports','ra_workplaces'
   ];
 BEGIN
-  -- 他スキーマから ra_* を参照している外部キーが無いことを確かめる。
+  -- public.ra_* を public の外から参照している外部キーが無いことを確かめる。
   -- あれば、そのアプリが現役ということなので退避しない。
+  --
+  -- 参照先（tn）も public に限定するのが要点。名前だけで判定すると、
+  -- 他スキーマの中で完結している同名表の外部キーまで拾ってしまう。
+  -- 実際に本番では sds スキーマが同名の ra_* 一式を持っていて、
+  -- sds.ra_answers → sds.ra_assessments が誤検知された。
   IF EXISTS (
     SELECT 1
       FROM pg_constraint con
       JOIN pg_class src ON src.oid = con.conrelid
       JOIN pg_class tgt ON tgt.oid = con.confrelid
       JOIN pg_namespace sn ON sn.oid = src.relnamespace
+      JOIN pg_namespace tn ON tn.oid = tgt.relnamespace
      WHERE con.contype = 'f'
-       AND tgt.relname = ANY(targets)
+       AND tn.nspname = 'public'
        AND sn.nspname <> 'public'
+       AND tgt.relname = ANY(targets)
   ) THEN
-    RAISE EXCEPTION 'ra_* を参照している表が public 以外にあります。退避を中止しました。';
+    RAISE EXCEPTION 'public.ra_* を public の外から参照している表があります。退避を中止しました。';
   END IF;
+
+  -- 空でない表があれば止める（使っていないという前提そのものの確認）
+  FOREACH t IN ARRAY targets LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname = t
+    ) THEN
+      IF (xpath('/row/n/text()',
+                query_to_xml(format('SELECT count(*) AS n FROM public.%I', t),
+                             false, true, '')))[1]::text::bigint > 0 THEN
+        RAISE EXCEPTION 'public.% に行があります。退避を中止しました。', t;
+      END IF;
+    END IF;
+  END LOOP;
 
   IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'archive') THEN
     CREATE SCHEMA archive;

@@ -51,14 +51,19 @@ SELECT t.name AS missing_in_public
 
 \echo ''
 \echo '=== 3. 実データの件数（移行の前後で突き合わせる）==='
-SELECT 'companies' AS t, count(*) FROM public.companies
-UNION ALL SELECT 'users', count(*) FROM public.users
-UNION ALL SELECT 'scrap_items', count(*) FROM public.scrap_items
-UNION ALL SELECT 'scrap_daily_records', count(*) FROM public.scrap_daily_records
-UNION ALL SELECT 'scrap_daily_entries', count(*) FROM public.scrap_daily_entries
-UNION ALL SELECT 'scrap_monthly_inputs', count(*) FROM public.scrap_monthly_inputs
-UNION ALL SELECT 'scrap_procure_days', count(*) FROM public.scrap_procure_days
-ORDER BY 1;
+-- 移行後に再実行しても落ちないよう、実在する表だけを数える
+-- （public から scrap へ移したあとの再確認にも、そのまま使える）。
+SELECT n.nspname AS schema, c.relname AS t,
+       (xpath('/row/n/text()',
+              query_to_xml(format('SELECT count(*) AS n FROM %I.%I', n.nspname, c.relname),
+                           false, true, '')))[1]::text::bigint AS count
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE c.relkind = 'r'
+   AND n.nspname IN ('public', 'scrap')
+   AND c.relname IN ('companies','users','scrap_items','scrap_daily_records',
+                     'scrap_daily_entries','scrap_monthly_inputs','scrap_procure_days')
+ ORDER BY 1, 2;
 
 \echo ''
 \echo '=== 4. app_scrap ロール / scrap スキーマの有無（無いのが正常。再実行時は有る）==='

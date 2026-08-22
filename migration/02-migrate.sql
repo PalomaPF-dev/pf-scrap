@@ -5,18 +5,17 @@
 -- 接続先: Supavisor の【Session pooler（ポート5432）】
 --         ※ Transaction pooler(6543) では CREATE ROLE が正しく動かない
 --
--- 実行前: <PASSWORD_SCRAP> を実際のパスワードに置換すること。
---   生成例（英数字32文字。URI に入れるとき percent-encoding が要らない）:
---     LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
+-- 通常は migration/run.sh から呼ばれる。単体で流すときは、app_scrap の
+-- パスワードを psql 変数 pw で渡す（ファイルには一切書かない）:
 --
--- ★★ 置換したファイルは絶対にコミットしないこと ★★
---   正しい手順:
---     cp migration/02-migrate.sql migration/migrate.local.sql
---     # migrate.local.sql の <PASSWORD_SCRAP> を置換して実行する
---     # *.local.sql は .gitignore 済みなのでコミットされない
+--   PGPASSWORD='<postgresのPW>' psql \
+--     -h aws-0-ap-northeast-1.pooler.supabase.com -p 5432 \
+--     -U postgres.<project_ref> -d postgres \
+--     -v ON_ERROR_STOP=1 -v pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)" \
+--     -f migration/02-migrate.sql
 --
---   psql "postgresql://postgres.<ref>:<PW>@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres" \
---        -v ON_ERROR_STOP=1 -f migration/migrate.local.sql
+-- パスワードをファイルに書き込む手順にしていないのは、置換したファイルを
+-- 消し忘れてコミットする事故を、そもそも起こせないようにするため。
 --
 -- 方針（他アプリの migration/01-roles-and-schemas.sql と同じ設計）:
 --   - アプリごとに 1スキーマ + 1ログインロール
@@ -30,12 +29,20 @@
 --   で「付け替える」だけ。データは1行も動かないので速く、取りこぼしもない。
 --   索引・制約・所有シーケンスはテーブルと一緒に移動する。
 -- ============================================================================
+
+-- パスワード未指定のまま流すと、空パスワードのロールができてしまう。先に止める。
+\if :{?pw}
+\else
+\echo '!! app_scrap のパスワードが指定されていません。migration/run.sh を使ってください。'
+\quit 1
+\endif
+
 BEGIN;
 
 -- ----------------------------------------------------------------------------
 -- 1. ログインロール
 -- ----------------------------------------------------------------------------
-CREATE ROLE app_scrap LOGIN PASSWORD '<PASSWORD_SCRAP>';
+CREATE ROLE app_scrap LOGIN PASSWORD :'pw';
 -- CREATE SCHEMA ... AUTHORIZATION のためにメンバーシップを得る（PG15 以前で必要）
 GRANT app_scrap TO CURRENT_USER;
 
@@ -116,14 +123,17 @@ SELECT c.relname AS table_name, pg_get_userbyid(c.relowner) AS owner
 
 \echo ''
 \echo '=== 件数（手順1の「3. 実データの件数」と一致すること）==='
-SELECT 'companies' AS t, count(*) FROM scrap.companies
-UNION ALL SELECT 'users', count(*) FROM scrap.users
-UNION ALL SELECT 'scrap_items', count(*) FROM scrap.scrap_items
-UNION ALL SELECT 'scrap_daily_records', count(*) FROM scrap.scrap_daily_records
-UNION ALL SELECT 'scrap_daily_entries', count(*) FROM scrap.scrap_daily_entries
-UNION ALL SELECT 'scrap_monthly_inputs', count(*) FROM scrap.scrap_monthly_inputs
-UNION ALL SELECT 'scrap_procure_days', count(*) FROM scrap.scrap_procure_days
-ORDER BY 1;
+SELECT n.nspname AS schema, c.relname AS t,
+       (xpath('/row/n/text()',
+              query_to_xml(format('SELECT count(*) AS n FROM %I.%I', n.nspname, c.relname),
+                           false, true, '')))[1]::text::bigint AS count
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE c.relkind = 'r'
+   AND n.nspname IN ('public', 'scrap')
+   AND c.relname IN ('companies','users','scrap_items','scrap_daily_records',
+                     'scrap_daily_entries','scrap_monthly_inputs','scrap_procure_days')
+ ORDER BY 1, 2;
 
 \echo ''
 \echo '=== public に残ったテーブル（pf-scrap のものが無いこと）==='

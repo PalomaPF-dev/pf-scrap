@@ -22,81 +22,75 @@
 
 ## 事前に用意するもの
 
-- `postgres` ロールで **Session pooler（ポート5432）** に接続できる psql
-  （`CREATE ROLE` はトランザクションプーラでは正しく動きません）
-- `app_scrap` 用のパスワード（英数字32文字。URIに入れるとき percent-encoding が不要）
+- **psql**（PostgreSQL クライアント）
+  - macOS: `brew install libpq && brew link --force libpq`
+  - Windows(WSL/Ubuntu): `sudo apt install postgresql-client`
+- **Supabase の `postgres` ロールのパスワード**
+  （Supabase ダッシュボード → Project Settings → Database）
 
-```bash
-LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
-```
+`app_scrap` のパスワードは実行時に自動生成します。用意する必要はありません。
 
 > **接続情報はこのリポジトリにも、チャットにも貼らないでください。**
-> パスワードを差し込んだファイルは `migration/*.local.sql` に置きます
-> （`.gitignore` 済み）。
+> 実行はすべて手元の端末で完結します。パスワードはファイルに書き込まないため、
+> 置換したファイルを消し忘れてコミットする事故は起こりません。
 
 ## 手順
 
-### 1. 現状調査（読み取りのみ・何も変わりません）
-
 ```bash
-export ADMIN_URI='postgresql://postgres.<project_ref>:<PW>@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres'
-psql "$ADMIN_URI" -f migration/01-survey.sql
+./migration/run.sh
 ```
 
-確認すること:
+聞かれるのは Supabase の `postgres` パスワードだけです（画面に表示されません）。
+あとは通しで進みます。
 
-- 「★ scrap 以外（要確認）」の行が無いこと。
-  あれば、それは他アプリの残骨なので**移動対象から外す**判断が必要です
-  （`02-migrate.sql` の `targets` を編集）。
-- 「3. 実データの件数」を控える。移行後に突き合わせます。
-
-### 2. ロール作成とテーブル移動
-
-```bash
-cp migration/02-migrate.sql migration/migrate.local.sql
-# migrate.local.sql の <PASSWORD_SCRAP> を生成したパスワードに置換
-psql "$ADMIN_URI" -v ON_ERROR_STOP=1 -f migration/migrate.local.sql
-```
-
-確認すること:
-
-- `scrap` スキーマに **17テーブル**、所有者が全て `app_scrap`
-- 件数が手順1と一致
-- `public` に pf-scrap のテーブルが残っていない
-- `rolconfig` が `{search_path=scrap}`
-
-### 3. 接続テスト（Vercelに入れる前に）
-
-```bash
-./migration/03-connection-test.sh \
-  'postgresql://app_scrap.<project_ref>:<PW>@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres'
-```
-
-**全項目 OK になってから次へ進みます。**
-ここで `search_path` を確認するのは、プーラ経由だとロール既定の
-`search_path` が届かない事故があるためです。
-
-### 4. Vercel の環境変数を差し替え
-
-| 変数 | 値 | Environment |
+| | 内容 | 変更 |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://app_scrap.<project_ref>:<PW>@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres` | Production |
+| 0 | 接続確認 | なし |
+| 1 | 現状調査（`01-survey.sql`） | なし（SELECT のみ） |
+| 2 | 確認プロンプト → ロール作成・テーブル移動（`02-migrate.sql`） | **あり** |
+| 3 | `app_scrap` で実接続してテスト（`03-connection-test.sh`） | なし |
+| 4 | Vercel に設定する `DATABASE_URL` を表示 | なし |
 
-- **アプリ実行時は 6543（Transaction pooler）**。5432 は管理作業用です。
-- ホストは `db.<ref>.supabase.co` を使わないこと（IPv6のみで Vercel から届きません）。
-- 環境変数は実行時にも参照されるため、**保存した時点で反映されます**
-  （効かなければ再デプロイ）。
+### 途中で手が止まる場所
 
-### 5. 動作確認
+**手順1のあと、続けるか聞かれます。** 次を確認してから `y` を入力してください。
+
+- 「★ scrap 以外（要確認）」の行が無いこと
+  あればそれは他アプリの残骨です。`02-migrate.sql` の `targets` から外す
+  判断が要るので、いったん `N` で止めてください。
+- 「3. 実データの件数」を控えること。手順2の出力と突き合わせます
+  （`schema` 列が `public` → `scrap` に変わり、件数は同じになるのが正常）。
+
+**手順4で表示される URI を Vercel に登録します。**
+
+| 変数 | Environment |
+|---|---|
+| `DATABASE_URL` | Production |
+
+- 値は秘密です。貼り終えたらターミナルを `clear` してください。
+- 環境変数は実行時に参照されるため、保存した時点で反映されます（効かなければ再デプロイ）。
+
+### 失敗したとき
+
+手順2はトランザクションなので、**失敗していれば1つも変わっていません。**
+手順3で落ちた場合は Vercel に設定せず、そのままご連絡ください
+（この時点ではまだ本番は旧接続のままです）。
+
+## 確認すること
 
 - ポータルからログインできること
 - 日次記録・品目マスターが表示されること
-- ポータル管理画面から「名簿を全員分 再連携」を実行（`/api/provision` が通ること）
+- ポータル管理画面から「名簿を全員分 再連携」を実行すること
+  （障害中に失敗した30件の連携をやり直します。**所属工場はSSOでは同期できない**ため、
+  ここを流さないと工場の絞り込みが効きません）
 
 ## 元に戻す場合
 
 ```bash
-psql "$ADMIN_URI" -v ON_ERROR_STOP=1 -f migration/99-rollback.sql
+read -rs -p "postgres のパスワード: " PGPASSWORD; export PGPASSWORD; echo
+psql -h aws-0-ap-northeast-1.pooler.supabase.com -p 5432 \
+     -U postgres.<project_ref> -d postgres \
+     -v ON_ERROR_STOP=1 -f migration/99-rollback.sql
 # Vercel の DATABASE_URL も postgres ロールの値に戻す
 ```
 
@@ -105,8 +99,22 @@ psql "$ADMIN_URI" -v ON_ERROR_STOP=1 -f migration/99-rollback.sql
 
 ## 検証状況
 
-この手順は**ローカルのPostgreSQLで実際に通してあります**。
+この手順は**ローカルのPostgreSQLで実際に通してあります**（接続先だけ差し替えた
+`run.sh` を使用）。
 
-- `01` → `02` → `03` → アプリ起動 → 一気通貫テスト（API 18/18・UI 82/82）→ `99` 復旧
-- `01-survey.sql` が `password_reset_tokens`（招待リンク・パスワード再設定用）の
-  移動漏れを検出したため、対象を17テーブルに修正済み
+- `run.sh` を通しで実行 → 17テーブルを移動、所有者は全て `app_scrap`、
+  件数は移行前と一致、`public` は空、`rolconfig = {search_path=scrap}`、
+  接続テスト OK=10 / NG=0
+- 移行後のDBにアプリを接続 → api 18/18・ui 88/88・JSエラーなし
+- **空スキーマからの起動も確認**。`scrap` スキーマだけ作った状態でアプリを
+  起動し、`ensureSchema` が17テーブルを作り、全て `app_scrap` 所有になること
+  （所有者を移していないと、ここで DDL が弾かれる）
+- 2回目の実行（`app_scrap` が既にある状態）→ トランザクションが巻き戻り、
+  DBは変わらないまま終了することを確認
+- `99-rollback.sql` → 17テーブルが `public` に戻ることを確認
+
+### `01-survey.sql` が見つけたもの
+
+コードを読んで作った移動対象リストには `password_reset_tokens`（招待リンク・
+パスワード再設定用）が抜けていました。調査スクリプトが「public にあるのに
+移動対象に入っていない」と表示したため、対象を16→17テーブルに修正しています。

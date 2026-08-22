@@ -21,8 +21,19 @@ head2() { printf '\n%s%s%s\n' "$BLD" "$*" "$RST"; }
 die()  { printf '\n%s!! %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
 command -v psql >/dev/null 2>&1 || die "psql が見つかりません。PostgreSQL クライアントを入れてください。
-  macOS: brew install libpq && brew link --force libpq
-  Windows(WSL/Ubuntu): sudo apt install postgresql-client"
+
+  macOS (Homebrew):
+    brew install libpq
+    export PATH=\"/opt/homebrew/opt/libpq/bin:\$PATH\"     # Intel Mac は /usr/local/opt/libpq/bin
+    # libpq は keg-only（自動でリンクされない）ため、この export が要ります
+
+  macOS (Postgres.app):
+    export PATH=\"/Applications/Postgres.app/Contents/Versions/latest/bin:\$PATH\"
+
+  Windows(WSL/Ubuntu):
+    sudo apt install postgresql-client
+
+入れたら psql --version で確認してから、もう一度 ./migration/run.sh を実行してください。"
 
 head2 "pf-scrap を app_scrap 専用ロールへ移します"
 say "この端末から Supabase に接続します。入力したパスワードは画面に出ず、"

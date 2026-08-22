@@ -20,10 +20,23 @@
 `ALTER TABLE ... SET SCHEMA` で付け替えるだけです。
 データは1行も動かないので速く、取りこぼしもありません。
 
+## 2つのやり方
+
+| | 要るもの | 手順 |
+|---|---|---|
+| **A. `run.sh`（推奨）** | psql | `./migration/run.sh` を1回 |
+| **B. ダッシュボード** | なし | SQL Editor に3回貼る → [`dashboard/README.md`](dashboard/README.md) |
+
+**psql が入っていない・Homebrew を入れたくない場合は B** を使ってください。
+結果は同じです。以下は A の説明です。
+
 ## 事前に用意するもの
 
 - **psql**（PostgreSQL クライアント）
-  - macOS: `brew install libpq && brew link --force libpq`
+  - macOS (Homebrew): `brew install libpq` のあと
+    `export PATH="/opt/homebrew/opt/libpq/bin:$PATH"`
+    （libpq は keg-only のため、この export が要ります）
+  - macOS (Postgres.app): `export PATH="/Applications/Postgres.app/Contents/Versions/latest/bin:$PATH"`
   - Windows(WSL/Ubuntu): `sudo apt install postgresql-client`
 - **Supabase の `postgres` ロールのパスワード**
   （Supabase ダッシュボード → Project Settings → Database）

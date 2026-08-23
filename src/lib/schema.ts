@@ -184,6 +184,38 @@ async function buildSchema(): Promise<void> {
   // 箱（重量計）ごとの朝礼後の累積値。{ "<scale_id>": 123.4 } 形式。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS kaishi_cum JSONB NOT NULL DEFAULT '{}'::jsonb`);
 
+  // AI読取（2026-08）: 重量計の表示値を写真から読む。明細のどの累積値がどの読取に
+  // 由来するかを残し、AIが読んだ値と実際に採用された値を後から突き合わせられるようにする。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_before_read_id UUID`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after_read_id UUID`);
+  // 投入後の累積も訂正できるようにする（投入前と同じく、変えたときだけ理由が入る）。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after_reason TEXT NOT NULL DEFAULT ''`);
+
+  // AI読取のログ。**追記のみ**で、書き込むのはサーバー（/api/scale-read）だけ。
+  // クライアントからは更新も削除もできないため、「AIはこう読んだ」という事実が残る。
+  // 明細側の cum_*_read_id から引くと、採用値との差＝人が上書きした差分が分かる。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_scale_reads (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id    UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      record_date   DATE,
+      factory       TEXT NOT NULL DEFAULT '',
+      -- 重量計マスターから消えても記録は残す（あえて外部キーにしない）
+      scale_id      UUID,
+      scale_name    TEXT NOT NULL DEFAULT '',
+      -- 'before' = 投入前 / 'after' = 投入後
+      phase         TEXT NOT NULL DEFAULT 'before',
+      ai_value      NUMERIC,
+      ai_digits     TEXT NOT NULL DEFAULT '',
+      ai_confidence TEXT NOT NULL DEFAULT '',
+      ai_note       TEXT NOT NULL DEFAULT '',
+      model         TEXT NOT NULL DEFAULT '',
+      read_by       TEXT NOT NULL DEFAULT '',
+      read_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_scale_reads_company_idx ON scrap_scale_reads(company_id, read_at DESC)`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_scale_reads_date_idx ON scrap_scale_reads(company_id, record_date, factory)`);
+
   // ③ 初品の実測完成品重量（測定日×品目CD×格納場所CDで1件。再測定は上書き）。
   await safeDdl(() => sql`
     CREATE TABLE IF NOT EXISTS scrap_first_articles (

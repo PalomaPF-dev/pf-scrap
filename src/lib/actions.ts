@@ -19,6 +19,7 @@ import {
   getItemById,
   getMonthlyInput,
   getScaleById,
+  getScaleReads,
   getScaleByQr,
   countScrapKindUsage,
   deleteScrapKind,
@@ -350,16 +351,39 @@ export async function saveDailyRecordAction(input: {
     // 累積の連携チェック用。箱ごとに「次に入るはずの投入前累積」を持ち回る。
     const expectedCum = new Map<string, number>(Object.entries(kaishiCum));
 
+    // AI読取の値（サーバー側のログ）。採用値がこれと違うときだけ訂正理由を求める。
+    // ログはクライアントから書き換えられないので、これが「機械が読んだ事実」になる。
+    const readIds = (Array.isArray(input.entries) ? input.entries : [])
+      .flatMap((e) => [asStr(e.cumBeforeReadId ?? "", 50), asStr(e.cumAfterReadId ?? "", 50)])
+      .filter(Boolean);
+    const reads = await getScaleReads(s.companyId, readIds);
+
     const entries: DailyEntry[] = [];
     for (const e of Array.isArray(input.entries) ? input.entries : []) {
       const gross = toNumOrNull(e.grossWeight);
       const tare = toNumOrNull(e.tareWeight);
-      if (gross === null && tare === null) continue; // 未入力行はスキップ
-      if (gross === null || tare === null) {
-        return fail("投入前重量（箱含む）と箱重量（空き箱）の両方を入力してください。");
-      }
-      if (gross < tare) {
-        return fail("投入前重量（箱含む）が箱重量（空き箱）より小さい行があります。");
+      const cumBefore = toNumOrNull(e.cumBefore);
+      const cumAfter = toNumOrNull(e.cumAfter);
+      // 旧様式の行（投入前重量・箱重量を持つ）。AI読取の導入前に記録されたもの。
+      // 再保存で重量が変わらないよう、旧様式は従来どおり ①−② で計算する。
+      const legacy = gross !== null || tare !== null;
+      if (!legacy && cumBefore === null && cumAfter === null) continue; // 未入力行はスキップ
+      if (legacy) {
+        if (gross === null || tare === null) {
+          return fail("投入前重量（箱含む）と箱重量（空き箱）の両方を入力してください。");
+        }
+        if (gross < tare) {
+          return fail("投入前重量（箱含む）が箱重量（空き箱）より小さい行があります。");
+        }
+      } else {
+        if (cumBefore === null || cumAfter === null) {
+          return fail("投入前と投入後の表示値の両方が必要です。読み取るか手入力してください。");
+        }
+        if (cumAfter < cumBefore) {
+          return fail(
+            `投入後の表示値（${cumAfter} kg）が投入前（${cumBefore} kg）より小さくなっています。読み取りを確認してください。`
+          );
+        }
       }
       // 箱（重量計）のスナップショット。マスターが引ければ名称・種類を採用
       const scaleId = asStr(e.scaleId ?? "", 50) || null;
@@ -374,20 +398,40 @@ export async function saveDailyRecordAction(input: {
       }
       if (!kindNames.includes(kind)) kind = kindNames[0] ?? SCALE_KIND_LIST[0];
 
-      // 累積(投入前)は自動値（朝礼後の累積値／同じ箱の直前の投入後累積）が入る。
-      // 違う値にするのは訂正なので、理由が無ければ受け付けない（画面と同じ判定をサーバーでも行う）。
       const cumKey = scaleId ?? scaleName;
-      const cumBefore = toNumOrNull(e.cumBefore);
-      const cumAfter = toNumOrNull(e.cumAfter);
+      const cumBeforeReadId = asStr(e.cumBeforeReadId ?? "", 50) || null;
+      const cumAfterReadId = asStr(e.cumAfterReadId ?? "", 50) || null;
       const cumBeforeReason = asStr(e.cumBeforeReason, 200);
-      const auto = expectedCum.get(cumKey);
-      const corrected =
-        auto !== undefined && cumBefore !== null && Math.abs(cumBefore - auto) > 0.0005;
-      if (corrected && !cumBeforeReason) {
+      const cumAfterReason = asStr(e.cumAfterReason, 200);
+
+      // 投入前の出どころ: AI読取があればそれ、無ければ連携値（朝礼後の累積／前の投入後）。
+      // 「人が機械の値を上書きしたとき」だけ理由を求める。
+      const beforeAi = cumBeforeReadId ? reads.get(cumBeforeReadId) : undefined;
+      const beforeSource = beforeAi?.value ?? expectedCum.get(cumKey);
+      const beforeCorrected =
+        beforeSource !== undefined &&
+        beforeSource !== null &&
+        cumBefore !== null &&
+        Math.abs(cumBefore - beforeSource) > 0.0005;
+      if (beforeCorrected && !cumBeforeReason) {
         return fail(
-          `「${scaleName || cumKey}」の累積(投入前)が自動値 ${auto} kg と違います。訂正する場合は理由を入力してください。`
+          `「${scaleName || cumKey}」の投入前の表示値が${beforeAi ? "AI読取値" : "自動値"} ${beforeSource} kg と違います。訂正する場合は理由を入力してください。`
         );
       }
+
+      // 投入後はAI読取だけが出どころ（連携値は無い）
+      const afterAi = cumAfterReadId ? reads.get(cumAfterReadId) : undefined;
+      const afterCorrected =
+        afterAi?.value !== undefined &&
+        afterAi.value !== null &&
+        cumAfter !== null &&
+        Math.abs(cumAfter - afterAi.value) > 0.0005;
+      if (afterCorrected && !cumAfterReason) {
+        return fail(
+          `「${scaleName || cumKey}」の投入後の表示値がAI読取値 ${afterAi!.value} kg と違います。訂正する場合は理由を入力してください。`
+        );
+      }
+
       // 次の投入に引き継ぐのは、その投入で実際に読み取った投入後累積
       if (cumAfter !== null) expectedCum.set(cumKey, cumAfter);
       else expectedCum.delete(cumKey);
@@ -399,12 +443,18 @@ export async function saveDailyRecordAction(input: {
         scaleName,
         grossWeight: gross,
         tareWeight: tare,
-        // スクラップ重量はサーバー側で必ず再計算（改ざん・計算ズレ防止）
-        weight: Math.round((gross - tare) * 1000) / 1000,
+        // スクラップ重量はサーバー側で必ず再計算（改ざん・計算ズレ防止）。
+        // 新様式は「投入後 − 投入前」。箱は常に重量計に載っているので箱重量は相殺される。
+        weight: legacy
+          ? Math.round((gross! - tare!) * 1000) / 1000
+          : Math.round((cumAfter! - cumBefore!) * 1000) / 1000,
         cumBefore,
         cumAfter,
-        // 自動値のままなら理由は残さない（訂正した行だけ理由が入る）
-        cumBeforeReason: corrected ? cumBeforeReason : "",
+        // 機械の値のままなら理由は残さない（上書きした行だけ理由が入る）
+        cumBeforeReason: beforeCorrected ? cumBeforeReason : "",
+        cumAfterReason: afterCorrected ? cumAfterReason : "",
+        cumBeforeReadId,
+        cumAfterReadId,
         // 記録者はログインユーザーを自動記録（既存行は元の記録者を保持）
         kirokusha: asStr(e.kirokusha, 50) || s.userName || s.loginId || "",
         ijo: asStr(e.ijo),

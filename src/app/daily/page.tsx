@@ -4,10 +4,12 @@ import {
   KUBUN_LIST,
   getDailyRecord,
   listFactoryOptions,
+  listScaleReads,
   listScales,
   listScrapKinds,
   type DailyRecord,
   type Scale,
+  type ScaleRead,
   type ScrapKind,
 } from "@/lib/db";
 import { dailyBomTotals, type DailyBom } from "@/lib/calc";
@@ -15,6 +17,7 @@ import { fmt, isDateStr, isYmStr, todayStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import DailyRecordForm from "@/components/DailyRecordForm";
+import ScaleReadLog from "@/components/ScaleReadLog";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +38,7 @@ export default async function DailyPage({
   let record: DailyRecord | null;
   let scales: Scale[];
   let kinds: ScrapKind[];
+  let reads: ScaleRead[];
   let bom: DailyBom;
   try {
     const restriction = await getFactoryRestriction(session);
@@ -45,7 +49,7 @@ export default async function DailyPage({
     factory = restriction.restricted
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
-    [record, scales, kinds, bom] = await Promise.all([
+    [record, scales, kinds, reads, bom] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listScales(session.companyId, {
         factory: restriction.restricted ? restriction.factory : factory,
@@ -53,6 +57,8 @@ export default async function DailyPage({
       }),
       // 種類は「設定」で増やせるので、投入先の選択肢もマスタから作る
       listScrapKinds(session.companyId),
+      // AI読取の履歴（改ざん確認用）。記録を消しても読取の事実は残る
+      listScaleReads(session.companyId, date, factory),
       // McFrameの日別加工数 × 単品完成重量（初品実測を優先）＝ その日の完成品重量
       dailyBomTotals(session.companyId, date, factory),
     ]);
@@ -89,6 +95,9 @@ export default async function DailyPage({
         userName={session.userName}
         isAdmin={isAdmin}
       />
+
+      {/* AI読取の履歴（改ざん確認用） */}
+      <ScaleReadLog reads={reads} record={record} />
 
       {/* 当日の理論値（McFrame日別加工数 × 単品完成重量） */}
       <section className="mt-3 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:mt-4 sm:p-5">

@@ -9,28 +9,29 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
     "@neondatabase/serverless": "^1.1.0",
     "@paloma-pf/ui": "github:PalomaPF-dev/pf-ui#3315ebfd4f55f9e3b42425cae694091d099f4da6",
     "bcryptjs": "^3.0.3",
+    "html5-qrcode": "^2.3.8",
     "lucide-react": "^1.8.0",
     "next": "16.2.4",
     "next-auth": "^4.24.14",
     "pg": "^8.22.0",
+    "qrcode": "^1.5.4",
     "react": "19.2.4",
-    "react-dom": "19.2.4",
-    "html5-qrcode": "^2.3.8",
-    "qrcode": "^1.5.4"
+    "react-dom": "19.2.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/pg": "^8.20.0",
+    "@types/qrcode": "^1.5.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",
-    "typescript": "^5",
-    "@types/qrcode": "^1.5.5"
+    "typescript": "^5"
   }
 }

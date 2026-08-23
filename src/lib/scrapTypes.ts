@@ -126,6 +126,14 @@ export interface DailyEntry {
    * 投入後累積が自動で入るため、それと違う値を入れたときだけ理由が入る（空＝自動値のまま）。
    */
   cumBeforeReason: string;
+  /** 投入後累積の訂正理由。AI読取の値を手で変えたときだけ入る。 */
+  cumAfterReason: string;
+  /**
+   * この累積値の元になったAI読取（scrap_scale_reads.id）。null＝AIを使わず手入力した。
+   * ログ側はサーバーしか書き込めないので、採用値と突き合わせれば人が上書きした差分が分かる。
+   */
+  cumBeforeReadId: string | null;
+  cumAfterReadId: string | null;
   /** 記録者（ログインユーザーを自動記録） */
   kirokusha: string;
   ijo: string;
@@ -192,4 +200,23 @@ export interface Scale {
   factory: string;
   sort: number;
   active: boolean;
+}
+
+/** AI読取の確信度。low は採用せず、必ず手入力に落とす。 */
+export type ReadConfidence = "high" | "medium" | "low";
+
+/** /api/scale-read の応答。value が null なら手入力してもらう。 */
+export interface ScaleReadResponse {
+  /** 読取ログのID。採用したら明細に持たせる（監査で突き合わせるため） */
+  readId: string;
+  value: number | null;
+  digits: string;
+  confidence: ReadConfidence;
+  note: string;
+}
+
+/** 撮影1枚から得られるもの（QRは端末側で解読するので、サーバー応答には含まれない）。 */
+export interface ScalePhotoResult extends ScaleReadResponse {
+  /** 同じ写真から読めたQRコード。読めなければ空 */
+  qr: string;
 }

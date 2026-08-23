@@ -447,6 +447,9 @@ function mapDailyRecord(r: any, entries: any[]): DailyRecord {
       cumBefore: numOrNull(e.cum_before),
       cumAfter: numOrNull(e.cum_after),
       cumBeforeReason: e.cum_before_reason ?? "",
+      cumAfterReason: e.cum_after_reason ?? "",
+      cumBeforeReadId: e.cum_before_read_id ?? null,
+      cumAfterReadId: e.cum_after_read_id ?? null,
       kirokusha: e.kirokusha,
       ijo: e.ijo,
     })),
@@ -487,7 +490,8 @@ export async function getDailyRecord(
   if (!r) return null;
   const entries = await sql`
     SELECT jikoku, hinshu, scale_id, scale_name, gross_weight, tare_weight,
-           weight, cum_before, cum_after, cum_before_reason, kirokusha, ijo
+           weight, cum_before, cum_after, cum_before_reason, cum_after_reason,
+           cum_before_read_id, cum_after_read_id, kirokusha, ijo
     FROM scrap_daily_entries WHERE record_id = ${r.id} ORDER BY sort ASC`;
   return mapDailyRecord(r, entries);
 }
@@ -531,15 +535,124 @@ export async function saveDailyRecord(
     await sql`
       INSERT INTO scrap_daily_entries (
         company_id, record_id, jikoku, hinshu, scale_id, scale_name,
-        gross_weight, tare_weight, weight, cum_before, cum_after, cum_before_reason,
+        gross_weight, tare_weight, weight, cum_before, cum_after,
+        cum_before_reason, cum_after_reason, cum_before_read_id, cum_after_read_id,
         kirokusha, ijo, sort
       )
       VALUES (
         ${companyId}, ${recordId}, ${e.jikoku}, ${e.hinshu}, ${e.scaleId}, ${e.scaleName},
         ${e.grossWeight}, ${e.tareWeight}, ${e.weight}, ${e.cumBefore}, ${e.cumAfter},
-        ${e.cumBeforeReason ?? ""}, ${e.kirokusha}, ${e.ijo}, ${i}
+        ${e.cumBeforeReason ?? ""}, ${e.cumAfterReason ?? ""},
+        ${e.cumBeforeReadId ?? null}, ${e.cumAfterReadId ?? null},
+        ${e.kirokusha}, ${e.ijo}, ${i}
       )`;
   }
+}
+
+// ===== AI読取のログ（追記のみ） =====
+
+export interface ScaleRead {
+  id: string;
+  scaleId: string | null;
+  scaleName: string;
+  phase: "before" | "after";
+  /** AIが読んだ値 kg。読めなかった記録は null で残る */
+  value: number | null;
+  digits: string;
+  confidence: string;
+  note: string;
+  model: string;
+  readBy: string;
+  readAt: string;
+}
+
+/**
+ * AI読取を1件記録する。書き込むのはサーバー（/api/scale-read）だけで、更新も削除もしない。
+ * 「AIはこう読んだ」という事実を残すのが目的なので、読めなかった（value=null）ときも記録する。
+ */
+export async function insertScaleRead(
+  companyId: string,
+  r: {
+    recordDate: string | null;
+    factory: string;
+    scaleId: string | null;
+    scaleName: string;
+    phase: "before" | "after";
+    value: number | null;
+    digits: string;
+    confidence: string;
+    note: string;
+    model: string;
+    readBy: string;
+  }
+): Promise<string> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    INSERT INTO scrap_scale_reads (
+      company_id, record_date, factory, scale_id, scale_name, phase,
+      ai_value, ai_digits, ai_confidence, ai_note, model, read_by
+    ) VALUES (
+      ${companyId}, ${r.recordDate}, ${r.factory}, ${r.scaleId}, ${r.scaleName}, ${r.phase},
+      ${r.value}, ${r.digits}, ${r.confidence}, ${r.note}, ${r.model}, ${r.readBy}
+    )
+    RETURNING id`;
+  return rows[0].id as string;
+}
+
+/** 読取ログをIDで引く（保存時の突き合わせ用）。他社のIDは引けない。 */
+export async function getScaleReads(
+  companyId: string,
+  ids: string[]
+): Promise<Map<string, ScaleRead>> {
+  const out = new Map<string, ScaleRead>();
+  const uniq = [...new Set(ids.filter(Boolean))];
+  if (uniq.length === 0) return out;
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, scale_id, scale_name, phase, ai_value, ai_digits, ai_confidence,
+           ai_note, model, read_by, read_at
+      FROM scrap_scale_reads
+     WHERE company_id = ${companyId} AND id = ANY(${uniq}::uuid[])`;
+  for (const r of rows as any[]) out.set(String(r.id), mapScaleRead(r));
+  return out;
+}
+
+/**
+ * 日次記録に紐づく読取ログ（監査用）。AIが読んだ値と、実際に採用された値を
+ * 並べて確認するために使う。
+ */
+export async function listScaleReads(
+  companyId: string,
+  recordDate: string,
+  factory: string
+): Promise<ScaleRead[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, scale_id, scale_name, phase, ai_value, ai_digits, ai_confidence,
+           ai_note, model, read_by, read_at
+      FROM scrap_scale_reads
+     WHERE company_id = ${companyId} AND record_date = ${recordDate} AND factory = ${factory}
+     ORDER BY read_at ASC`;
+  return (rows as any[]).map(mapScaleRead);
+}
+
+function mapScaleRead(r: any): ScaleRead {
+  return {
+    id: String(r.id),
+    scaleId: r.scale_id ?? null,
+    scaleName: r.scale_name ?? "",
+    phase: r.phase === "after" ? "after" : "before",
+    value: numOrNull(r.ai_value),
+    digits: r.ai_digits ?? "",
+    confidence: r.ai_confidence ?? "",
+    note: r.ai_note ?? "",
+    model: r.model ?? "",
+    readBy: r.read_by ?? "",
+    readAt: r.read_at ? new Date(r.read_at).toISOString() : "",
+  };
 }
 
 /** 日次記録の承認状態を取得（存在しなければ null）。編集可否・二重申請の判定用。 */

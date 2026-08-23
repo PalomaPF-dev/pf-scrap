@@ -43,7 +43,7 @@ LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
 そのうえで全体を SQL Editor に貼って Run。
 
 - 全体が1つのトランザクションです。**失敗したら1つも変わっていません。**
-- `移動したテーブル: 17 件` と出れば成功です。
+- `移動したテーブル: 18 件` と出れば成功です。
 - 実行後、**SQL Editor の履歴（スニペット）を削除してください。**
   パスワードが残ります。
 
@@ -69,7 +69,7 @@ LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
 ## おまけ: 使っていない ra_* を public から片づける
 
 本番の `public` には、pf-scrap とは無関係の `ra_*`（6表）が残っています。
-**pf-scrap の移行はこれらに触りません**（移動対象を17表に名指しで限定して
+**pf-scrap の移行はこれらに触りません**（移動対象を18表に名指しで限定して
 いるため）。移行の前提条件でもありません。
 
 片づける場合は `8-archive-ra.sql` を SQL Editor で Run します。`DROP` では
@@ -112,9 +112,9 @@ sds.ra_assessments` が誤検知されました。
 このダッシュボード版も、ローカルのPostgreSQLで実際に通してあります。
 
 - `1-survey.sql` → `2-migrate.sql` → `3-verify.sql` で
-  17テーブル移動・所有者は全て `app_scrap`・件数一致・`public` は空・
+  18テーブル移動・所有者は全て `app_scrap`・件数一致・`public` は空・
   `search_path=scrap`（A〜D すべて OK）
 - 移行後のDBにアプリを接続 → ui 88/88・JSエラーなし
 - パスワードを書き換えずに実行 → その場で停止し、DBは変わらない
-- `9-rollback.sql` → 17テーブルが `public` に戻る
+- `9-rollback.sql` → 18テーブルが `public` に戻る
 - 2回目の実行 → ロール作成をとばして通る（何度流しても壊れない）

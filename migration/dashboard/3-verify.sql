@@ -4,20 +4,20 @@
 -- Supabase ダッシュボード → SQL Editor に貼って Run。読み取りのみ。
 --
 -- 見るところ（すべて OK になること）:
---   A.テーブル数        17
---   B.所有者            17（全て app_scrap）
+--   A.テーブル数        18
+--   B.所有者            18（全て app_scrap）
 --   C.public の残り     0
 --   D.search_path       scrap
 --   E.件数              手順1の '3.件数' と同じ値（detail が public → scrap）
 -- ============================================================================
 SELECT 'A.scrap のテーブル数' AS check, count(*)::text AS value, '' AS detail,
-       CASE WHEN count(*) = 17 THEN 'OK' ELSE '★ 17 のはず' END AS judgement
+       CASE WHEN count(*) = 18 THEN 'OK' ELSE '★ 18 のはず' END AS judgement
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname = 'scrap' AND c.relkind = 'r'
 
 UNION ALL
 SELECT 'B.所有者が app_scrap', count(*)::text, '',
-       CASE WHEN count(*) = 17 THEN 'OK' ELSE '★ 17 のはず' END
+       CASE WHEN count(*) = 18 THEN 'OK' ELSE '★ 18 のはず' END
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname = 'scrap' AND c.relkind = 'r'
    AND pg_get_userbyid(c.relowner) = 'app_scrap'
@@ -33,7 +33,7 @@ SELECT 'C.public に残った pf-scrap の表', count(*)::text, '',
      'scrap_items','scrap_kinds','scrap_scales',
      'scrap_daily_records','scrap_daily_entries','scrap_first_articles',
      'scrap_mcframe_qty','scrap_mcframe_days','scrap_monthly_inputs',
-     'scrap_procure_days','scrap_inventory_adjustments')
+     'scrap_procure_days','scrap_inventory_adjustments','scrap_scale_reads')
 
 UNION ALL
 SELECT 'D.既定 search_path', array_to_string(rolconfig, ','), '',

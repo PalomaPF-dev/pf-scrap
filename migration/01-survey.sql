@@ -26,7 +26,7 @@ SELECT c.relname AS table_name,
          'scrap_items','scrap_kinds','scrap_scales',
          'scrap_daily_records','scrap_daily_entries','scrap_first_articles',
          'scrap_mcframe_qty','scrap_mcframe_days','scrap_monthly_inputs',
-         'scrap_procure_days','scrap_inventory_adjustments'
+         'scrap_procure_days','scrap_inventory_adjustments','scrap_scale_reads'
        ) THEN 'scrap が使う' ELSE '★ scrap 以外（要確認）' END AS judgement
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -42,7 +42,7 @@ SELECT t.name AS missing_in_public
          'scrap_items','scrap_kinds','scrap_scales',
          'scrap_daily_records','scrap_daily_entries','scrap_first_articles',
          'scrap_mcframe_qty','scrap_mcframe_days','scrap_monthly_inputs',
-         'scrap_procure_days','scrap_inventory_adjustments'
+         'scrap_procure_days','scrap_inventory_adjustments','scrap_scale_reads'
        ]) AS t(name)
  WHERE NOT EXISTS (
    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace

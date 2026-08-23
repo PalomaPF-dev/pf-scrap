@@ -17,7 +17,7 @@ WITH targets(name) AS (
     'scrap_items','scrap_kinds','scrap_scales',
     'scrap_daily_records','scrap_daily_entries','scrap_first_articles',
     'scrap_mcframe_qty','scrap_mcframe_days','scrap_monthly_inputs',
-    'scrap_procure_days','scrap_inventory_adjustments'])
+    'scrap_procure_days','scrap_inventory_adjustments','scrap_scale_reads'])
 )
 SELECT '1.public のテーブル' AS section,
        c.relname            AS name,

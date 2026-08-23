@@ -59,7 +59,7 @@ ALTER ROLE app_scrap SET search_path = scrap;
 -- ----------------------------------------------------------------------------
 -- 4. public にある pf-scrap のテーブルを scrap へ移す
 -- ----------------------------------------------------------------------------
--- 対象は「アプリが CREATE TABLE している17表」だけに限定する。
+-- 対象は「アプリが CREATE TABLE している18表」だけに限定する。
 -- public に他アプリの残骨があっても巻き込まない（手順1で確認済みのはず）。
 DO $$
 DECLARE
@@ -71,7 +71,7 @@ DECLARE
     'scrap_items','scrap_kinds','scrap_scales',
     'scrap_daily_records','scrap_daily_entries','scrap_first_articles',
     'scrap_mcframe_qty','scrap_mcframe_days','scrap_monthly_inputs',
-    'scrap_procure_days','scrap_inventory_adjustments'
+    'scrap_procure_days','scrap_inventory_adjustments','scrap_scale_reads'
   ];
 BEGIN
   FOREACH t IN ARRAY targets LOOP
@@ -115,7 +115,7 @@ COMMIT;
 -- 6. 確認
 -- ----------------------------------------------------------------------------
 \echo ''
-\echo '=== scrap スキーマのテーブル（17件 + 所有者が app_scrap）==='
+\echo '=== scrap スキーマのテーブル（18件 + 所有者が app_scrap）==='
 SELECT c.relname AS table_name, pg_get_userbyid(c.relowner) AS owner
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname = 'scrap' AND c.relkind = 'r'

@@ -29,7 +29,7 @@ DECLARE
     'scrap_items','scrap_kinds','scrap_scales',
     'scrap_daily_records','scrap_daily_entries','scrap_first_articles',
     'scrap_mcframe_qty','scrap_mcframe_days','scrap_monthly_inputs',
-    'scrap_procure_days','scrap_inventory_adjustments'
+    'scrap_procure_days','scrap_inventory_adjustments','scrap_scale_reads'
   ];
 BEGIN
   -- 1. ログインロール（既にあれば作らない。パスワードも変更しない）
@@ -56,7 +56,7 @@ BEGIN
   ALTER ROLE app_scrap SET search_path = scrap;
 
   -- 4. public にある pf-scrap のテーブルを scrap へ移す
-  --    対象は「アプリが CREATE TABLE している17表」だけ。
+  --    対象は「アプリが CREATE TABLE している18表」だけ。
   --    public に他アプリの残骨があっても巻き込まない。
   FOREACH t IN ARRAY targets LOOP
     IF EXISTS (

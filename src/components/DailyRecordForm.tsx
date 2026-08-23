@@ -8,7 +8,6 @@ import {
   Plus,
   QrCode,
   Save,
-  Send,
   Sparkles,
   Stamp,
   Undo2,
@@ -19,7 +18,6 @@ import {
   lookupScaleByQrAction,
   rejectDailyRecordAction,
   saveDailyRecordAction,
-  submitDailyRecordAction,
 } from "@/lib/actions";
 import {
   DAILY_STATUS_LABEL,
@@ -161,7 +159,7 @@ function Step({
  *   1. 投入先のスクラップ箱（重量計）をQR読み取り or 一覧から選択
  *   2. 投入前重量(箱含む) − 箱重量(空き箱) = スクラップ重量（自動計算）
  *   3. 「この投入を記録」→ 時刻・記録者は自動
- *   4. 終礼後に「管理者へ申請」→ 管理者が承認
+ *   3. 終礼集計で当日を確認し、承認者が「終礼確認して承認する」で当日を確定
  * 始業時のスクラップ箱残量は管理者のみが入力する（サーバー側でも強制）。
  */
 export default function DailyRecordForm({
@@ -192,12 +190,10 @@ export default function DailyRecordForm({
   const [pending, startTransition] = useTransition();
 
   const status: DailyStatus = initial?.status ?? "draft";
-  // 申請中・承認済みは記録者はロック（管理者は編集・承認・差し戻し可）
+  // 承認済み（と旧データの申請中）は記録者はロック。承認者は編集・承認の取り消しができる。
   const locked = (status === "pending" || status === "approved") && !isAdmin;
 
   const [sekininsha, setSekininsha] = useState(initial?.sekininsha ?? "");
-  const [zenjitsuOk, setZenjitsuOk] = useState(initial?.zenjitsuOk ?? false);
-  const [hakoZanryo, setHakoZanryo] = useState(initial ? String(initial.hakoZanryo) : "0");
   const [entries, setEntries] = useState<EntryDraft[]>(
     (initial?.entries ?? []).map((e) => ({
       jikoku: e.jikoku,
@@ -216,12 +212,6 @@ export default function DailyRecordForm({
       ijo: e.ijo,
     }))
   );
-  // 箱ごとの朝礼後の累積値（scaleId → 入力文字列）。その日の最初の投入前累積になる。
-  const [kaishiCum, setKaishiCum] = useState<Record<string, string>>(() => {
-    const out: Record<string, string> = {};
-    for (const [id, v] of Object.entries(initial?.kaishiCum ?? {})) out[id] = String(v);
-    return out;
-  });
   const [kaishu, setKaishu] = useState(
     initial?.kaishuSokuteichi !== null && initial?.kaishuSokuteichi !== undefined
       ? String(initial.kaishuSokuteichi)
@@ -255,17 +245,16 @@ export default function DailyRecordForm({
   const [afterReason, setAfterReason] = useState("");
 
   /**
-   * 選択中の箱の「次に入るはずの累積(投入前)」。
-   * 同じ箱の直前の投入後累積 → 無ければ朝礼後の累積値、の順で引き継ぐ。
+   * 選択中の箱の「次に入るはずの投入前の表示値」＝同じ箱の直前の投入後。
+   * AI読取が主で、これは読めなかったときの手がかりと、読取値とのずれの確認に使う。
    */
   const autoCumBefore = useMemo(() => {
     if (!selectedScale) return "";
     const last = [...entries]
       .reverse()
       .find((e) => e.scaleId === selectedScale.id && e.cumAfter !== "");
-    if (last) return last.cumAfter;
-    return kaishiCum[selectedScale.id] ?? "";
-  }, [selectedScale, entries, kaishiCum]);
+    return last ? last.cumAfter : "";
+  }, [selectedScale, entries]);
 
   /**
    * 投入前の「機械の値」。AIで読み取れていればその値、無ければ連携値
@@ -493,12 +482,6 @@ export default function DailyRecordForm({
       recordDate: date,
       factory,
       sekininsha,
-      zenjitsuOk,
-      hakoZanryo,
-      // 空欄の箱は送らない（未読取と 0kg を区別する）
-      kaishiCum: Object.fromEntries(
-        Object.entries(kaishiCum).filter(([, v]) => v.trim() !== "")
-      ),
       kaishuSokuteichi: kaishu,
       tonyuKanryo,
       biko,
@@ -530,21 +513,6 @@ export default function DailyRecordForm({
     });
   }
 
-  function submit() {
-    setMessage(null);
-    startTransition(async () => {
-      // 保存してから申請（未保存の入力を落とさない）
-      const saved = await saveDailyRecordAction(buildPayload());
-      if (!saved.ok) {
-        setMessage({ ok: false, text: saved.message });
-        return;
-      }
-      const res = await submitDailyRecordAction(date, factory);
-      setMessage({ ok: res.ok, text: res.message ?? "" });
-      if (res.ok) router.refresh();
-    });
-  }
-
   function approve() {
     startTransition(async () => {
       const res = await approveDailyRecordAction(date, factory);
@@ -554,7 +522,7 @@ export default function DailyRecordForm({
   }
 
   function reject() {
-    const comment = prompt("差し戻しの理由（記録者に表示されます）");
+    const comment = prompt("承認を取り消す理由（記録者に表示されます）");
     if (comment === null) return;
     startTransition(async () => {
       const res = await rejectDailyRecordAction(date, factory, comment);
@@ -581,9 +549,6 @@ export default function DailyRecordForm({
 
   const btnPrimary =
     "inline-flex h-11 items-center justify-center gap-1.5 rounded-lg bg-[#b4632c] px-4 text-sm font-semibold text-white hover:bg-[#96521f] disabled:opacity-50";
-  const btnOutline =
-    "inline-flex h-11 items-center justify-center gap-1.5 rounded-lg border border-[#b4632c] px-4 text-sm font-semibold text-[#b4632c] hover:bg-[#faf6ef] disabled:opacity-50";
-
   return (
     <div className="space-y-3 pb-24 sm:space-y-4 sm:pb-0">
       {/* 対象日・工場・状態 */}
@@ -637,35 +602,12 @@ export default function DailyRecordForm({
               )}
             </span>
           </div>
-          {/* 管理者の承認操作（記録者の保存/申請は画面下の操作バー） */}
-          {isAdmin && (status === "pending" || status === "approved") && (
-            <div className="flex flex-wrap gap-2 sm:ml-auto">
-              {status === "pending" && (
-                <button
-                  onClick={approve}
-                  disabled={pending}
-                  className="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg bg-[#2f6b2f] px-4 text-sm font-semibold text-white hover:bg-[#255525] disabled:opacity-50"
-                >
-                  <Stamp className="h-4 w-4" />
-                  承認
-                </button>
-              )}
-              <button
-                onClick={reject}
-                disabled={pending}
-                className="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg border border-[#dc000c] px-4 text-sm font-semibold text-[#dc000c] hover:bg-[#fdecea] disabled:opacity-50"
-              >
-                <Undo2 className="h-4 w-4" />
-                差し戻し
-              </button>
-            </div>
-          )}
         </div>
         {locked && (
           <p className="mt-3 rounded-lg bg-[#fff3e0] px-3 py-2 text-sm text-[#a15c00]">
             {status === "pending"
-              ? "管理者へ申請中のため編集できません。承認または差し戻しをお待ちください。"
-              : "承認済みの記録です。修正が必要な場合は管理者へ連絡してください。"}
+              ? "申請中のため編集できません。承認者の確認をお待ちください。"
+              : "承認済みの記録です。修正が必要な場合は承認者へ連絡してください。"}
           </p>
         )}
         {status === "rejected" && initial?.rejectComment && (
@@ -675,91 +617,10 @@ export default function DailyRecordForm({
         )}
       </section>
 
-      {/* 【1】朝礼確認（始業時残量は管理者のみ入力） */}
-      <Step n={1} title="朝礼確認">
-        <div className="space-y-3 text-sm">
-          <label className="flex items-center gap-2.5">
-            <input
-              type="checkbox"
-              checked={zenjitsuOk}
-              onChange={(e) => setZenjitsuOk(e.target.checked)}
-              className="h-5 w-5 accent-[#b4632c]"
-              disabled={locked}
-            />
-            前日の記録は完備されている
-          </label>
-          <div className="flex flex-wrap items-center gap-2">
-            <span>始業時スクラップ箱残量</span>
-            {isAdmin ? (
-              <>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.1"
-                  min="0"
-                  value={hakoZanryo}
-                  onChange={(e) => setHakoZanryo(e.target.value)}
-                  className={`${numInput} w-28`}
-                />
-                <span className="text-xs text-[#909090]">kg（0=空）／ 管理者のみ入力できます</span>
-              </>
-            ) : (
-              <>
-                <span className="flex h-11 items-center rounded-lg border border-[#e5e5e5] bg-[#f7f7f5] px-3 text-sm font-semibold tabular-nums sm:h-10">
-                  {fmt(toNum(hakoZanryo))} kg
-                </span>
-                <span className="text-xs text-[#909090]">管理者が入力します</span>
-              </>
-            )}
-          </div>
-
-          {/* 朝礼後の重量計の累積値。その日の最初の投入の「累積(投入前)」に自動で入る */}
-          {scales.length > 0 && (
-            <div>
-              <div className="mb-1.5 text-xs font-bold text-[#707070]">
-                朝礼後の累積値（重量計の表示値）
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {scales
-                  .filter((s) => s.active)
-                  .map((s) => (
-                    <label
-                      key={s.id}
-                      className="flex items-center gap-2 rounded-xl border border-[#e5e5e5] px-3 py-2"
-                    >
-                      <span className="min-w-0 flex-1 truncate text-sm text-[#555555]">
-                        {scaleLabel(s)}
-                      </span>
-                      <KindTag kind={s.kind} order={kindOrder.get(s.kind)} />
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.1"
-                        min="0"
-                        value={kaishiCum[s.id] ?? ""}
-                        onChange={(e) =>
-                          setKaishiCum((prev) => ({ ...prev, [s.id]: e.target.value }))
-                        }
-                        className={`${numInput} w-24`}
-                        disabled={locked}
-                      />
-                      <span className="text-xs text-[#909090]">kg</span>
-                    </label>
-                  ))}
-              </div>
-              <p className="mt-1.5 text-xs text-[#909090]">
-                入力すると、その箱の最初の投入の「累積(投入前)」に自動で入ります。
-                2回目以降は前の投入の「累積(投入後)」が引き継がれます。
-              </p>
-            </div>
-          )}
-        </div>
-      </Step>
-
-      {/* 【2】スクラップ箱と投入前の表示値を、写真1枚から読み取る */}
+      {/* 【1】スクラップ箱と投入前の表示値を、写真1枚から読み取る */}
       {!locked && (
         <Step
-          n={2}
+          n={1}
           title="スクラップ箱と投入前を読み取る"
           hint="重量計のQRコードと表示部の両方が写るように1枚撮ると、箱の種類と投入前の表示値が自動で入ります。"
         >
@@ -841,15 +702,13 @@ export default function DailyRecordForm({
 
           {beforeRead && !beforeFix && chainGap !== null && Math.abs(chainGap) > 0.5 && (
             <p className="mt-1.5 text-xs text-[#dc000c]">
-              前回の投入後（または朝礼後）の {autoCumBefore} kg と {fmt(Math.abs(chainGap))} kg
+              前回の投入後の {autoCumBefore} kg と {fmt(Math.abs(chainGap))} kg
               ずれています。別の人が投入した、箱を入れ替えた、前回の読み取り誤りなどが考えられます。
             </p>
           )}
           {!beforeRead && beforeLinked && !beforeFix && (
             <p className="mt-1.5 text-xs text-[#909090]">
-              {entries.some((e) => e.scaleId === selectedScale?.id && e.cumAfter !== "")
-                ? "前の投入の「投入後の表示値」が自動で入っています。"
-                : "朝礼後の累積値が自動で入っています。"}
+              前の投入の「投入後の表示値」が自動で入っています。
               　写真を撮ると読み取った値に置き換わります。
             </p>
           )}
@@ -950,10 +809,10 @@ export default function DailyRecordForm({
         </Step>
       )}
 
-      {/* 【3】投入して、投入後の表示値を読み取る */}
+      {/* 【2】投入して、投入後の表示値を読み取る */}
       {!locked && (
         <Step
-          n={3}
+          n={2}
           title="投入して、投入後を読み取る"
           hint="スクラップ重量 = 投入後の表示値 − 投入前の表示値。箱は重量計に載ったままなので箱の重量は相殺されます。"
         >
@@ -972,7 +831,7 @@ export default function DailyRecordForm({
             </div>
           ) : (
             <p className="mb-4 rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
-              先に2でスクラップ箱と投入前の表示値を読み取ってください。
+              先に1でスクラップ箱と投入前の表示値を読み取ってください。
             </p>
           )}
 
@@ -1147,7 +1006,6 @@ export default function DailyRecordForm({
                           <span className="text-sm font-bold tabular-nums">{e.jikoku}</span>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
                         </div>
-                        <div className="mt-0.5 truncate text-sm text-[#555555]">{e.scaleName}</div>
                         <div className="mt-0.5 text-xs text-[#909090]">
                           {fmt(cb)} → {fmt(ca)} ／ 記録者 {e.kirokusha}
                         </div>
@@ -1180,7 +1038,6 @@ export default function DailyRecordForm({
                 <thead>
                   <tr>
                     <th className={th}>時刻</th>
-                    <th className={th}>スクラップ箱</th>
                     <th className={th}>種類</th>
                     <th className={`${th} text-right`}>投入前</th>
                     <th className={`${th} text-right`}>投入後</th>
@@ -1203,7 +1060,6 @@ export default function DailyRecordForm({
                     return (
                       <tr key={i}>
                         <td className={td}>{e.jikoku}</td>
-                        <td className={td}>{e.scaleName}</td>
                         <td className={td}>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
                         </td>
@@ -1244,8 +1100,8 @@ export default function DailyRecordForm({
         )}
       </section>
 
-      {/* 【4】終礼集計 */}
-      <Step n={4} title="終礼集計">
+      {/* 【3】終礼集計（承認者はここで当日を承認する） */}
+      <Step n={3} title="終礼集計">
         <div className="space-y-3 text-sm">
           <div className="flex items-center justify-between rounded-xl bg-[#f7f7f5] px-4 py-3">
             <span className="text-[#707070]">当日合計</span>
@@ -1296,6 +1152,55 @@ export default function DailyRecordForm({
               disabled={locked}
             />
           </label>
+
+          {/*
+            承認は終礼時に1日1回。記録のたびに申請・承認を繰り返さない。
+            承認者がここで当日合計と差異率を確認したうえで押す。
+          */}
+          <div className="rounded-xl border border-[#e5e5e5] bg-[#f7f7f5] p-3">
+            {status === "approved" ? (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="flex items-center gap-2 text-sm font-bold text-[#2f6b2f]">
+                  <Stamp className="h-5 w-5" />
+                  終礼確認済み（承認: {initial?.approvedBy || "—"}）
+                </span>
+                {isAdmin && (
+                  <button
+                    onClick={reject}
+                    disabled={pending}
+                    className="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg border border-[#dc000c] px-4 text-sm font-semibold text-[#dc000c] hover:bg-[#fdecea] disabled:opacity-50"
+                  >
+                    <Undo2 className="h-4 w-4" />
+                    承認を取り消す
+                  </button>
+                )}
+              </div>
+            ) : isAdmin ? (
+              <>
+                <p className="mb-2 text-xs text-[#707070]">
+                  当日合計と差異率を確認して押してください。押した時点でこの日の記録が確定し、
+                  記録者は編集できなくなります。
+                </p>
+                <button
+                  onClick={approve}
+                  disabled={pending || entries.length === 0}
+                  className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#2f6b2f] text-base font-semibold text-white hover:bg-[#255525] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-6 sm:text-sm"
+                >
+                  <Stamp className="h-5 w-5" />
+                  終礼確認して承認する
+                </button>
+                {entries.length === 0 && (
+                  <p className="mt-1.5 text-xs text-[#909090]">
+                    投入の記録が1件もありません。記録されてから承認してください。
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-[#707070]">
+                終礼時に承認者が確認して承認します。記録が済んだら「保存」してください。
+              </p>
+            )}
+          </div>
         </div>
       </Step>
 
@@ -1303,22 +1208,12 @@ export default function DailyRecordForm({
       {!locked && (
         <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#e5e5e5] bg-white/95 p-3 backdrop-blur sm:static sm:z-auto sm:rounded-2xl sm:border sm:p-4">
           <div className="flex items-center gap-2">
-            <button onClick={save} disabled={pending} className={`${btnOutline} flex-1 sm:flex-none`}>
+            <button onClick={save} disabled={pending} className={`${btnPrimary} flex-1 sm:flex-none`}>
               <Save className="h-4 w-4" />
               保存
             </button>
-            {status !== "approved" && status !== "pending" && (
-              <button
-                onClick={submit}
-                disabled={pending}
-                className={`${btnPrimary} flex-1 sm:flex-none`}
-              >
-                <Send className="h-4 w-4" />
-                管理者へ申請
-              </button>
-            )}
             <span className="hidden text-xs text-[#909090] sm:inline">
-              記録が済んだら「管理者へ申請」してください。承認をもって当日の記録が確定します。
+              投入を記録したら「保存」してください。終礼時に承認者が確認して当日を承認します。
             </span>
           </div>
         </div>

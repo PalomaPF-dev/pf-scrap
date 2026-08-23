@@ -715,10 +715,15 @@ export async function countPendingDaily(
 ): Promise<number> {
   await ensureSchema();
   const sql = getSql();
+  // 承認は終礼時に1日1回。記録者からの「申請」は無くしたので、
+  // 承認待ち＝投入の記録があるのに、まだ承認されていない日。
+  // 空の記録票（開いただけの日）は数えない。
   const rows = await sql`
-    SELECT COUNT(*)::int AS n FROM scrap_daily_records
-    WHERE company_id = ${companyId} AND status = 'pending'
-      AND (${factory}::text IS NULL OR factory = ${factory})`;
+    SELECT COUNT(*)::int AS n FROM scrap_daily_records r
+    WHERE r.company_id = ${companyId}
+      AND r.status <> 'approved'
+      AND (${factory}::text IS NULL OR r.factory = ${factory})
+      AND EXISTS (SELECT 1 FROM scrap_daily_entries e WHERE e.record_id = r.id)`;
   return Number(rows[0]?.n ?? 0);
 }
 

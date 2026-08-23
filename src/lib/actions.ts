@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { getUserAffiliation } from "./authDb";
 import {
   requireEntitledSession,
   requireAdminSession,
@@ -313,10 +314,14 @@ export async function saveDailyRecordAction(input: {
   recordDate: string;
   factory: string;
   sekininsha: string;
-  zenjitsuOk: boolean;
-  hakoZanryo: unknown;
-  /** 箱ごとの朝礼後の累積値（scaleId → kg。文字列で届く） */
+  hakoZanryo?: unknown;
+  /**
+   * 箱ごとの朝礼後の累積値（scaleId → kg。文字列で届く）。
+   * 朝礼確認を廃止したので新しい画面からは届かない。省略時は既存値を保つ。
+   */
   kaishiCum?: Record<string, unknown>;
+  /** 朝礼確認の項目。省略時は既存値を保つ（過去の記録を壊さないため） */
+  zenjitsuOk?: boolean;
   kaishuSokuteichi: unknown;
   tonyuKanryo: boolean;
   biko: string;
@@ -342,11 +347,15 @@ export async function saveDailyRecordAction(input: {
     // そのまま活かしたいので、無効なものも含めた全件で判定する。
     const kindNames = (await listScrapKinds(s.companyId)).map((k) => k.name);
 
-    // 箱ごとの朝礼後の累積値。これがその日の最初の投入の「累積(投入前)」になる。
-    const kaishiCum: Record<string, number> = {};
-    for (const [k, v] of Object.entries(input.kaishiCum ?? {})) {
-      const n = toNumOrNull(v);
-      if (n !== null && asStr(k, 50)) kaishiCum[asStr(k, 50)] = n;
+    // 箱ごとの朝礼後の累積値。過去の記録では最初の投入の「累積(投入前)」の元になる。
+    // 朝礼確認を廃止したので新しい画面からは届かない。届かなければ既存値を保つ。
+    let kaishiCum: Record<string, number> = prev?.kaishiCum ?? {};
+    if (input.kaishiCum !== undefined) {
+      kaishiCum = {};
+      for (const [k, v] of Object.entries(input.kaishiCum)) {
+        const n = toNumOrNull(v);
+        if (n !== null && asStr(k, 50)) kaishiCum[asStr(k, 50)] = n;
+      }
     }
     // 累積の連携チェック用。箱ごとに「次に入るはずの投入前累積」を持ち回る。
     const expectedCum = new Map<string, number>(Object.entries(kaishiCum));
@@ -357,6 +366,10 @@ export async function saveDailyRecordAction(input: {
       .flatMap((e) => [asStr(e.cumBeforeReadId ?? "", 50), asStr(e.cumAfterReadId ?? "", 50)])
       .filter(Boolean);
     const reads = await getScaleReads(s.companyId, readIds);
+
+    // 記録者の表示名。「大口工場 内胴 大口太郎」のように所属を前に付ける。
+    const affiliation = await getUserAffiliation(s.userId);
+    const recorder = [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" ");
 
     const entries: DailyEntry[] = [];
     for (const e of Array.isArray(input.entries) ? input.entries : []) {
@@ -455,8 +468,9 @@ export async function saveDailyRecordAction(input: {
         cumAfterReason: afterCorrected ? cumAfterReason : "",
         cumBeforeReadId,
         cumAfterReadId,
-        // 記録者はログインユーザーを自動記録（既存行は元の記録者を保持）
-        kirokusha: asStr(e.kirokusha, 50) || s.userName || s.loginId || "",
+        // 記録者は「所属（工場 職場）＋氏名」。ログインユーザーから毎回サーバーで組み立てる。
+        // 既存行は元の記録者をそのまま残す（誰が入れたかを後から書き換えない）。
+        kirokusha: asStr(e.kirokusha, 120) || recorder,
         ijo: asStr(e.ijo),
       });
     }
@@ -464,9 +478,10 @@ export async function saveDailyRecordAction(input: {
       recordDate: input.recordDate,
       factory,
       sekininsha: asStr(input.sekininsha, 50) || s.userName,
-      zenjitsuOk: Boolean(input.zenjitsuOk),
+      zenjitsuOk: input.zenjitsuOk === undefined ? (prev?.zenjitsuOk ?? false) : Boolean(input.zenjitsuOk),
       // 始業時スクラップ箱残量は管理者のみが入力できる（一般ユーザーの送信値は無視）
-      hakoZanryo: isAdmin ? toNum(input.hakoZanryo) : (prev?.hakoZanryo ?? 0),
+      hakoZanryo:
+        isAdmin && input.hakoZanryo !== undefined ? toNum(input.hakoZanryo) : (prev?.hakoZanryo ?? 0),
       // 朝礼後の累積値は当番が読み取って入力する（残量と違い管理者限定にしない）
       kaishiCum,
       kaishuSokuteichi: toNumOrNull(input.kaishuSokuteichi),
@@ -525,19 +540,29 @@ export async function approveDailyRecordAction(
     const f = asStr(factory, 50);
     const rec = await getDailyRecord(s.companyId, recordDate, f);
     if (!rec) return fail("対象の記録が見つかりません。");
-    if (rec.status !== "pending") return fail("申請中の記録のみ承認できます。");
+    // 承認は終礼時に1日1回。記録者からの申請は無くしたので、下書きからそのまま承認する。
+    if (rec.status === "approved") return fail("この日はすでに承認されています。");
+    // 空の日を承認できてしまうと「確認した」証跡の意味が無くなる
+    if (rec.entries.length === 0) {
+      return fail("投入の記録が1件もありません。記録されてから承認してください。");
+    }
+    // 承認者も記録者と同じ規則で「所属＋氏名」を残す
+    const affiliation = await getUserAffiliation(s.userId);
+    const approver =
+      [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" ") || "承認者";
     await updateDailyStatus(s.companyId, recordDate, f, {
       status: "approved",
-      approvedBy: s.userName || s.loginId || "",
+      approvedBy: approver,
     });
     revalidatePath("/daily");
-    return { ok: true, message: "承認しました。" };
+    revalidatePath("/summary");
+    return { ok: true, message: `${recordDate} の記録を承認しました。` };
   } catch (e) {
     return fail((e as Error).message);
   }
 }
 
-/** 差し戻し（管理者のみ）。コメント付きで記録者へ返す。 */
+/** 承認の取り消し（管理者のみ）。理由つきで記録者へ返し、編集できる状態に戻す。 */
 export async function rejectDailyRecordAction(
   recordDate: string,
   factory: string,

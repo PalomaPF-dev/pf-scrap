@@ -1,5 +1,6 @@
 import { BarChart3 } from "lucide-react";
 import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
+import { getUserAffiliation } from "@/lib/authDb";
 import {
   KUBUN_LIST,
   getDailyRecord,
@@ -39,6 +40,7 @@ export default async function DailyPage({
   let scales: Scale[];
   let kinds: ScrapKind[];
   let reads: ScaleRead[];
+  let affiliation: string | null;
   let bom: DailyBom;
   try {
     const restriction = await getFactoryRestriction(session);
@@ -49,6 +51,7 @@ export default async function DailyPage({
     factory = restriction.restricted
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
+    affiliation = await getUserAffiliation(session.userId);
     [record, scales, kinds, reads, bom] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listScales(session.companyId, {
@@ -73,6 +76,8 @@ export default async function DailyPage({
   }
 
   const isAdmin = session.role === "admin";
+  // 記録者は「所属（部署／工場 職場）＋氏名」。保存時にサーバーでも同じ規則で組み立てる。
+  const recorder = [affiliation, session.userName].filter(Boolean).join(" ");
   // 当日の記録スクラップ合計（理論値との突合に使う）
   const dayTotal = (record?.entries ?? []).reduce((t, e) => t + e.weight, 0);
 
@@ -80,11 +85,11 @@ export default async function DailyPage({
     <div className="p-4 sm:p-6">
       <PageHeader
         title="日次記録"
-        description="スクラップ発生のたびに、重量計（スクラップ箱）をQRで選んで計量・記録し、終礼後に管理者へ申請します"
+        description="スクラップ投入のたびに、重量計を写真で読み取って記録します。終礼時に承認者が確認して当日を承認します"
       />
 
       <DailyRecordForm
-        key={`${date}|${factory}|${record?.status ?? "new"}`}
+        key={`${date}|${factory}|${record?.status ?? "draft"}`}
         date={date}
         factory={factory}
         factoryOptions={factoryOptions}
@@ -92,7 +97,7 @@ export default async function DailyPage({
         initial={record}
         scales={scales}
         kinds={kinds}
-        userName={session.userName}
+        userName={recorder}
         isAdmin={isAdmin}
       />
 

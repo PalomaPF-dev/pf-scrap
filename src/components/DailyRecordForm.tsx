@@ -11,7 +11,6 @@ import {
   Sparkles,
   Stamp,
   Undo2,
-  X,
 } from "lucide-react";
 import {
   approveDailyRecordAction,
@@ -1014,18 +1013,7 @@ export default function DailyRecordForm({
                         )}
                         {e.ijo && <div className="mt-0.5 text-xs text-[#dc000c]">異常: {e.ijo}</div>}
                       </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="text-lg font-bold tabular-nums">{fmt(w)}</span>
-                        {!locked && (
-                          <button
-                            onClick={() => setEntries((prev) => prev.filter((_, j) => j !== i))}
-                            className="rounded-lg p-2 text-[#dc000c] hover:bg-[#fdecea]"
-                            aria-label="行を削除"
-                          >
-                            <X className="h-5 w-5" />
-                          </button>
-                        )}
-                      </div>
+                      <span className="shrink-0 text-lg font-bold tabular-nums">{fmt(w)}</span>
                     </div>
                   </li>
                 );
@@ -1046,7 +1034,6 @@ export default function DailyRecordForm({
                     <th className={th}>訂正理由</th>
                     <th className={th}>記録者</th>
                     <th className={th}>異常</th>
-                    {!locked && <th className={th}></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -1079,17 +1066,6 @@ export default function DailyRecordForm({
                         <td className={`${td} ${reason ? "text-[#a15c00]" : ""}`}>{reason}</td>
                         <td className={td}>{e.kirokusha}</td>
                         <td className={td}>{e.ijo}</td>
-                        {!locked && (
-                          <td className={`${td} text-center`}>
-                            <button
-                              onClick={() => setEntries((prev) => prev.filter((_, j) => j !== i))}
-                              className="rounded p-1 text-[#dc000c] hover:bg-[#fdecea]"
-                              aria-label="行を削除"
-                            >
-                              <X className="h-4 w-4" />
-                            </button>
-                          </td>
-                        )}
                       </tr>
                     );
                   })}

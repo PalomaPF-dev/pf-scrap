@@ -33,12 +33,26 @@ export function hasAiKey(): boolean {
 const PROMPT = `あなたは工場のスクラップ計量を支援します。写真に写っている「重量計（台はかり）の表示器」の数値を読み取ってください。
 
 必ず次のJSONだけを返してください。前後に説明文を付けないでください。
-{"value": 数値 or null, "digits": "表示されていた文字列", "unit": "kg" or "g" or null, "confidence": "high" or "medium" or "low", "note": "短い補足"}
+{"value": 数値 or null, "digits": "表示されていた文字列", "unit": "kg" or "g" or null, "decimalPoint": "visible" or "absent" or "unsure", "confidence": "high" or "medium" or "low", "note": "短い補足"}
 
-規則:
+■ 最重要: 小数点
+この表示器は 0.1kg 単位まで表示します。実際の運用で最も多い誤りは、
+**小数点を見落として 31.5 を 315 と読む（10倍になる）誤り**です。数字そのものが
+くっきり見えていても、小数点だけが薄く写ることがよくあります。
+- 数字を読む前に、まず「桁と桁の間の小数点」を探してください。7セグ表示の小数点は
+  数字の右下にある小さな点で、光の当たり方や角度で消えたように見えます。
+- 小数点が見えた → decimalPoint: "visible"、digits にも小数点を入れる（例 "31.5"）
+- 小数点が無いと確信できる → decimalPoint: "absent"
+- **どちらか判断できない → decimalPoint: "unsure" とし、value は必ず null にする**
+  （小数点の位置が違うと10倍間違うので、迷ったら読まないでください）
+- 小数点があるのに末尾が 0 のとき（例 "36.0"）も、必ず小数点を含めて digits に書く。
+
+■ そのほかの規則
 - value は kg に換算した数値。表示が g なら 1000 で割る。
-- 少しでも判読に迷う桁があるときは value を null にし、confidence を "low"、note に理由を書く。推測で数字を埋めないでください。
+- 小数点以外でも、少しでも判読に迷う桁があるときは value を null にし、
+  confidence を "low"、note に理由を書く。推測で数字を埋めないでください。
 - 表示器が写っていない、ピンボケ、光の反射で読めない場合も value は null。
+  その場合は note に「表示器が写っていません」など、撮り直しの助けになる理由を書く。
 - 数値以外の表示（ERR, ----, 0点表示など）は value を null にし、digits にその表示を入れる。
 - QRコードやラベルの文字は読まないでください。読むのは表示器の数値だけです。`;
 
@@ -99,6 +113,8 @@ export async function readScaleDisplay(
     };
   }
 
+  // 小数点の位置が確信できないまま数字だけ返してくることがある。ここで必ず落とす。
+  const decimalPoint = obj.decimalPoint;
   const unit = typeof obj.unit === "string" ? obj.unit.toLowerCase() : null;
   let value: number | null = null;
   if (typeof obj.value === "number" && Number.isFinite(obj.value)) {
@@ -107,15 +123,21 @@ export async function readScaleDisplay(
     value = Math.round(value * 1000) / 1000;
     if (value < 0) value = null;
   }
-  const confidence = toConfidence(obj.confidence);
+  let confidence = toConfidence(obj.confidence);
   // 確信度が low のものは採用しない。現場が気づかないまま誤った値が入るのを防ぐ。
   if (confidence === "low") value = null;
+  // 小数点が判断できていないなら、桁がくっきり見えていても採用しない（10倍間違いを防ぐ）
+  if (decimalPoint === "unsure") {
+    value = null;
+    confidence = "low";
+  }
 
+  const note = typeof obj.note === "string" ? obj.note.slice(0, 200) : "";
   return {
     value,
     digits: typeof obj.digits === "string" ? obj.digits.slice(0, 40) : "",
     confidence,
-    note: typeof obj.note === "string" ? obj.note.slice(0, 200) : "",
+    note: decimalPoint === "unsure" ? `小数点の位置が判別できません${note ? `（${note}）` : ""}` : note,
     model: MODEL,
   };
 }

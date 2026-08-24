@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 /**
  * POST /api/scale-read — 重量計の表示値をAIで読む。
  *
- * 受け取り: { image: "data:image/jpeg;base64,...", phase, scaleId?, qr?, recordDate?, factory? }
+ * 受け取り: { image: "data:image/jpeg;base64,...", phase, scaleId?, qr?, expected?, recordDate?, factory? }
  * 返し    : { readId, value, digits, confidence, note }
  *
  * 読んだ結果は value が null（読めなかった）でも必ずログに残す。あとで
@@ -20,6 +20,25 @@ export const dynamic = "force-dynamic";
 
 /** 画像は 5MB まで（携帯のカメラ1枚は圧縮後 1MB 未満に収まる）。 */
 const MAX_BYTES = 5 * 1024 * 1024;
+
+/** a が b とほぼ同じか（20%以内、最低1kgの余裕）。桁ズレの判定に使う。 */
+function near(a: number, b: number): boolean {
+  return Math.abs(a - b) <= Math.max(1, Math.abs(b) * 0.2);
+}
+
+/**
+ * 小数点の見落としは「10倍」「1/10」の誤りになり、しかも数字自体は鮮明なので
+ * AIは確信度を高く返してくる。実際に 31.5 を 315 と読む例が出ている。
+ *
+ * 投入前の表示値は、同じ箱の直前の投入後とほぼ一致するはず。そこで
+ * 「そのままでは合わないのに、小数点を1桁ずらすと合う」ときは、桁がずれたと
+ * みなして採用しない。プロンプトと違い、こちらは確実に効く。
+ */
+function looksShifted(value: number, expected: number): boolean {
+  if (!Number.isFinite(expected) || expected <= 0) return false;
+  if (near(value, expected)) return false;
+  return near(value / 10, expected) || near(value * 10, expected);
+}
 
 const ALLOWED = {
   "image/jpeg": true,
@@ -70,6 +89,9 @@ export async function POST(req: NextRequest) {
   }
 
   const phase = (body as Record<string, unknown>).phase === "after" ? "after" : "before";
+  // 直前の投入後の表示値（画面が持っている引き継ぎ値）。桁ズレの検出だけに使う。
+  const rawExpected = Number((body as Record<string, unknown>).expected);
+  const expected = Number.isFinite(rawExpected) && rawExpected > 0 ? rawExpected : null;
   const scaleId = String((body as Record<string, unknown>).scaleId ?? "").trim() || null;
   const rawDate = String((body as Record<string, unknown>).recordDate ?? "").trim();
   const recordDate = isDateStr(rawDate) ? rawDate : null;
@@ -98,26 +120,39 @@ export async function POST(req: NextRequest) {
 
   try {
     const result = await readScaleDisplay(img.base64, img.mediaType);
+
+    // 桁ズレの疑いがあれば採用しない。AIが読んだ値そのものはログに残すので、
+    // 「AIはこう読んだが桁がずれていた」という事実は後から追える。
+    let value = result.value;
+    let note = result.note;
+    let confidence = result.confidence;
+    if (value !== null && expected !== null && looksShifted(value, expected)) {
+      note = `小数点の位置が疑わしいため採用しませんでした（読取 ${value} kg / 直前の表示値 ${expected} kg）。表示器に近づいて撮り直すか、手入力してください。`;
+      value = null;
+      confidence = "low";
+    }
+
     const readId = await insertScaleRead(s.companyId, {
       recordDate,
       factory,
       scaleId: validScaleId,
       scaleName,
       phase,
+      // ログにはAIが読んだ値をそのまま残す（採用しなかった理由は note に入る）
       value: result.value,
       digits: result.digits,
       confidence: result.confidence,
-      note: result.note,
+      note,
       model: result.model,
       readBy: s.userName || s.loginId || "",
     });
     return NextResponse.json(
       {
         readId,
-        value: result.value,
+        value,
         digits: result.digits,
-        confidence: result.confidence,
-        note: result.note,
+        confidence,
+        note,
       },
       { headers: { "Cache-Control": "no-store" } }
     );

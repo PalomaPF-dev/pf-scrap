@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useCallback, useMemo, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   CheckCircle2,
@@ -247,6 +247,18 @@ export default function DailyRecordForm({
    * 選択中の箱の「次に入るはずの投入前の表示値」＝同じ箱の直前の投入後。
    * AI読取が主で、これは読めなかったときの手がかりと、読取値とのずれの確認に使う。
    */
+  /** QR値から重量計を引く。写真1枚目の「どの箱を撮ったか」の判定に使う。 */
+  const scaleByQr = useMemo(() => new Map(scales.map((s) => [s.qrCode, s])), [scales]);
+
+  /** 指定の箱の「直前の投入後の表示値」。桁ズレ（10倍）の検出に使う。 */
+  const lastCumAfterOf = useCallback(
+    (scaleId: string): number | null => {
+      const last = [...entries].reverse().find((e) => e.scaleId === scaleId && e.cumAfter !== "");
+      return last ? toNumOrNull(last.cumAfter) : null;
+    },
+    [entries]
+  );
+
   const autoCumBefore = useMemo(() => {
     if (!selectedScale) return "";
     const last = [...entries]
@@ -652,6 +664,11 @@ export default function DailyRecordForm({
               recordDate={date}
               factory={factory}
               scaleId={selectedScale?.id ?? null}
+              expectedFor={(qr) => {
+                // 撮った写真のQRで箱を決めてから、その箱の引き継ぎ値を返す
+                const target = (qr && scaleByQr.get(qr.trim())) || selectedScale;
+                return target ? lastCumAfterOf(target.id) : null;
+              }}
               needQr
               label="重量計を撮って読み取る"
               onResult={(r) => onPhoto("before", r)}
@@ -840,6 +857,7 @@ export default function DailyRecordForm({
               recordDate={date}
               factory={factory}
               scaleId={selectedScale?.id ?? null}
+              expectedFor={() => toNumOrNull(cumBefore)}
               needQr={false}
               label="投入後を撮って読み取る"
               disabled={!selectedScale || toNumOrNull(cumBefore) === null}

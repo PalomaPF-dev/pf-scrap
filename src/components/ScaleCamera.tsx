@@ -63,6 +63,7 @@ export default function ScaleCamera({
   recordDate,
   factory,
   scaleId,
+  expectedFor,
   needQr,
   label,
   disabled,
@@ -74,6 +75,14 @@ export default function ScaleCamera({
   factory: string;
   /** 既に箱が決まっているとき。ログに残す */
   scaleId?: string | null;
+  /**
+   * 写真から読めたQRを渡すと、その重量計の「直前の投入後の表示値」を返す関数。
+   * 小数点を見落とした「10倍」の読み取りを弾くためにサーバーへ送る。
+   *
+   * 関数で受けるのは、1枚目は撮る前にどの箱か分からないため。QRを解読してから
+   * 呼ぶことで、比較相手が「直前に選んでいた別の箱」になるのを防ぐ。
+   */
+  expectedFor?: (qr: string) => number | null;
   /** 同じ写真からQRも読むか（箱の選択を兼ねるとき true） */
   needQr: boolean;
   label: string;
@@ -127,11 +136,21 @@ export default function ScaleCamera({
     setBusy(true);
     try {
       const qr = needQr ? await decodeQr(dataUrl) : "";
+      // QRが分かってから、その箱の引き継ぎ値を取る
+      const expected = expectedFor ? expectedFor(qr) : null;
       const res = await fetch("/api/scale-read", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // qr も送る。箱が未選択の1枚目でも、ログにどの重量計かを残せるようにする
-        body: JSON.stringify({ image: dataUrl, phase, scaleId: scaleId ?? "", qr, recordDate, factory }),
+        body: JSON.stringify({
+          image: dataUrl,
+          phase,
+          scaleId: scaleId ?? "",
+          qr,
+          expected: expected ?? null,
+          recordDate,
+          factory,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {

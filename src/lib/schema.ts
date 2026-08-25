@@ -120,6 +120,15 @@ async function buildSchema(): Promise<void> {
   // 設備番号（重量計そのものの管理番号）。一覧・ラベルに出して現物と突き合わせる。
   await safeDdl(() => sql`ALTER TABLE scrap_scales ADD COLUMN IF NOT EXISTS equip_no TEXT NOT NULL DEFAULT ''`);
 
+  // AI読取の精度のための仕様（2026-08）。重量計の表示器パネルに印字されている値。
+  //   capacity = ひょう量（最大） / division = 目量（最小表示単位）
+  // 目量が 1kg の機種は小数点が出ないのに、AIが 704 を 70.4 と読む事象が出た。
+  // 逆に 0.1kg の機種では 31.5 を 315 と読む。機種ごとの刻みを持たせて、
+  // 読み取りの指示と、読み取り結果の妥当性判定の両方に使う。未登録は NULL で、
+  // その場合は何も仮定しない。
+  await safeDdl(() => sql`ALTER TABLE scrap_scales ADD COLUMN IF NOT EXISTS capacity NUMERIC`);
+  await safeDdl(() => sql`ALTER TABLE scrap_scales ADD COLUMN IF NOT EXISTS division NUMERIC`);
+
   // ① 日次記録票（日付×工場で1枚）。
   await safeDdl(() => sql`
     CREATE TABLE IF NOT EXISTS scrap_daily_records (

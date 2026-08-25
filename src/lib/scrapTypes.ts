@@ -200,6 +200,16 @@ export interface Scale {
   factory: string;
   sort: number;
   active: boolean;
+  /**
+   * ひょう量（最大） kg。表示器のパネルに印字されている値。
+   * これを超える読み取りは誤読として弾く。未登録は null。
+   */
+  capacity: number | null;
+  /**
+   * 目量（最小表示単位） kg。1 なら小数点なし、0.1 なら小数第1位まで。
+   * AIへの指示と、読み取り値の刻みの検証に使う。未登録は null。
+   */
+  division: number | null;
 }
 
 /** AI読取の確信度。low は採用せず、必ず手入力に落とす。 */

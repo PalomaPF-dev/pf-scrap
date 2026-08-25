@@ -344,6 +344,8 @@ function mapScale(r: any): Scale {
     factory: r.factory,
     sort: Number(r.sort) || 0,
     active: Boolean(r.active),
+    capacity: numOrNull(r.capacity),
+    division: numOrNull(r.division),
   };
 }
 
@@ -394,16 +396,23 @@ export async function upsertScale(
     await sql`
       UPDATE scrap_scales SET
         qr_code = ${s.qrCode}, equip_no = ${s.equipNo}, name = ${s.name}, kind = ${s.kind},
-        factory = ${s.factory}, sort = ${s.sort}, active = ${s.active}
+        factory = ${s.factory}, sort = ${s.sort}, active = ${s.active},
+        capacity = ${s.capacity}, division = ${s.division}
       WHERE company_id = ${companyId} AND id = ${s.id}`;
     return s.id;
   }
   const rows = await sql`
-    INSERT INTO scrap_scales (company_id, qr_code, equip_no, name, kind, factory, sort, active)
-    VALUES (${companyId}, ${s.qrCode}, ${s.equipNo}, ${s.name}, ${s.kind}, ${s.factory}, ${s.sort}, ${s.active})
+    INSERT INTO scrap_scales (
+      company_id, qr_code, equip_no, name, kind, factory, sort, active, capacity, division
+    )
+    VALUES (
+      ${companyId}, ${s.qrCode}, ${s.equipNo}, ${s.name}, ${s.kind}, ${s.factory},
+      ${s.sort}, ${s.active}, ${s.capacity}, ${s.division}
+    )
     ON CONFLICT (company_id, qr_code) DO UPDATE SET
       equip_no = EXCLUDED.equip_no, name = EXCLUDED.name, kind = EXCLUDED.kind,
-      factory = EXCLUDED.factory, sort = EXCLUDED.sort, active = EXCLUDED.active
+      factory = EXCLUDED.factory, sort = EXCLUDED.sort, active = EXCLUDED.active,
+      capacity = EXCLUDED.capacity, division = EXCLUDED.division
     RETURNING id`;
   return rows[0].id as string;
 }

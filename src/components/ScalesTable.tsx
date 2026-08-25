@@ -20,6 +20,10 @@ type Draft = {
   factory: string;
   sort: string;
   active: boolean;
+  /** ひょう量（最大） kg。表示器のパネルの印字。空欄可 */
+  capacity: string;
+  /** 目量（最小表示単位） kg。空欄可 */
+  division: string;
 };
 
 const emptyDraft = (factory: string): Draft => ({
@@ -31,6 +35,8 @@ const emptyDraft = (factory: string): Draft => ({
   factory,
   sort: "0",
   active: true,
+  capacity: "",
+  division: "",
 });
 
 /** QRコード値の自動生成（SCP- + 8桁英数）。 */
@@ -186,6 +192,8 @@ export default function ScalesTable({
                           factory: s.factory,
                           sort: String(s.sort),
                           active: s.active,
+                          capacity: s.capacity !== null ? String(s.capacity) : "",
+                          division: s.division !== null ? String(s.division) : "",
                         });
                       }}
                       className="rounded p-1 text-[#555555] hover:bg-[#f0f0ee]"
@@ -234,6 +242,44 @@ export default function ScalesTable({
                   placeholder="例: SC-001"
                 />
               </label>
+              {/*
+                AI読取は機種の刻みを知らないと桁を間違える。目量1kgの機種で
+                704 を 70.4 と読む、0.1kg の機種で 31.5 を 315 と読む、が実際に起きた。
+                表示器のパネルに印字されている値をそのまま入れてもらう。
+              */}
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1 text-xs text-[#707070]">
+                  ひょう量（最大）kg
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="1"
+                    min="0"
+                    value={draft.capacity}
+                    onChange={(e) => setDraft({ ...draft, capacity: e.target.value })}
+                    className={input}
+                    placeholder="例: 2000"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-[#707070]">
+                  目量（最小表示単位）kg
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="0.1"
+                    min="0"
+                    value={draft.division}
+                    onChange={(e) => setDraft({ ...draft, division: e.target.value })}
+                    className={input}
+                    placeholder="例: 1"
+                  />
+                </label>
+              </div>
+              <p className="-mt-1 text-xs text-[#909090]">
+                表示器のパネルに印字されている「ひょう量」「目量」です。入れておくと、
+                AI読取が桁を間違えたときに自動で弾けます（目量1kgなら小数点は出ない、など）。
+                分からなければ空欄で構いません。
+              </p>
               <label className="flex flex-col gap-1 text-xs text-[#707070]">
                 名称*（例: 上銅スクラップ箱①）
                 <input

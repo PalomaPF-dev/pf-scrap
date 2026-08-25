@@ -229,6 +229,12 @@ export async function deleteScrapKindAction(id: string): Promise<ActionResult> {
 
 // ===== 重量計（スクラップ箱）マスター（生産管理部・調達部のメンバーと管理者のみ） =====
 
+/** 正の数だけを受ける（未入力・0・負は null）。重量計の仕様欄で使う。 */
+function positiveOrNull(v: unknown): number | null {
+  const n = toNumOrNull(v);
+  return n !== null && n > 0 ? n : null;
+}
+
 export async function saveScaleAction(input: {
   id?: string | null;
   qrCode: string;
@@ -238,6 +244,10 @@ export async function saveScaleAction(input: {
   factory: string;
   sort: unknown;
   active: boolean;
+  /** ひょう量（最大） kg。表示器のパネルの印字。空欄可 */
+  capacity?: unknown;
+  /** 目量（最小表示単位） kg。空欄可 */
+  division?: unknown;
 }): Promise<ActionResult> {
   try {
     const s = await requireOperationsSession();
@@ -260,6 +270,9 @@ export async function saveScaleAction(input: {
       factory: asStr(input.factory, 50),
       sort: Math.trunc(toNum(input.sort)),
       active: Boolean(input.active),
+      // 未入力は null のまま（AI読取で何も仮定しない）。0や負の値は未入力と同じ扱い。
+      capacity: positiveOrNull(input.capacity),
+      division: positiveOrNull(input.division),
     });
     revalidatePath("/scales");
     revalidatePath("/daily");

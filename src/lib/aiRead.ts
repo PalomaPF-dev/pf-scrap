@@ -15,6 +15,14 @@ const MODEL = "claude-sonnet-5";
 
 export type ReadConfidence = "high" | "medium" | "low";
 
+/** 重量計マスターに登録された仕様。未登録は null で、その場合は何も仮定しない。 */
+export interface ScaleSpec {
+  /** ひょう量（最大） kg */
+  capacity: number | null;
+  /** 目量（最小表示単位） kg。1 なら小数点なし、0.1 なら小数第1位まで */
+  division: number | null;
+}
+
 export interface ScaleReadResult {
   /** 読み取れた重量 kg。読めなければ null（手入力に落とす） */
   value: number | null;
@@ -30,22 +38,39 @@ export function hasAiKey(): boolean {
   return Boolean((process.env.ANTHROPIC_API_KEY || "").trim());
 }
 
-const PROMPT = `あなたは工場のスクラップ計量を支援します。写真に写っている「重量計（台はかり）の表示器」の数値を読み取ってください。
+/**
+ * 読み取りの指示文。重量計の仕様（ひょう量・目量）が分かっていれば差し込む。
+ *
+ * 機種によって表示の刻みが違う（AD-4407A は 目量1kg で小数点が出ない）。
+ * 「小数点まで表示される」と決めつけると、無い小数点を作って 704 を 70.4 と
+ * 読んでしまう。逆に小数点を無視すると 31.5 を 315 と読む。どちらも実際に
+ * 起きたので、仕様が分からないときは**思い込みを一切与えない**。
+ */
+function buildPrompt(spec: ScaleSpec): string {
+  const rule = spec.division
+    ? Number.isInteger(spec.division)
+      ? `この重量計は ${spec.division} kg 単位で表示します。**小数点は表示されません。**` +
+        `小数点らしきものが見えても、それは汚れや反射です。数字だけを読んでください。`
+      : `この重量計は ${spec.division} kg 単位で表示します。小数点以下が必ず1桁出ます。`
+    : `表示の刻みは機種によって違います（1kg単位で小数点が出ない機種もあります）。` +
+      `**写真に写っているとおりに読んでください。**小数点が見えないなら整数、` +
+      `見えるならその位置のとおりに読みます。「たぶん小数点があるはず」と補わないでください。`;
+  const capacity = spec.capacity
+    ? `\nこの重量計のひょう量（最大）は ${spec.capacity} kg です。これを超える値になったら読み違えています。`
+    : "";
+
+  return `あなたは工場のスクラップ計量を支援します。写真に写っている「重量計（台はかり）の表示器」の数値を読み取ってください。
 
 必ず次のJSONだけを返してください。前後に説明文を付けないでください。
 {"value": 数値 or null, "digits": "表示されていた文字列", "unit": "kg" or "g" or null, "decimalPoint": "visible" or "absent" or "unsure", "confidence": "high" or "medium" or "low", "note": "短い補足"}
 
 ■ 最重要: 小数点
-この表示器は 0.1kg 単位まで表示します。実際の運用で最も多い誤りは、
-**小数点を見落として 31.5 を 315 と読む（10倍になる）誤り**です。数字そのものが
-くっきり見えていても、小数点だけが薄く写ることがよくあります。
-- 数字を読む前に、まず「桁と桁の間の小数点」を探してください。7セグ表示の小数点は
-  数字の右下にある小さな点で、光の当たり方や角度で消えたように見えます。
-- 小数点が見えた → decimalPoint: "visible"、digits にも小数点を入れる（例 "31.5"）
+${rule}${capacity}
+- digits には、表示されているとおりの文字列を入れてください（小数点があるなら含める）。
+- 小数点が見えた → decimalPoint: "visible"
 - 小数点が無いと確信できる → decimalPoint: "absent"
 - **どちらか判断できない → decimalPoint: "unsure" とし、value は必ず null にする**
-  （小数点の位置が違うと10倍間違うので、迷ったら読まないでください）
-- 小数点があるのに末尾が 0 のとき（例 "36.0"）も、必ず小数点を含めて digits に書く。
+  （小数点の位置を1桁間違えると10倍ずれるので、迷ったら読まないでください）
 
 ■ そのほかの規則
 - value は kg に換算した数値。表示が g なら 1000 で割る。
@@ -54,7 +79,9 @@ const PROMPT = `あなたは工場のスクラップ計量を支援します。�
 - 表示器が写っていない、ピンボケ、光の反射で読めない場合も value は null。
   その場合は note に「表示器が写っていません」など、撮り直しの助けになる理由を書く。
 - 数値以外の表示（ERR, ----, 0点表示など）は value を null にし、digits にその表示を入れる。
-- QRコードやラベルの文字は読まないでください。読むのは表示器の数値だけです。`;
+- QRコードやラベル、機器に貼られた仕様表示（ひょう量・目量など）は読まないでください。
+  読むのは表示器に光っている数値だけです。`;
+}
 
 /** JSONだけを返すよう指示しているが、前後に文字が付いても拾えるようにする。 */
 function parseJson(text: string): Record<string, unknown> | null {
@@ -81,7 +108,8 @@ function toConfidence(v: unknown): ReadConfidence {
  */
 export async function readScaleDisplay(
   base64: string,
-  mediaType: "image/jpeg" | "image/png" | "image/webp"
+  mediaType: "image/jpeg" | "image/png" | "image/webp",
+  spec: ScaleSpec = { capacity: null, division: null }
 ): Promise<ScaleReadResult> {
   const client = new Anthropic();
   const res = await client.messages.create({
@@ -92,7 +120,7 @@ export async function readScaleDisplay(
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-          { type: "text", text: PROMPT },
+          { type: "text", text: buildPrompt(spec) },
         ],
       },
     ],

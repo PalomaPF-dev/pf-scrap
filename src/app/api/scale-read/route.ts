@@ -119,13 +119,34 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await readScaleDisplay(img.base64, img.mediaType);
+    // 重量計の仕様（ひょう量・目量）が登録されていれば、それを前提に読ませる。
+    // 機種によって小数点が出る/出ないが違うので、決めつけないことが要点。
+    const spec = { capacity: scale?.capacity ?? null, division: scale?.division ?? null };
+    const result = await readScaleDisplay(img.base64, img.mediaType, spec);
 
     // 桁ズレの疑いがあれば採用しない。AIが読んだ値そのものはログに残すので、
     // 「AIはこう読んだが桁がずれていた」という事実は後から追える。
     let value = result.value;
     let note = result.note;
     let confidence = result.confidence;
+
+    // ひょう量を超える値は誤読。表示器のパネルに書かれている上限で機械的に弾く。
+    if (value !== null && spec.capacity !== null && value > spec.capacity) {
+      note = `ひょう量 ${spec.capacity} kg を超える ${value} kg と読めたため採用しませんでした。撮り直すか、手入力してください。`;
+      value = null;
+      confidence = "low";
+    }
+
+    // 目量に合わない端数も誤読（目量1kgの機種で 70.4 と読むなど）。
+    if (value !== null && spec.division !== null) {
+      const steps = value / spec.division;
+      if (Math.abs(steps - Math.round(steps)) > 1e-6) {
+        note = `この重量計は ${spec.division} kg 単位です。${value} kg は表示できない値なので採用しませんでした。撮り直すか、手入力してください。`;
+        value = null;
+        confidence = "low";
+      }
+    }
+
     if (value !== null && expected !== null && looksShifted(value, expected)) {
       note = `小数点の位置が疑わしいため採用しませんでした（読取 ${value} kg / 直前の表示値 ${expected} kg）。表示器に近づいて撮り直すか、手入力してください。`;
       value = null;

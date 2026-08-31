@@ -28,6 +28,7 @@ let schemaReady: Promise<void> | null = null;
  * - scrap_items           … 品目マスター（品目CD×格納場所CDで識別、子図番、構成/完成重量）
  * - scrap_daily_records   … 日次記録票（日付×工場で1枚）
  * - scrap_daily_entries   … 日中記録の明細（発生のたびに1行）
+ * - scrap_bags            … スクラップ袋（交換までを1区切り。明細の親）
  * - scrap_first_articles  … 初品の実測完成品重量
  * - scrap_mcframe_qty     … McFrame取込の完成品数量（年月×品目CD×格納場所CD）
  * - scrap_monthly_inputs  … 月初在庫・購入重量・スクラップ売却数量（年月で1行）
@@ -199,6 +200,62 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after_read_id UUID`);
   // 投入後の累積も訂正できるようにする（投入前と同じく、変えたときだけ理由が入る）。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after_reason TEXT NOT NULL DEFAULT ''`);
+
+  // ===== スクラップ袋（2026-08） =====
+  // 現場は総重量計に鉄カゴを載せ、その中の袋へ投入する。袋は破損防止のため
+  // 700〜800kg で交換し、交換すると（新しいカゴを載せて風袋引きするため）表示値は
+  // 0 に戻る。現場・記入用紙・引き取りの区切りはこの「袋」で、1日に何度も変わり、
+  // 夜勤帯の投入で翌日まで続くこともある。
+  //
+  // 日次記録票（日付×工場で1枚）はそのまま残し、明細の親として袋を持たせる。
+  // 重量はこれまでどおり明細から積み上げるので、束ね方が2通りになるだけ:
+  //   日合計   = その日の明細の合計（従来と変わらない）
+  //   袋の重量 = 締めの表示値 close_cum（風袋引きした 0 から積んだ値）
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_bags (
+      id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id        UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      factory           TEXT NOT NULL DEFAULT '',
+      -- 重量計マスターから消えても袋の記録は残す（あえて外部キーにしない）
+      scale_id          UUID,
+      scale_name        TEXT NOT NULL DEFAULT '',
+      kind              TEXT NOT NULL DEFAULT '',
+      -- 袋No。現場の記入用紙と同じ「日付 + その日の順番」。重量は締めたときに決まる
+      bag_no            TEXT NOT NULL DEFAULT '',
+      seq               INTEGER NOT NULL DEFAULT 1,
+      opened_on         DATE NOT NULL,
+      opened_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      opened_by         TEXT NOT NULL DEFAULT '',
+      -- 開始の表示値。風袋引きして 0 を確認してから投入するので通常は 0。
+      -- 使いかけの袋から記録を始めるときだけ、その時点の表示値が入る
+      start_cum         NUMERIC NOT NULL DEFAULT 0,
+      closed_on         DATE,
+      closed_at         TIMESTAMPTZ,
+      closed_by         TEXT NOT NULL DEFAULT '',
+      -- 交換直前（カゴを降ろす前）の表示値。「この袋は◯◯kgでした」の◯◯
+      close_cum         NUMERIC,
+      close_cum_read_id UUID,
+      close_cum_reason  TEXT NOT NULL DEFAULT '',
+      -- 締めた時点の明細合計。close_cum − start_cum との差が記録漏れ・読み違い
+      total_weight      NUMERIC,
+      -- open(記録中) → closed(締め済み・承認待ち) → approved(承認済み)
+      status            TEXT NOT NULL DEFAULT 'open',
+      approved_by       TEXT NOT NULL DEFAULT '',
+      approved_at       TIMESTAMPTZ,
+      note              TEXT NOT NULL DEFAULT '',
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_bags_company_idx ON scrap_bags(company_id, factory, opened_on DESC)`);
+  // 1台の重量計に「記録中」の袋は同時に1つだけ。二重に開くのは DB で防ぐ
+  // （2端末から同時に開始を押しても、あとから届いた側がエラーになる）。
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_bags_open_uidx ON scrap_bags(company_id, scale_id) WHERE status = 'open'`);
+  // 明細がどの袋に入ったか。導入前の明細は NULL のまま＝「袋管理より前の記録」
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS bag_id UUID`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_daily_entries_bag_idx ON scrap_daily_entries(bag_id)`);
+  // 交換の目安 kg。超えても記録は止めず、注意表示だけ出す（未入力は既定値を使う）
+  await safeDdl(() => sql`ALTER TABLE scrap_scales ADD COLUMN IF NOT EXISTS bag_target_kg NUMERIC`);
+
 
   // AI読取のログ。**追記のみ**で、書き込むのはサーバー（/api/scale-read）だけ。
   // クライアントからは更新も削除もできないため、「AIはこう読んだ」という事実が残る。

@@ -4,13 +4,16 @@ import { getUserAffiliation } from "@/lib/authDb";
 import {
   KUBUN_LIST,
   getDailyRecord,
+  listBagsForDate,
   listFactoryOptions,
+  listOpenBags,
   listScaleReads,
   listScales,
   listScrapKinds,
   type DailyRecord,
   type Scale,
   type ScaleRead,
+  type ScrapBag,
   type ScrapKind,
 } from "@/lib/db";
 import { dailyBomTotals, type DailyBom } from "@/lib/calc";
@@ -40,6 +43,8 @@ export default async function DailyPage({
   let scales: Scale[];
   let kinds: ScrapKind[];
   let reads: ScaleRead[];
+  let openBags: ScrapBag[];
+  let dayBags: ScrapBag[];
   let affiliation: string | null;
   let bom: DailyBom;
   try {
@@ -52,7 +57,7 @@ export default async function DailyPage({
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
     affiliation = await getUserAffiliation(session.userId);
-    [record, scales, kinds, reads, bom] = await Promise.all([
+    [record, scales, kinds, reads, openBags, dayBags, bom] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listScales(session.companyId, {
         factory: restriction.restricted ? restriction.factory : factory,
@@ -62,6 +67,10 @@ export default async function DailyPage({
       listScrapKinds(session.companyId),
       // AI読取の履歴（改ざん確認用）。記録を消しても読取の事実は残る
       listScaleReads(session.companyId, date, factory),
+      // 記録中の袋（重量計ごとに最大1つ）。投入はこの袋に入る
+      listOpenBags(session.companyId, factory),
+      // その日に関わった袋（記録中・締め済み・承認済み）。袋は日をまたぐ
+      listBagsForDate(session.companyId, factory, date),
       // McFrameの日別加工数 × 単品完成重量（初品実測を優先）＝ その日の完成品重量
       dailyBomTotals(session.companyId, date, factory),
     ]);
@@ -96,6 +105,8 @@ export default async function DailyPage({
         factoryLocked={factoryLocked}
         initial={record}
         scales={scales}
+        openBags={openBags}
+        dayBags={dayBags}
         kinds={kinds}
         userName={recorder}
         isAdmin={isAdmin}

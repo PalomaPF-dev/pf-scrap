@@ -10,6 +10,7 @@ import {
 } from "./session";
 import {
   addAdjustment,
+  clearBagStart,
   closeBag,
   correctBagClose,
   deleteAdjustment,
@@ -20,6 +21,7 @@ import {
   deleteScale,
   getBagById,
   getBagChainSeeds,
+  getBagStart,
   getDailyRecord,
   getDailyStatus,
   getItemById,
@@ -37,6 +39,7 @@ import {
   openBag,
   reopenBag,
   setBagApproval,
+  setBagStart,
   syncClosedBagTotals,
   upsertScrapKind,
   SCALE_KIND_LIST,
@@ -717,6 +720,15 @@ export async function openBagAction(input: {
         `「${scale.name}」にはすでに記録中の袋があります。交換するときは「袋を交換する」から締めてください。`
       );
     }
+    // 袋運用の開始日より前の日付には袋を作らない。
+    // その期間は従来どおり日単位の記録として残す（過去を袋で塗り替えない）。
+    const bagStart = await getBagStart(s.companyId, factory);
+    const effectiveStart = bagStart.startOn ?? todayStr();
+    if (input.date < effectiveStart) {
+      return fail(
+        `${effectiveStart} から袋単位の管理を始めています。それより前の ${input.date} は日単位の記録なので、袋は開けません。`
+      );
+    }
     const startCum = toNum(input.startCum);
     if (startCum < 0) return fail("開始の表示値は 0 以上で入力してください。");
     if (startCum === 0 && !input.taraOk) {
@@ -768,6 +780,9 @@ export async function closeBagAction(input: {
     const restriction = await getFactoryRestriction(s);
     if (restriction.restricted && bag.factory !== restriction.factory) {
       return fail(`所属工場（${restriction.factory}）の袋のみ締められます。`);
+    }
+    if (input.date < bag.openedOn) {
+      return fail(`袋 ${bag.bagNo} は ${bag.openedOn} に開いています。それより前の日付では締められません。`);
     }
     const closeCum = toNumOrNull(input.closeCum);
     if (closeCum === null) {
@@ -956,6 +971,48 @@ export async function reopenBagAction(bagId: string): Promise<ActionResult> {
     };
   } catch (e) {
     return fail(bagErrorMessage(e));
+  }
+}
+
+/**
+ * 袋運用の開始日を決める（生産管理部・調達部のメンバーと管理者）。
+ * この日から袋単位、それより前は従来どおり日単位の記録として扱う。
+ * 空文字を渡すと設定を消し、「最初に袋を開いた日」からの推定に戻る。
+ */
+export async function saveBagStartAction(input: {
+  factory: string;
+  startOn: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を選んでください。");
+    const startOn = asStr(input.startOn, 10);
+    if (!startOn) {
+      await clearBagStart(s.companyId, factory);
+      revalidatePath("/settings");
+      revalidatePath("/daily");
+      revalidatePath("/summary");
+      revalidatePath("/bags");
+      return { ok: true, message: `${factory} の開始日の設定を消しました（記録から推定します）。` };
+    }
+    if (!isDateStr(startOn)) return fail("開始日は年月日で入力してください。");
+    await setBagStart(
+      s.companyId,
+      factory,
+      startOn,
+      [await getUserAffiliation(s.userId), s.userName || s.loginId || ""].filter(Boolean).join(" ")
+    );
+    revalidatePath("/settings");
+    revalidatePath("/daily");
+    revalidatePath("/summary");
+    revalidatePath("/bags");
+    return {
+      ok: true,
+      message: `${factory} は ${startOn} から袋単位の管理になります（それより前は日単位の記録のままです）。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
   }
 }
 

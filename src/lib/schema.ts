@@ -29,6 +29,7 @@ let schemaReady: Promise<void> | null = null;
  * - scrap_daily_records   … 日次記録票（日付×工場で1枚）
  * - scrap_daily_entries   … 日中記録の明細（発生のたびに1行）
  * - scrap_bags            … スクラップ袋（交換までを1区切り。明細の親）
+ * - scrap_bag_starts      … 袋運用の開始日（工場ごと。これより前は日単位の管理）
  * - scrap_first_articles  … 初品の実測完成品重量
  * - scrap_mcframe_qty     … McFrame取込の完成品数量（年月×品目CD×格納場所CD）
  * - scrap_monthly_inputs  … 月初在庫・購入重量・スクラップ売却数量（年月で1行）
@@ -255,6 +256,21 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_daily_entries_bag_idx ON scrap_daily_entries(bag_id)`);
   // 交換の目安 kg。超えても記録は止めず、注意表示だけ出す（未入力は既定値を使う）
   await safeDdl(() => sql`ALTER TABLE scrap_scales ADD COLUMN IF NOT EXISTS bag_target_kg NUMERIC`);
+
+  // 袋運用の開始日（工場ごと）。この日から「袋単位」で管理し、それより前は
+  // 従来どおり日単位の記録として扱う（袋の操作は出さない・過去日に袋を作らせない）。
+  // 未設定でも、その工場で最初に袋を開いた日から袋運用とみなす（データから推定）。
+  // 設定はその推定を上書きするためのもの。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_bag_starts (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      factory    TEXT NOT NULL,
+      start_on   DATE NOT NULL,
+      updated_by TEXT NOT NULL DEFAULT '',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, factory)
+    )`);
 
 
   // AI読取のログ。**追記のみ**で、書き込むのはサーバー（/api/scale-read）だけ。

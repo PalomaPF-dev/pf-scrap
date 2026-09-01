@@ -174,6 +174,8 @@ export default function DailyRecordForm({
   scales,
   openBags,
   dayBags,
+  bagEra,
+  bagStartOn,
   kinds,
   userName,
   isAdmin,
@@ -188,6 +190,10 @@ export default function DailyRecordForm({
   openBags: ScrapBag[];
   /** その日に関わった袋（記録中・締め済み・承認済み） */
   dayBags: ScrapBag[];
+  /** この日が袋単位の管理の対象か（袋運用の開始日以降か） */
+  bagEra: boolean;
+  /** 袋運用の開始日 YYYY-MM-DD（表示用） */
+  bagStartOn: string;
   /** スクラップ種類（設定マスタ。並び順＝表示順・色の順） */
   kinds: ScrapKind[];
   userName: string;
@@ -270,8 +276,10 @@ export default function DailyRecordForm({
    */
   const bagOf = useCallback(
     (scaleId: string): ScrapBag | null =>
-      openBags.find((b) => b.scaleId === scaleId && b.openedOn <= date) ?? null,
-    [openBags, date]
+      bagEra
+        ? (openBags.find((b) => b.scaleId === scaleId && b.openedOn <= date) ?? null)
+        : null,
+    [openBags, date, bagEra]
   );
   const currentBag = selectedScale ? bagOf(selectedScale.id) : null;
 
@@ -387,6 +395,9 @@ export default function DailyRecordForm({
     };
   }, [entries, savedCount, currentBag]);
 
+  /** 袋に紐づいていない投入の件数（袋運用の期間なら、袋を開く前に記録した分）。 */
+  const noBagCount = useMemo(() => entries.filter((e) => !e.bagId).length, [entries]);
+
   /** 明細に袋Noを出すための対応表（袋管理より前の明細は空欄になる）。 */
   const bagNoById = useMemo(
     () => new Map(dayBags.map((b) => [b.id, b.bagNo])),
@@ -498,7 +509,7 @@ export default function DailyRecordForm({
       setMessage({ ok: false, text: "投入先のスクラップ箱（重量計）を選択してください。" });
       return;
     }
-    if (!currentBag) {
+    if (bagEra && !currentBag) {
       setMessage({
         ok: false,
         text: `「${selectedScale.name}」の袋が開いていません。新しいカゴと袋をセットして「袋を開始する」を押してください。`,
@@ -540,7 +551,7 @@ export default function DailyRecordForm({
         jikoku: nowTime(), // 時刻は記録した時間が自動で入る
         scaleId: selectedScale.id,
         scaleName: selectedScale.name,
-        bagId: currentBag.id,
+        bagId: currentBag?.id ?? null,
         kind: selectedScale.kind,
         // 新様式は表示値の差で出すので、投入前重量・箱重量は持たない
         gross: "",
@@ -743,7 +754,7 @@ export default function DailyRecordForm({
             いまの袋。袋は「開いてから交換するまで」が1区切りで、1日に何度も変わり、
             夜勤帯の投入で翌日まで続くこともある。袋が開いていないと投入は記録できない。
           */}
-          {selectedScale && (
+          {selectedScale && bagEra && (
             <ScrapBagPanel
               date={date}
               factory={factory}
@@ -1078,13 +1089,13 @@ export default function DailyRecordForm({
 
           <button
             onClick={addEntry}
-            disabled={pending || !currentBag}
+            disabled={pending || (bagEra && !currentBag)}
             className="mt-4 inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#b4632c] text-base font-semibold text-white hover:bg-[#96521f] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-6 sm:text-sm"
           >
             <Plus className="h-5 w-5" />
             投入完了として記録する
           </button>
-          {selectedScale && !currentBag && (
+          {selectedScale && bagEra && !currentBag && (
             <p className="mt-1.5 text-xs text-[#a15c00]">
               「{selectedScale.name}」の袋が開いていません。1の「袋を開始する」から始めてください。
             </p>
@@ -1201,8 +1212,23 @@ export default function DailyRecordForm({
         )}
       </section>
 
-      {/* 袋の記録（紙の記入用紙・Excelの1枚に対応する単位） */}
-      <ScrapBagList bags={dayBags} isAdmin={isAdmin} onMessage={setMessage} />
+      {/* 袋の記録（紙の記入用紙・Excelの1枚に対応する単位）。袋運用の期間だけ出す */}
+      {bagEra ? (
+        <>
+          {noBagCount > 0 && (
+            <p className="rounded-2xl border border-[#dc000c] bg-[#fdecea] px-4 py-3 text-sm text-[#dc000c]">
+              袋に紐づいていない投入が {noBagCount} 件あります。袋を開く前に記録した分です。
+              重量は当日合計に入っていますが、袋の重量には入りません。
+            </p>
+          )}
+          <ScrapBagList bags={dayBags} isAdmin={isAdmin} onMessage={setMessage} />
+        </>
+      ) : (
+        <section className="rounded-2xl border border-[#e5e5e5] bg-[#f7f7f5] p-4 text-sm text-[#707070] sm:p-5">
+          この日は袋単位の管理を始める前です（{bagStartOn} から袋単位）。
+          従来どおり日単位の記録として扱います。
+        </section>
+      )}
 
       {/* 【3】終礼集計（承認者はここで当日を承認する） */}
       <Step n={3} title="終礼集計">

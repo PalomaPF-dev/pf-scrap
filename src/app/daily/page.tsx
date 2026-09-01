@@ -4,6 +4,7 @@ import { getUserAffiliation } from "@/lib/authDb";
 import {
   KUBUN_LIST,
   getDailyRecord,
+  getBagStart,
   listBagsForDate,
   listFactoryOptions,
   listOpenBags,
@@ -45,6 +46,7 @@ export default async function DailyPage({
   let reads: ScaleRead[];
   let openBags: ScrapBag[];
   let dayBags: ScrapBag[];
+  let bagStartOn: string;
   let affiliation: string | null;
   let bom: DailyBom;
   try {
@@ -57,6 +59,10 @@ export default async function DailyPage({
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
     affiliation = await getUserAffiliation(session.userId);
+    // 袋運用の開始日。これより前の日は従来どおり日単位の記録として扱う。
+    // 設定が無ければ「最初に袋を開いた日」、袋がまだ無ければ今日から。
+    const bagStart = await getBagStart(session.companyId, factory);
+    bagStartOn = bagStart.startOn ?? todayStr();
     [record, scales, kinds, reads, openBags, dayBags, bom] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listScales(session.companyId, {
@@ -107,6 +113,8 @@ export default async function DailyPage({
         scales={scales}
         openBags={openBags}
         dayBags={dayBags}
+        bagEra={date >= bagStartOn}
+        bagStartOn={bagStartOn}
         kinds={kinds}
         userName={recorder}
         isAdmin={isAdmin}

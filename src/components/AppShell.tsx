@@ -14,6 +14,7 @@ import {
   Settings,
   LogOut,
   Mail,
+  PackageCheck,
 } from "lucide-react";
 import { AppShell as BaseAppShell, UserIdentity, type NavItem } from "@paloma-pf/ui";
 import type { SidebarUser } from "@/lib/sidebarUser";
@@ -22,6 +23,7 @@ import type { SidebarUser } from "@/lib/sidebarUser";
 const NAV_COMMON: NavItem[] = [
   { href: "/", label: "照合ダッシュボード", icon: LayoutDashboard },
   { href: "/daily", label: "日次記録", icon: ClipboardList },
+  { href: "/bags", label: "袋の記録", icon: PackageCheck },
   { href: "/summary", label: "月間集計", icon: BarChart3 },
   { href: "/first", label: "初品重量測定", icon: Scale },
 ];

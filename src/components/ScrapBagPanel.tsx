@@ -2,10 +2,11 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, PackageCheck, PackagePlus, Sparkles, Stamp, Undo2 } from "lucide-react";
+import { CheckCircle2, PackageCheck, PackagePlus, Pencil, Sparkles, Stamp, Undo2 } from "lucide-react";
 import {
   approveBagAction,
   closeBagAction,
+  correctBagCloseAction,
   openBagAction,
   reopenBagAction,
 } from "@/lib/actions";
@@ -481,22 +482,93 @@ export function ScrapBagList({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+  // 操作の結果はボタンのすぐそばにも出す。画面上部だけだと、一覧から押したときに
+  // 何が起きたのか（なぜ戻せないのか）が見えない。
+  const [msg, setMsg] = useState<PanelMessage | null>(null);
+  // 締め値の訂正フォーム（袋ごとに開く）
+  const [correct, setCorrect] = useState<{ bagId: string; value: string; reason: string } | null>(
+    null
+  );
 
-  function approve(bag: ScrapBag) {
+  function report(m: PanelMessage) {
+    setMsg(m);
+    onMessage(m);
+  }
+
+  function run(fn: () => Promise<{ ok: boolean; message?: string }>, after?: () => void) {
     startTransition(async () => {
-      const res = await approveBagAction(bag.id);
-      onMessage({ ok: res.ok, text: res.message ?? "" });
-      if (res.ok) router.refresh();
+      const res = await fn();
+      report({ ok: res.ok, text: res.message ?? "" });
+      if (res.ok) {
+        after?.();
+        router.refresh();
+      }
     });
   }
 
-  function reopen(bag: ScrapBag) {
-    startTransition(async () => {
-      const res = await reopenBagAction(bag.id);
-      onMessage({ ok: res.ok, text: res.message ?? "" });
-      if (res.ok) router.refresh();
+  const approve = (bag: ScrapBag) => run(() => approveBagAction(bag.id));
+  const reopen = (bag: ScrapBag) => run(() => reopenBagAction(bag.id));
+  const startCorrect = (bag: ScrapBag) => {
+    setMsg(null);
+    setCorrect({
+      bagId: bag.id,
+      value: bag.closeCum !== null ? String(bag.closeCum) : "",
+      reason: "",
     });
+  };
+  const saveCorrect = () => {
+    if (!correct) return;
+    run(
+      () =>
+        correctBagCloseAction({
+          bagId: correct.bagId,
+          closeCum: correct.value,
+          reason: correct.reason,
+        }),
+      () => setCorrect(null)
+    );
+  };
+
+  /** 管理者用の操作ボタン（締め済み・承認済みの袋に出る）。 */
+  function AdminActions({ bag, compact }: { bag: ScrapBag; compact?: boolean }) {
+    if (!isAdmin || bag.status === "open") return null;
+    // モバイルは2列のグリッドに並べる。3つを横一列にすると文字が折り返して読めない。
+    const base = compact
+      ? "inline-flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[13px] font-semibold disabled:opacity-50"
+      : "rounded-md px-2 py-1 text-xs font-semibold disabled:opacity-50";
+    return (
+      <>
+        {bag.status === "closed" && (
+          <button
+            onClick={() => approve(bag)}
+            disabled={pending}
+            className={`${base} ${compact ? "col-span-2 bg-[#2f6b2f] text-white" : "mr-1 bg-[#2f6b2f] text-white"}`}
+          >
+            {compact && <Stamp className="h-4 w-4" />}
+            承認
+          </button>
+        )}
+        <button
+          onClick={() => startCorrect(bag)}
+          disabled={pending}
+          className={`${base} ${compact ? "border border-[#b4632c] text-[#b4632c]" : "mr-1 border border-[#b4632c] text-[#b4632c]"}`}
+        >
+          {compact && <Pencil className="h-4 w-4" />}
+          締め値を直す
+        </button>
+        <button
+          onClick={() => reopen(bag)}
+          disabled={pending}
+          className={`${base} ${compact ? "border border-[#dc000c] text-[#dc000c]" : "border border-[#dc000c] text-[#dc000c]"}`}
+        >
+          {compact && <Undo2 className="h-4 w-4" />}
+          記録中に戻す
+        </button>
+      </>
+    );
   }
+
+  const target = correct ? bags.find((b) => b.id === correct.bagId) : null;
 
   return (
     <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
@@ -506,6 +578,65 @@ export function ScrapBagList({
           袋の重量 = 交換直前の表示値 − 開始の表示値。締めた袋は管理者が承認します。
         </p>
       </div>
+
+      {msg && (
+        <p
+          className={`mb-3 rounded-lg px-3 py-2 text-sm ${
+            msg.ok ? "bg-[#eef4ee] text-[#2f6b2f]" : "bg-[#fdecea] text-[#dc000c]"
+          }`}
+        >
+          {msg.text}
+        </p>
+      )}
+
+      {/* 締め値の訂正。読み違い・撮り直しはここで直す（記録中に戻す必要はない） */}
+      {correct && target && (
+        <div className="mb-3 space-y-3 rounded-xl border border-[#b4632c] bg-[#faf6ef] p-3.5">
+          <p className="text-sm font-bold text-[#b4632c]">袋 {target.bagNo} の締め値を直す</p>
+          <p className="text-xs text-[#96521f]">
+            いまの締め値 {fmt(target.closeCum)} kg（この袋は {fmt(bagWeight(target))} kg）。
+            承認済みの袋は、直すと承認待ちに戻ります。
+          </p>
+          <label className="flex flex-col gap-1 text-xs text-[#707070]">
+            直したあとの表示値 kg
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.1"
+              min="0"
+              value={correct.value}
+              onChange={(e) => setCorrect({ ...correct, value: e.target.value })}
+              className={`${numInput} w-full sm:w-56`}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-[#707070]">
+            訂正理由（記録として残ります）
+            <input
+              type="text"
+              value={correct.reason}
+              onChange={(e) => setCorrect({ ...correct, reason: e.target.value })}
+              placeholder="例: 撮り直したら 320kg だった"
+              className={`${input} w-full`}
+            />
+          </label>
+          <div className="flex gap-2">
+            <button
+              onClick={saveCorrect}
+              disabled={pending}
+              className="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg bg-[#b4632c] px-4 text-sm font-semibold text-white hover:bg-[#96521f] disabled:opacity-50"
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              この内容で直す
+            </button>
+            <button
+              onClick={() => setCorrect(null)}
+              className="inline-flex h-11 items-center justify-center rounded-lg border border-[#e5e5e5] px-4 text-sm font-medium text-[#555555]"
+            >
+              やめる
+            </button>
+          </div>
+        </div>
+      )}
 
       {bags.length === 0 ? (
         <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
@@ -536,6 +667,9 @@ export function ScrapBagList({
                           <span className="text-[#dc000c]"> ／ 差 {fmt(gap)} kg</span>
                         )}
                       </div>
+                      {b.closeCumReason && (
+                        <div className="mt-0.5 text-xs text-[#a15c00]">訂正: {b.closeCumReason}</div>
+                      )}
                       {b.note && <div className="mt-0.5 text-xs text-[#a15c00]">{b.note}</div>}
                     </div>
                     <span className="shrink-0 text-lg font-bold tabular-nums">
@@ -543,25 +677,8 @@ export function ScrapBagList({
                     </span>
                   </div>
                   {isAdmin && b.status !== "open" && (
-                    <div className="mt-2 flex gap-2">
-                      {b.status === "closed" && (
-                        <button
-                          onClick={() => approve(b)}
-                          disabled={pending}
-                          className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#2f6b2f] text-sm font-semibold text-white disabled:opacity-50"
-                        >
-                          <Stamp className="h-4 w-4" />
-                          承認
-                        </button>
-                      )}
-                      <button
-                        onClick={() => reopen(b)}
-                        disabled={pending}
-                        className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#dc000c] text-sm font-semibold text-[#dc000c] disabled:opacity-50"
-                      >
-                        <Undo2 className="h-4 w-4" />
-                        締めを取り消す
-                      </button>
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <AdminActions bag={b} compact />
                     </div>
                   )}
                 </li>
@@ -584,7 +701,7 @@ export function ScrapBagList({
                   <th className={`${th} text-right`}>差</th>
                   <th className={th}>状態</th>
                   <th className={th}>備考</th>
-                  {isAdmin && <th className={th}>承認</th>}
+                  {isAdmin && <th className={th}>操作</th>}
                 </tr>
               </thead>
               <tbody>
@@ -612,27 +729,15 @@ export function ScrapBagList({
                           <span className="ml-1 text-xs text-[#707070]">{b.approvedBy}</span>
                         )}
                       </td>
-                      <td className={td}>{b.note}</td>
+                      <td className={td}>
+                        {b.closeCumReason && (
+                          <span className="text-[#a15c00]">訂正: {b.closeCumReason} </span>
+                        )}
+                        {b.note}
+                      </td>
                       {isAdmin && (
                         <td className={td}>
-                          {b.status === "closed" && (
-                            <button
-                              onClick={() => approve(b)}
-                              disabled={pending}
-                              className="mr-1 rounded-md bg-[#2f6b2f] px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
-                            >
-                              承認
-                            </button>
-                          )}
-                          {b.status !== "open" && (
-                            <button
-                              onClick={() => reopen(b)}
-                              disabled={pending}
-                              className="rounded-md border border-[#dc000c] px-2 py-1 text-xs font-semibold text-[#dc000c] disabled:opacity-50"
-                            >
-                              締め取消
-                            </button>
-                          )}
+                          <AdminActions bag={b} />
                         </td>
                       )}
                     </tr>

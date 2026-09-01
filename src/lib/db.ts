@@ -798,6 +798,48 @@ export async function setBagApproval(
   return rows.length > 0;
 }
 
+/**
+ * 締めの表示値を直す（管理者のみ）。袋は締めたままで数字だけ入れ直す。
+ * 交換のときに次の袋が開いているのが普通なので、記録中に戻さずに直せる経路が要る。
+ * 承認済みだった袋は承認待ちへ戻す（確認した数字と違うものを承認済みにしない）。
+ * AI読取のIDはそのまま残すので、「AIはこう読んだが、人がこう直した」は後から追える。
+ */
+export async function correctBagClose(
+  companyId: string,
+  id: string,
+  c: { closeCum: number; reason: string }
+): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE scrap_bags SET
+      close_cum = ${c.closeCum},
+      close_cum_reason = ${c.reason},
+      status = 'closed',
+      approved_by = '',
+      approved_at = NULL,
+      updated_at = NOW()
+    WHERE company_id = ${companyId} AND id = ${id} AND status <> 'open'
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+/**
+ * 投入が1件も無い袋を消す。交換のときに自動で開いた次の袋を、締め取消で
+ * 巻き戻すために使う（1台の重量計に記録中の袋は1つしか置けないため）。
+ * 投入が入っている袋は消さない。
+ */
+export async function deleteEmptyBag(companyId: string, id: string): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    DELETE FROM scrap_bags
+    WHERE company_id = ${companyId} AND id = ${id} AND status = 'open'
+      AND NOT EXISTS (SELECT 1 FROM scrap_daily_entries e WHERE e.bag_id = scrap_bags.id)
+    RETURNING id`;
+  return rows.length > 0;
+}
+
 /** 締め済みの袋を記録中へ戻す（締め値の入れ直し。管理者のみ）。 */
 export async function reopenBag(companyId: string, id: string): Promise<boolean> {
   await ensureSchema();

@@ -11,7 +11,9 @@ import {
 import {
   addAdjustment,
   closeBag,
+  correctBagClose,
   deleteAdjustment,
+  deleteEmptyBag,
   deleteDailyRecord,
   deleteFirstArticle,
   deleteItem,
@@ -867,8 +869,55 @@ export async function approveBagAction(bagId: string): Promise<ActionResult> {
 }
 
 /**
- * 締めの取り消し（管理者のみ）。締め値を入れ直せるよう記録中へ戻す。
- * 同じ重量計で次の袋が既に開いていれば戻せない（袋が二重になるため）。
+ * 締めの表示値を直す（管理者のみ）。袋は締めたまま数字だけ入れ直す。
+ * 交換すると次の袋が開くので、記録中に戻さずに直せる経路が要る
+ * （読み違い・撮り直しの訂正はこちらが本筋）。
+ */
+export async function correctBagCloseAction(input: {
+  bagId: string;
+  closeCum: unknown;
+  reason: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const bag = await getBagById(s.companyId, asStr(input.bagId, 50));
+    if (!bag) return fail("袋が見つかりません。");
+    if (bag.status === "open") {
+      return fail("この袋は記録中です。締めるときに表示値を入力してください。");
+    }
+    const closeCum = toNumOrNull(input.closeCum);
+    if (closeCum === null) return fail("直したあとの表示値を入力してください。");
+    if (closeCum < bag.startCum) {
+      return fail(
+        `表示値（${closeCum} kg）が、この袋の開始の表示値（${bag.startCum} kg）より小さくなっています。`
+      );
+    }
+    const reason = asStr(input.reason, 200);
+    if (!reason) return fail("訂正理由を入力してください（記録として残ります）。");
+    const ok = await correctBagClose(s.companyId, bag.id, { closeCum, reason });
+    if (!ok) return fail("締め値を直せませんでした。画面を再読み込みしてください。");
+    const weight = Math.round((closeCum - bag.startCum) * 1000) / 1000;
+    revalidatePath("/daily");
+    revalidatePath("/");
+    return {
+      ok: true,
+      message:
+        `袋 ${bag.bagNo} の締め値を ${closeCum.toFixed(1)} kg に直しました` +
+        `（この袋は ${weight.toFixed(1)} kg）。` +
+        (bag.status === "approved" ? " 数字が変わったので承認待ちに戻しました。" : ""),
+    };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/**
+ * 締めの取り消し（管理者のみ）。締めたのが間違いだった袋を記録中へ戻し、
+ * 続けてその袋に投入できるようにする。
+ *
+ * 交換のときは次の袋が自動で開くので、そのままでは「1台の重量計に記録中の袋は1つ」に
+ * 引っかかって戻せない。次の袋にまだ投入が1件も無ければ、交換で開いただけの袋なので
+ * 消してから戻す。すでに投入があるなら戻せないので、締め値の訂正へ案内する。
  */
 export async function reopenBagAction(bagId: string): Promise<ActionResult> {
   try {
@@ -876,12 +925,34 @@ export async function reopenBagAction(bagId: string): Promise<ActionResult> {
     const bag = await getBagById(s.companyId, asStr(bagId, 50));
     if (!bag) return fail("袋が見つかりません。");
     if (bag.status === "open") return fail("この袋は記録中です。");
+
+    let removed = "";
+    if (bag.scaleId) {
+      const open = (await listOpenBags(s.companyId, bag.factory)).find(
+        (b) => b.scaleId === bag.scaleId
+      );
+      if (open) {
+        if (open.entryCount > 0) {
+          return fail(
+            `次の袋 ${open.bagNo} に投入が ${open.entryCount} 件記録されているため、記録中に戻せません（1台の重量計に記録中の袋は1つまで）。締め値の数字だけを直す場合は「締め値を直す」を使ってください。`
+          );
+        }
+        if (!(await deleteEmptyBag(s.companyId, open.id))) {
+          return fail("次の袋を戻せませんでした。画面を再読み込みしてください。");
+        }
+        removed = open.bagNo;
+      }
+    }
+
     const ok = await reopenBag(s.companyId, bag.id);
     if (!ok) return fail("締めを取り消せませんでした。画面を再読み込みしてください。");
     revalidatePath("/daily");
+    revalidatePath("/");
     return {
       ok: true,
-      message: `袋 ${bag.bagNo} の締めを取り消しました。締め値を入れ直してください。`,
+      message:
+        `袋 ${bag.bagNo} を記録中に戻しました。` +
+        (removed ? `交換で開いた袋 ${removed}（投入なし）は取り消しました。` : ""),
     };
   } catch (e) {
     return fail(bagErrorMessage(e));

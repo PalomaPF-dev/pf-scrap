@@ -858,6 +858,157 @@ export async function reopenBag(companyId: string, id: string): Promise<boolean>
 }
 
 /**
+ * 袋運用の開始日。この日から「袋単位」で管理し、それより前は従来どおり日単位。
+ *   setting  … 設定画面で決めた日
+ *   firstBag … 設定が無いので、その工場で最初に袋を開いた日から袋運用とみなす
+ *   none     … 設定も袋も無い（＝まだ袋運用を始めていない）
+ * none のときは呼び出し側が「今日から」として扱う（過去日に袋を作らせないため）。
+ */
+export interface BagStart {
+  factory: string;
+  startOn: string | null;
+  source: "setting" | "firstBag" | "none";
+  updatedBy: string;
+}
+
+export async function getBagStart(companyId: string, factory: string): Promise<BagStart> {
+  await ensureSchema();
+  const sql = getSql();
+  const setting = await sql`
+    SELECT start_on, updated_by FROM scrap_bag_starts
+    WHERE company_id = ${companyId} AND factory = ${factory} LIMIT 1`;
+  if (setting[0]) {
+    return {
+      factory,
+      startOn: dateStr(setting[0].start_on),
+      source: "setting",
+      updatedBy: setting[0].updated_by ?? "",
+    };
+  }
+  const first = await sql`
+    SELECT MIN(opened_on) AS d FROM scrap_bags
+    WHERE company_id = ${companyId} AND factory = ${factory}`;
+  const d = first[0]?.d;
+  return d
+    ? { factory, startOn: dateStr(d), source: "firstBag", updatedBy: "" }
+    : { factory, startOn: null, source: "none", updatedBy: "" };
+}
+
+/** 工場ごとの袋運用の開始日（設定画面用）。設定が無い工場は推定値を返す。 */
+export async function listBagStarts(companyId: string, factories: string[]): Promise<BagStart[]> {
+  const out: BagStart[] = [];
+  for (const f of factories) out.push(await getBagStart(companyId, f));
+  return out;
+}
+
+export async function setBagStart(
+  companyId: string,
+  factory: string,
+  startOn: string,
+  updatedBy: string
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`
+    INSERT INTO scrap_bag_starts (company_id, factory, start_on, updated_by)
+    VALUES (${companyId}, ${factory}, ${startOn}, ${updatedBy})
+    ON CONFLICT (company_id, factory) DO UPDATE SET
+      start_on = EXCLUDED.start_on, updated_by = EXCLUDED.updated_by, updated_at = NOW()`;
+}
+
+/** 袋運用の開始日の設定を消す（推定値に戻す）。 */
+export async function clearBagStart(companyId: string, factory: string): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`DELETE FROM scrap_bag_starts WHERE company_id = ${companyId} AND factory = ${factory}`;
+}
+
+/**
+ * 月ごとの袋の一覧。締めた月（締める前は開いた月）で拾う。
+ * 紙の記入用紙・Excelの1枚に対応する単位なので、これが袋運用の台帳になる。
+ */
+export async function listBagsByMonth(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<ScrapBag[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT b.*,
+           COALESCE(a.total, 0) AS running_total,
+           COALESCE(a.cnt, 0)   AS entry_count,
+           a.last_cum
+    FROM scrap_bags b
+    LEFT JOIN LATERAL (
+      SELECT SUM(e.weight) AS total, COUNT(*) AS cnt,
+             (SELECT e2.cum_after
+                FROM scrap_daily_entries e2
+                JOIN scrap_daily_records r2 ON r2.id = e2.record_id
+               WHERE e2.bag_id = b.id AND e2.cum_after IS NOT NULL
+               ORDER BY r2.record_date DESC, e2.sort DESC
+               LIMIT 1) AS last_cum
+        FROM scrap_daily_entries e
+       WHERE e.bag_id = b.id
+    ) a ON TRUE
+    WHERE b.company_id = ${companyId}
+      AND to_char(COALESCE(b.closed_on, b.opened_on), 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR b.factory = ${factory})
+    ORDER BY COALESCE(b.closed_on, b.opened_on), b.opened_at`;
+  return rows.map(mapBag);
+}
+
+/** 袋に入った投入の明細（袋別CSV用）。袋Noを各行に付けて出す。 */
+export interface BagEntryRow {
+  bagNo: string;
+  bagStatus: BagStatus;
+  factory: string;
+  scaleName: string;
+  recordDate: string;
+  jikoku: string;
+  hinshu: string;
+  cumBefore: number | null;
+  cumAfter: number | null;
+  weight: number;
+  kirokusha: string;
+  ijo: string;
+}
+
+export async function listBagEntriesByMonth(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<BagEntryRow[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT b.bag_no, b.status, b.factory, b.scale_name,
+           r.record_date, e.jikoku, e.hinshu, e.cum_before, e.cum_after, e.weight,
+           e.kirokusha, e.ijo
+    FROM scrap_bags b
+    JOIN scrap_daily_entries e ON e.bag_id = b.id
+    JOIN scrap_daily_records r ON r.id = e.record_id
+    WHERE b.company_id = ${companyId}
+      AND to_char(COALESCE(b.closed_on, b.opened_on), 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR b.factory = ${factory})
+    ORDER BY COALESCE(b.closed_on, b.opened_on), b.opened_at, r.record_date, e.sort`;
+  return rows.map((r: any) => ({
+    bagNo: r.bag_no ?? "",
+    bagStatus: (r.status ?? "open") as BagStatus,
+    factory: r.factory ?? "",
+    scaleName: r.scale_name ?? "",
+    recordDate: dateStr(r.record_date),
+    jikoku: r.jikoku ?? "",
+    hinshu: r.hinshu ?? "",
+    cumBefore: numOrNull(r.cum_before),
+    cumAfter: numOrNull(r.cum_after),
+    weight: num(r.weight),
+    kirokusha: r.kirokusha ?? "",
+    ijo: r.ijo ?? "",
+  }));
+}
+
+/**
  * 袋の「次に入るはずの投入前の表示値」。いま編集している記録票を除いた
  * 最後の投入後を返す（日をまたいだ袋は前日の最後がこれに当たる）。
  * 記録票の明細は保存のたびに全置換されるので、自分自身は必ず除く。
@@ -1132,6 +1283,10 @@ export interface DailyAggRow {
   /** 種類名 → 合計kg。種類は設定で増やせるので固定の列は持たない */
   byKind: Record<string, number>;
   ijoCount: number;
+  /** その日に投入が入った袋の数 */
+  bagCount: number;
+  /** 袋に紐づいていない投入の数（袋運用の期間なら開き忘れ） */
+  noBagCount: number;
 }
 
 /** JSONB の {種類名: 重量} を Record<string, number> に正規化。 */
@@ -1179,7 +1334,11 @@ export async function listDailyAgg(
         (SELECT jsonb_object_agg(p.hinshu, p.w) FROM per_kind p WHERE p.rid = r.id),
         '{}'::jsonb
       ) AS by_kind,
-      COUNT(*) FILTER (WHERE e.ijo <> '') AS ijo_count
+      COUNT(*) FILTER (WHERE e.ijo <> '') AS ijo_count,
+      -- その日に投入が入った袋の数と、袋に紐づいていない投入の数。
+      -- 袋運用の期間なのに「袋なし」があれば、袋を開き忘れて記録している。
+      COUNT(DISTINCT e.bag_id) AS bag_count,
+      COUNT(e.id) FILTER (WHERE e.bag_id IS NULL) AS no_bag_count
     FROM scrap_daily_records r
     LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
     WHERE r.company_id = ${companyId}
@@ -1199,6 +1358,8 @@ export async function listDailyAgg(
     total: num(r.total),
     byKind: mapByKind(r.by_kind),
     ijoCount: Number(r.ijo_count) || 0,
+    bagCount: Number(r.bag_count) || 0,
+    noBagCount: Number(r.no_bag_count) || 0,
   }));
 }
 
@@ -1774,13 +1935,16 @@ export async function listFactoryOptions(companyId: string): Promise<string[]> {
     ORDER BY sort ASC, name ASC`;
   const names: string[] = rows.map((r: any) => String(r.name));
   // ポータル未配信の工場でも、実データがあれば切替先に出す
-  // （過去データを取り込んだだけの工場が選べなくなるのを防ぐ）。
+  // （過去データを取り込んだだけの工場や、重量計を登録しただけの工場が
+  //   選べなくなるのを防ぐ）。
   const used = await sql`
     SELECT DISTINCT factory FROM (
       SELECT factory FROM scrap_daily_records WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_monthly_inputs WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_procure_days WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_items WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM scrap_scales WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM scrap_bags WHERE company_id = ${companyId}
     ) t WHERE factory <> '' ORDER BY factory`;
   for (const u of used) {
     const name = String(u.factory);

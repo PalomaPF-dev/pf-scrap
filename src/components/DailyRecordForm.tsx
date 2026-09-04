@@ -31,7 +31,11 @@ import {
 import { fmt, fmtPct, toNum, toNumOrNull } from "@/lib/format";
 import DateNav from "@/components/DateNav";
 import ScaleCamera from "@/components/ScaleCamera";
-import ScrapBagPanel, { ScrapBagList } from "@/components/ScrapBagPanel";
+import ScrapBagPanel, {
+  ResultBanner,
+  ScrapBagList,
+  type PanelMessage,
+} from "@/components/ScrapBagPanel";
 
 /** 明細行のドラフト（入力値は文字列で保持し、表示時に計算） */
 type EntryDraft = {
@@ -235,16 +239,15 @@ export default function DailyRecordForm({
   );
   const [tonyuKanryo, setTonyuKanryo] = useState(initial?.tonyuKanryo ?? false);
   const [biko, setBiko] = useState(initial?.biko ?? "");
-  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [message, setMessage] = useState<PanelMessage | null>(null);
   // どこまで保存したか。行の削除は無いので「先頭から savedCount 件までが保存済み」。
   // 締めの合計は保存済みの明細から出すため、未保存があるうちは袋を締めさせない。
   const [savedCount, setSavedCount] = useState(initial?.entries.length ?? 0);
-  // 読み取り・記録の結果は2でも3でも出るので、同じ見た目を両方に置く
-  const messageBanner = message ? (
-    <p className={`mt-2 text-sm ${message.ok ? "text-[#2f6b2f]" : "text-[#dc000c]"}`}>
-      {message.text}
-    </p>
-  ) : null;
+  // 読み取り・記録の結果は2でも3でも出るので、同じ見た目を両方に置く。
+  // 小さな文字だと見落とすため（現場から報告あり）、見出しつきの枠で大きく出す。
+  const messageBanner = message ? <ResultBanner msg={message} className="mt-3" /> : null;
+  // 終礼集計の入力（責任者・回収箱測定値・備考など）を触ったか。保存ボタンの強調に使う
+  const [fieldsDirty, setFieldsDirty] = useState(false);
 
   // ===== 箱（重量計）選択 =====
   const [selectedScale, setSelectedScale] = useState<Scale | null>(null);
@@ -395,6 +398,10 @@ export default function DailyRecordForm({
     };
   }, [entries, savedCount, currentBag]);
 
+  /** まだ保存できていない投入の件数と、未保存かどうか（保存ボタンの見た目に使う）。 */
+  const unsavedCount = Math.max(0, entries.length - savedCount);
+  const unsaved = unsavedCount > 0 || fieldsDirty;
+
   /** 袋に紐づいていない投入の件数（袋運用の期間なら、袋を開く前に記録した分）。 */
   const noBagCount = useMemo(() => entries.filter((e) => !e.bagId).length, [entries]);
 
@@ -452,11 +459,15 @@ export default function DailyRecordForm({
         }
       }
       if (r.value === null) {
+        // 理由（note）には撮り直しの案内まで入っている。二重に付けると長くて読めない。
+        const note = r.note?.trim();
         setMessage({
           ok: false,
+          title: "読み取れませんでした",
           text:
-            (r.note ? `表示値を読み取れませんでした（${r.note}）。` : "表示値を読み取れませんでした。") +
-            "もう一度撮るか、手入力してください。",
+            note && note.includes("手入力")
+              ? note
+              : [note, "もう一度撮るか、手入力してください。"].filter(Boolean).join(" "),
         });
         // 読めなくても手入力できるよう、入力欄は開けておく
         if (phase === "before") setBeforeFix(true);
@@ -478,9 +489,12 @@ export default function DailyRecordForm({
       const where = phase === "before" ? "投入前" : "投入後";
       setMessage({
         ok: true,
+        title: `${where} ${fmt(r.value)} kg を読み取りました`,
         text:
-          `${scale ? `「${scale.name}」の` : ""}${where}の表示値 ${fmt(r.value)} kg を読み取りました。` +
-          (r.confidence === "medium" ? "（読み取りに少し自信がありません。値を確認してください）" : ""),
+          `${scale ? `「${scale.name}」の表示値です。` : ""}` +
+          (r.confidence === "medium"
+            ? "読み取りに少し自信がありません。値を確認してください。"
+            : ""),
       });
     });
   }
@@ -545,8 +559,9 @@ export default function DailyRecordForm({
       });
       return;
     }
-    setEntries((prev) => [
-      ...prev,
+    const weight = scrapWeight;
+    const next: EntryDraft[] = [
+      ...entries,
       {
         jikoku: nowTime(), // 時刻は記録した時間が自動で入る
         scaleId: selectedScale.id,
@@ -565,17 +580,38 @@ export default function DailyRecordForm({
         kirokusha: userName, // 記録者はログインユーザー
         ijo,
       },
-    ]);
+    ];
+    setEntries(next);
     // 次の投入に備えてクリア。投入前は今回の投入後が autoCumBefore として引き継がれる
     resetReading();
     setIjo("");
-    setMessage({
-      ok: true,
-      text: `${fmt(scrapWeight)} kg を記録しました。忘れずに保存してください。`,
+
+    // 記録したらそのまま保存する。以前は「記録する」→「保存」の2操作で、
+    // 同じ見た目のボタンが並んで押し間違いが起きていた。保存に失敗したときだけ
+    // 未保存として残り、画面下の「保存」で送り直せる。
+    setMessage({ ok: true, title: `${fmt(weight)} kg を記録しました`, text: "保存しています…" });
+    startTransition(async () => {
+      const res = await saveDailyRecordAction(buildPayload(next));
+      if (res.ok) {
+        setSavedCount(next.length);
+        setFieldsDirty(false);
+        setMessage({
+          ok: true,
+          title: `${fmt(weight)} kg を記録しました`,
+          text: "保存しました。次の投入に進めます。",
+        });
+        router.refresh();
+      } else {
+        setMessage({
+          ok: false,
+          title: "保存できませんでした",
+          text: `${res.message ?? ""} 記録は画面に残っています。画面下の「保存」でもう一度お試しください。`,
+        });
+      }
     });
   }
 
-  function buildPayload() {
+  function buildPayload(list: EntryDraft[] = entries) {
     return {
       recordDate: date,
       factory,
@@ -583,7 +619,7 @@ export default function DailyRecordForm({
       kaishuSokuteichi: kaishu,
       tonyuKanryo,
       biko,
-      entries: entries.map((e) => ({
+      entries: list.map((e) => ({
         jikoku: e.jikoku,
         hinshu: e.kind,
         scaleId: e.scaleId,
@@ -608,9 +644,14 @@ export default function DailyRecordForm({
     startTransition(async () => {
       const saving = entries.length;
       const res = await saveDailyRecordAction(buildPayload());
-      setMessage({ ok: res.ok, text: res.message ?? "" });
+      setMessage({
+        ok: res.ok,
+        title: res.ok ? "保存しました" : "保存できませんでした",
+        text: res.message ?? "",
+      });
       if (res.ok) {
         setSavedCount(saving);
+        setFieldsDirty(false);
         router.refresh();
       }
     });
@@ -650,8 +691,6 @@ export default function DailyRecordForm({
   /** 選択肢の表示名。設備番号があれば先頭に付けて現場の呼び名と一致させる */
   const scaleLabel = (s: Scale) => (s.equipNo ? `${s.equipNo}　${s.name}` : s.name);
 
-  const btnPrimary =
-    "inline-flex h-11 items-center justify-center gap-1.5 rounded-lg bg-[#b4632c] px-4 text-sm font-semibold text-white hover:bg-[#96521f] disabled:opacity-50";
   return (
     <div className="space-y-3 pb-24 sm:space-y-4 sm:pb-0">
       {/* 対象日・工場・状態 */}
@@ -687,7 +726,10 @@ export default function DailyRecordForm({
             <input
               type="text"
               value={sekininsha}
-              onChange={(e) => setSekininsha(e.target.value)}
+              onChange={(e) => {
+                setSekininsha(e.target.value);
+                setFieldsDirty(true);
+              }}
               className={input}
               placeholder={userName}
               disabled={locked}
@@ -1087,12 +1129,22 @@ export default function DailyRecordForm({
             />
           </label>
 
+          {/*
+            結果は記録ボタンの「上」に出す。下に置くと、画面下に固定した保存バーに
+            隠れて読み飛ばされる（現場から報告あり）。
+          */}
+          {messageBanner}
+
           <button
             onClick={addEntry}
             disabled={pending || (bagEra && !currentBag)}
-            className="mt-4 inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#b4632c] text-base font-semibold text-white hover:bg-[#96521f] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-6 sm:text-sm"
+            /*
+              この画面の主操作。読み取り（青・高さ12）と間違えないよう、オレンジの塗りは
+              このボタンだけにし、背を高く（16）して間隔も広く取る。
+            */
+            className="mt-6 inline-flex h-16 w-full items-center justify-center gap-2 rounded-2xl bg-[#b4632c] text-lg font-bold text-white shadow-sm hover:bg-[#96521f] disabled:opacity-50 sm:h-12 sm:w-auto sm:px-8 sm:text-base"
           >
-            <Plus className="h-5 w-5" />
+            <Plus className="h-6 w-6 sm:h-5 sm:w-5" />
             投入完了として記録する
           </button>
           {selectedScale && bagEra && !currentBag && (
@@ -1100,7 +1152,6 @@ export default function DailyRecordForm({
               「{selectedScale.name}」の袋が開いていません。1の「袋を開始する」から始めてください。
             </p>
           )}
-          {messageBanner}
         </Step>
       )}
 
@@ -1246,7 +1297,10 @@ export default function DailyRecordForm({
                 step="0.1"
                 min="0"
                 value={kaishu}
-                onChange={(e) => setKaishu(e.target.value)}
+                onChange={(e) => {
+                  setKaishu(e.target.value);
+                  setFieldsDirty(true);
+                }}
                 className={numInput}
                 disabled={locked}
               />
@@ -1266,7 +1320,10 @@ export default function DailyRecordForm({
             <input
               type="checkbox"
               checked={tonyuKanryo}
-              onChange={(e) => setTonyuKanryo(e.target.checked)}
+              onChange={(e) => {
+                setTonyuKanryo(e.target.checked);
+                setFieldsDirty(true);
+              }}
               className="h-5 w-5 accent-[#b4632c]"
               disabled={locked}
             />
@@ -1277,7 +1334,10 @@ export default function DailyRecordForm({
             <textarea
               rows={3}
               value={biko}
-              onChange={(e) => setBiko(e.target.value)}
+              onChange={(e) => {
+                setBiko(e.target.value);
+                setFieldsDirty(true);
+              }}
               className="rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-base focus:border-[#b4632c] focus:outline-none disabled:bg-[#f0f0ee] sm:text-sm"
               disabled={locked}
             />
@@ -1327,7 +1387,7 @@ export default function DailyRecordForm({
               </>
             ) : (
               <p className="text-xs text-[#707070]">
-                終礼時に承認者が確認して承認します。記録が済んだら「保存」してください。
+                終礼時に承認者が確認して承認します。投入は記録した時点で保存されています。
               </p>
             )}
           </div>
@@ -1338,12 +1398,29 @@ export default function DailyRecordForm({
       {!locked && (
         <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#e5e5e5] bg-white/95 p-3 backdrop-blur sm:static sm:z-auto sm:rounded-2xl sm:border sm:p-4">
           <div className="flex items-center gap-2">
-            <button onClick={save} disabled={pending} className={`${btnPrimary} flex-1 sm:flex-none`}>
-              <Save className="h-4 w-4" />
-              保存
+            {/*
+              記録すると自動で保存されるので、ふだんこのボタンは押さなくてよい。
+              未保存が残っているとき（保存に失敗した・終礼の欄を直した）だけ目立たせる。
+              いつもオレンジの塗りだと、記録ボタンと見分けがつかず押し間違いの元になる。
+            */}
+            <button
+              onClick={save}
+              disabled={pending}
+              className={`inline-flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg px-4 text-sm font-semibold disabled:opacity-50 sm:flex-none ${
+                unsaved
+                  ? "bg-[#b4632c] text-white hover:bg-[#96521f]"
+                  : "border border-[#cfcac3] bg-white text-[#555555] hover:bg-[#f7f7f5]"
+              }`}
+            >
+              {unsaved ? <Save className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
+              {unsaved
+                ? `保存${unsavedCount > 0 ? `（未保存 ${unsavedCount}件）` : ""}`
+                : "保存済み"}
             </button>
-            <span className="hidden text-xs text-[#909090] sm:inline">
-              投入を記録したら「保存」してください。終礼時に承認者が確認して当日を承認します。
+            <span className="text-xs text-[#909090]">
+              {unsaved
+                ? "未保存の入力があります。押して保存してください。"
+                : "記録すると自動で保存されます。"}
             </span>
           </div>
         </div>

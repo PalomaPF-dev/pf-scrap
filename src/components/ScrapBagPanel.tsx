@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, PackageCheck, PackagePlus, Pencil, Sparkles, Stamp, Undo2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, PackageCheck, PackagePlus, Pencil, Sparkles, Stamp, Undo2 } from "lucide-react";
 import {
   approveBagAction,
   closeBagAction,
@@ -28,7 +28,49 @@ const td = "border border-[#e5e5e5] px-2 py-1.5 whitespace-nowrap";
 const tdNum = `${td} text-right tabular-nums`;
 const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2 py-1.5 text-left font-semibold whitespace-nowrap";
 
-export type PanelMessage = { ok: boolean; text: string };
+/**
+ * 操作の結果。title は大きく太く、text はその下に添える。
+ * 現場から「赤の注意書きを見落としそうになる」と報告があったので、
+ * 結果は小さな文字ではなく、見出しのある枠で出す。
+ */
+export type PanelMessage = { ok: boolean; title?: string; text: string };
+
+/** 操作の結果を出す枠。成功は緑、失敗・注意は赤。読み飛ばせない大きさにする。 */
+export function ResultBanner({ msg, className = "" }: { msg: PanelMessage; className?: string }) {
+  const title = msg.title ?? msg.text;
+  const detail = msg.title ? msg.text : "";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`rounded-xl border-2 px-4 py-3 ${
+        msg.ok ? "border-[#2f6b2f] bg-[#eef4ee]" : "border-[#dc000c] bg-[#fdecea]"
+      } ${className}`}
+    >
+      <p
+        className={`flex items-start gap-2 text-lg font-bold leading-snug sm:text-base ${
+          msg.ok ? "text-[#2f6b2f]" : "text-[#dc000c]"
+        }`}
+      >
+        {msg.ok ? (
+          <CheckCircle2 className="mt-0.5 h-6 w-6 shrink-0" />
+        ) : (
+          <AlertTriangle className="mt-0.5 h-6 w-6 shrink-0" />
+        )}
+        <span>{title}</span>
+      </p>
+      {detail && (
+        <p
+          className={`mt-1.5 pl-8 text-base font-medium leading-snug sm:text-sm ${
+            msg.ok ? "text-[#2f6b2f]" : "text-[#b00010]"
+          }`}
+        >
+          {detail}
+        </p>
+      )}
+    </div>
+  );
+}
 
 /** 袋の状態バッジ。記録中＝進行中の色、締め済み＝承認待ち、承認済み＝確定。 */
 export function BagBadge({ bag }: { bag: ScrapBag }) {
@@ -579,15 +621,7 @@ export function ScrapBagList({
         </p>
       </div>
 
-      {msg && (
-        <p
-          className={`mb-3 rounded-lg px-3 py-2 text-sm ${
-            msg.ok ? "bg-[#eef4ee] text-[#2f6b2f]" : "bg-[#fdecea] text-[#dc000c]"
-          }`}
-        >
-          {msg.text}
-        </p>
-      )}
+      {msg && <ResultBanner msg={msg} className="mb-3" />}
 
       {/* 締め値の訂正。読み違い・撮り直しはここで直す（記録中に戻す必要はない） */}
       {correct && target && (

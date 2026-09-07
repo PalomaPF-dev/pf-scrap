@@ -48,7 +48,7 @@ export default async function McframePage({
       <div className="p-4 sm:p-6">
         <PageHeader
           title="McFrame取込"
-          description="品目マスターの「品目CD × 格納場所CD」単位で完成品数量（加工数）を日別に取り込みます。McFrameの製造実績をそのまま出力したCSV/Excelのほか、品目CD,格納場所CD,日付,加工数 の4列でも取り込めます（日付は 2026/8/5・2026-08-05 いずれも可）。同じ品目が同じ日に複数行あっても合計されます。月次の集計値は日別の合計で出るため、月次CSVの取込は日別データが無い過去期間の移行にだけ使います。"
+          description="品目マスターの「品目CD × 格納場所CD」単位で完成品数量（加工数）を日別に取り込みます。McFrameの製造実績をそのまま出力したファイル（.xlsx のまま／CSVどちらでも可。1行目が英語・2行目が日本語の2段見出しもそのまま）のほか、品目CD,格納場所CD,日付,加工数 の4列でも取り込めます（日付は 2026/8/5・2026-08-05 いずれも可）。工場ごとに分かれたファイルは1つずつ取り込んでください（格納場所CDで区別するため上書きされません）。同じ品目が同じ日に複数行あっても合計されます。月次の集計値は日別の合計で出るため、月次取込は日別データが無い過去期間の移行にだけ使います。"
           action={
             <>
               <McframeImportButton />
@@ -75,7 +75,7 @@ export default async function McframePage({
               この月は日別の加工数がありません。
               {rows.length > 0
                 ? "下の品目別集計は、過去データ移行で取り込んだ月次値を使っています。"
-                : "「CSV取込（日別）」から McFrameの製造実績、または 品目CD, 格納場所CD, 日付, 加工数 のCSVを取り込んでください。"}
+                : "「Excel/CSV取込（日別）」から McFrameの製造実績（.xlsx のままで可）、または 品目CD, 格納場所CD, 日付, 加工数 のファイルを取り込んでください。"}
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -148,7 +148,7 @@ export default async function McframePage({
                 {rows.length === 0 && (
                   <tr>
                     <td className={td} colSpan={10}>
-                      対象月の加工数データがありません。「CSV取込」から取り込んでください。
+                      対象月の加工数データがありません。「Excel/CSV取込（日別）」から取り込んでください。
                     </td>
                   </tr>
                 )}

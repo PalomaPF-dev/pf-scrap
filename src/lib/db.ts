@@ -548,17 +548,21 @@ export async function saveDailyRecord(
   await replaceDailyEntries(companyId, recordId, rec.entries);
 }
 
-/** 明細を全置換する（記録票の保存・取込で共通）。 */
+/**
+ * 明細を全置換する（記録票の保存・取込で共通）。
+ * 削除と挿入を1つのトランザクションにまとめる（途中で失敗して明細が消えたままにならない。
+ * Excel取込では1日に100件超の明細があるので、1本ずつ往復するより速い）。
+ */
 async function replaceDailyEntries(
   companyId: string,
   recordId: string,
   entries: DailyEntry[]
 ): Promise<void> {
   const sql = getSql();
-  await sql`DELETE FROM scrap_daily_entries WHERE record_id = ${recordId}`;
+  const queries = [sql`DELETE FROM scrap_daily_entries WHERE record_id = ${recordId}`];
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
-    await sql`
+    queries.push(sql`
       INSERT INTO scrap_daily_entries (
         company_id, record_id, jikoku, hinshu, scale_id, scale_name,
         gross_weight, tare_weight, weight, cum_before, cum_after,
@@ -572,8 +576,9 @@ async function replaceDailyEntries(
         ${e.cumBeforeReadId ?? null}, ${e.cumAfterReadId ?? null},
         ${e.kirokusha}, ${e.ijo},
         ${e.busho ?? ""}, ${e.kikai ?? ""}, ${e.zairyo ?? ""}, ${e.kotei ?? ""}, ${i}
-      )`;
+      )`);
   }
+  await sql.transaction(queries);
 }
 
 /**

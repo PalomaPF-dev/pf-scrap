@@ -6,11 +6,13 @@ import { AlertTriangle, FileSpreadsheet, Upload } from "lucide-react";
 import { importDailyExcelAction, type DailyImportResult } from "@/lib/actions";
 import {
   buildDailyImport,
+  commonZairyo,
   guessKind,
   guessYear,
   parseDailyExcelWorkbook,
   type DailyExcelFile,
   type DailyImportDay,
+  type KindMode,
 } from "@/lib/dailyExcel";
 import { readXlsx, type XlsxSheet } from "@/lib/xlsx";
 import { kindColor, type ScrapKind } from "@/lib/scrapTypes";
@@ -18,8 +20,13 @@ import { fmt } from "@/lib/format";
 
 interface LoadedFile {
   name: string;
-  /** 箱の種類（ファイル＝箱1つ）。シート名から見当をつけ、画面で直せる */
+  /**
+   * 箱の種類。kindMode=file ならブック全体（大口: 種類ごとのブック）、
+   * zairyo なら品種列が空の明細に使う既定値（直方: 部署ごとのブック）。
+   * シート名・品種列から見当をつけ、画面で直せる。
+   */
   kind: string;
+  kindMode: KindMode;
   sheets: XlsxSheet[];
   parsed: DailyExcelFile;
 }
@@ -57,6 +64,8 @@ export default function DailyExcelImport({
   const [year, setYear] = useState<number>(new Date().getFullYear());
   const [files, setFiles] = useState<LoadedFile[]>([]);
   const [mode, setMode] = useState<"skip" | "overwrite">("skip");
+  // Excelに責任者サインが無い日も承認済みにする（直方のブックはサイン欄がほぼ空）
+  const [approveAll, setApproveAll] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<DailyImportResult | null>(null);
@@ -64,7 +73,7 @@ export default function DailyExcelImport({
 
   const days: DailyImportDay[] = files.length
     ? buildDailyImport(
-        files.map((f) => ({ kind: f.kind, fileName: f.name, file: f.parsed })),
+        files.map((f) => ({ kind: f.kind, kindMode: f.kindMode, fileName: f.name, file: f.parsed })),
         { factory: target }
       )
     : [];
@@ -86,17 +95,22 @@ export default function DailyExcelImport({
         }
         const sheets = await readXlsx(await file.arrayBuffer());
         detectedYear = detectedYear ?? guessYear(sheets);
-        loaded.push({
-          name: file.name,
-          kind: guessKind(sheets.map((s) => s.name)),
-          sheets,
-          parsed: { sheets: [], skipped: [] },
-        });
+        loaded.push({ name: file.name, kind: "", kindMode: "file", sheets, parsed: { sheets: [], skipped: [] } });
       }
       // 年はブック内の日付セルから推定（入っていなければ今年）
       const base = detectedYear ?? new Date().getFullYear();
       setYear(base);
-      setFiles(loaded.map((f) => ({ ...f, parsed: parseDailyExcelWorkbook(f.sheets, base) })));
+      setFiles(
+        loaded.map((f) => {
+          const parsed = parseDailyExcelWorkbook(f.sheets, base);
+          // シート名に種類の語があるブック（大口）はブック全体で1つ。
+          // 無いブック（直方）は品種列から決め、いちばん多い品種を既定にする
+          const fileKind = guessKind(f.sheets.map((sh) => sh.name));
+          return fileKind
+            ? { ...f, parsed, kind: fileKind, kindMode: "file" as KindMode }
+            : { ...f, parsed, kind: commonZairyo(parsed), kindMode: "zairyo" as KindMode };
+        })
+      );
       setProgress("");
     } catch (e) {
       setFiles([]);
@@ -109,8 +123,8 @@ export default function DailyExcelImport({
     setFiles(nextFiles.map((f) => ({ ...f, parsed: parseDailyExcelWorkbook(f.sheets, nextYear) })));
   }
 
-  function setKind(index: number, kind: string) {
-    setFiles((prev) => prev.map((f, i) => (i === index ? { ...f, kind } : f)));
+  function setKind(index: number, patch: Partial<Pick<LoadedFile, "kind" | "kindMode">>) {
+    setFiles((prev) => prev.map((f, i) => (i === index ? { ...f, ...patch } : f)));
   }
 
   function run() {
@@ -140,6 +154,7 @@ export default function DailyExcelImport({
         const res = await importDailyExcelAction({
           factory: target,
           mode,
+          approveAll,
           days: chunk.map((d) => ({
             recordDate: d.recordDate,
             sekininsha: d.sekininsha,
@@ -255,27 +270,65 @@ export default function DailyExcelImport({
           <ul className="mt-3 space-y-2">
             {files.map((f, i) => (
               <li key={f.name + i} className="rounded-xl border border-[#e5e5e5] p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-[#333333]">{f.name}</span>
-                  <label className="flex items-center gap-1.5 text-xs text-[#707070]">
-                    箱の種類
-                    <input
-                      list="scrap-kind-options"
-                      value={f.kind}
-                      onChange={(e) => setKind(i, e.target.value)}
-                      placeholder="例: 上銅"
-                      className={`${input} w-40`}
-                    />
-                  </label>
-                </div>
+                <div className="text-sm font-medium text-[#333333]">{f.name}</div>
                 <p className="mt-1 text-xs text-[#707070]">
                   取込対象 {f.parsed.sheets.length}シート ／ 明細{" "}
                   {f.parsed.sheets.reduce((t, s) => t + s.entries.length, 0)}件 ／ 合計{" "}
                   {fmt(f.parsed.sheets.reduce((t, s) => t + s.total, 0))} kg
                 </p>
+                {/* 箱の種類の決め方。大口はブックごと、直方は品種列（銅条/銅管）とシート名の「下銅」 */}
+                <div className="mt-2 flex flex-col gap-1.5 text-sm">
+                  <label className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="radio"
+                      name={`kind-mode-${i}`}
+                      checked={f.kindMode === "file"}
+                      onChange={() => setKind(i, { kindMode: "file" })}
+                      className="h-4 w-4"
+                    />
+                    このブック全体で1つの種類
+                    <input
+                      list="scrap-kind-options"
+                      value={f.kindMode === "file" ? f.kind : ""}
+                      disabled={f.kindMode !== "file"}
+                      onChange={(e) => setKind(i, { kind: e.target.value })}
+                      placeholder="例: 上銅"
+                      className={`${input} w-36`}
+                    />
+                  </label>
+                  <label className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="radio"
+                      name={`kind-mode-${i}`}
+                      checked={f.kindMode === "zairyo"}
+                      onChange={() => setKind(i, { kindMode: "zairyo" })}
+                      className="h-4 w-4"
+                    />
+                    明細の「品種」列から（シート名に種類があればそれ。品種が空の行は
+                    <input
+                      list="scrap-kind-options"
+                      value={f.kindMode === "zairyo" ? f.kind : ""}
+                      disabled={f.kindMode !== "zairyo"}
+                      onChange={(e) => setKind(i, { kind: e.target.value })}
+                      placeholder="例: 銅条"
+                      className={`${input} w-36`}
+                    />
+                    ）
+                  </label>
+                </div>
                 {f.parsed.skipped.length > 0 && (
-                  <p className="mt-0.5 text-xs text-[#909090]">
-                    対象外（記録が無いシート）: {f.parsed.skipped.join("、")}
+                  <p className="mt-1.5 text-xs text-[#909090]">
+                    対象外:{" "}
+                    {f.parsed.skipped
+                      .map((sk) =>
+                        sk.entries > 0 ? `${sk.sheetName}（日付が読めません・明細${sk.entries}件）` : sk.sheetName
+                      )
+                      .join("、")}
+                  </p>
+                )}
+                {f.parsed.skipped.some((sk) => sk.entries > 0) && (
+                  <p className="mt-0.5 text-xs text-[#a15c00]">
+                    明細があるのに日付が読めないシートがあります。取り込むには、Excelでシート名に日付（例「9.8」）を入れて選び直してください。
                   </p>
                 )}
               </li>
@@ -288,7 +341,7 @@ export default function DailyExcelImport({
           ))}
         </datalist>
         <p className="mt-2 text-xs text-[#909090]">
-          種類マスタに無い種類を入れると、取込時に「設定 &gt; スクラップ種類」に追加されます。
+          種類マスタに無い種類（銅条・銅管・下銅 など）は、取込時に「設定 &gt; スクラップ種類」に追加されます。
           その種類の重量計が1台だけ登録されていれば、明細はその箱に紐づきます。
         </p>
       </section>
@@ -362,8 +415,8 @@ export default function DailyExcelImport({
             </table>
           </div>
           <p className="mt-2 text-xs text-[#909090]">
-            重量は「投入重量 − 箱重量」で取り込みます（投入前・投入後の表示値は、Excelの「累積」と同じく
-            箱ごとの積み上げで入ります）。Excelに責任者のサインがある日は承認済みとして取り込みます。
+            重量は「重量 − 箱重量」で取り込みます（投入前・投入後の表示値は、Excelの「累積」と同じく
+            種類ごとの積み上げで入ります）。回収箱測定値には大口の「回収箱測定値」、直方の「計量重量」が入ります。
           </p>
         </section>
       )}
@@ -391,6 +444,18 @@ export default function DailyExcelImport({
               />
               すでに記録がある日もExcelの内容で置き換える（承認済みの記録も置き換わります）
             </label>
+            <label className="mt-1 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={approveAll}
+                onChange={(e) => setApproveAll(e.target.checked)}
+                className="h-4 w-4"
+              />
+              Excelに責任者のサインが無い日も承認済みとして取り込む（承認者は取込者）
+            </label>
+            <p className="text-xs text-[#909090]">
+              サインがある日は常に承認済み（承認者はサインの名前）になります。チェックを外すと、サインが無い日は「下書き」のまま取り込みます。
+            </p>
           </div>
           <button
             onClick={run}

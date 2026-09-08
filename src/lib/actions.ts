@@ -1110,6 +1110,8 @@ const importFailed = (message: string): DailyImportResult => ({
 export async function importDailyExcelAction(input: {
   factory: string;
   mode: "skip" | "overwrite";
+  /** Excelに責任者サインが無い日も承認済みにする（承認者は取込者）。過去分の一括移行用 */
+  approveAll?: boolean;
   days: {
     recordDate: string;
     sekininsha?: string;
@@ -1230,8 +1232,14 @@ export async function importDailyExcelAction(input: {
         continue;
       }
 
-      // Excelで責任者がサインしている日は、その時点で承認された記録として扱う
+      // Excelで責任者がサインしている日は、その時点で承認された記録として扱う。
+      // サインが無い日は下書き。approveAll のときだけ取込者の承認として扱う
       const shonin = asStr(day.shonin, 50);
+      const approval = shonin
+        ? { status: "approved" as const, approvedBy: `${shonin}（Excel）` }
+        : input.approveAll
+          ? { status: "approved" as const, approvedBy: `${s.userName || s.loginId || ""}（Excel取込）` }
+          : { status: "draft" as const, approvedBy: "" };
       try {
         await importDailyRecord(
           s.companyId,
@@ -1249,9 +1257,7 @@ export async function importDailyExcelAction(input: {
             updatedBy: `${s.loginId ?? s.userName}（Excel取込）`,
             entries,
           },
-          shonin
-            ? { status: "approved", approvedBy: `${shonin}（Excel）` }
-            : { status: "draft", approvedBy: "" }
+          approval
         );
         imported.push(recordDate);
       } catch (e) {

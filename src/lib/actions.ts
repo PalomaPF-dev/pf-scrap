@@ -22,6 +22,8 @@ import {
   getScaleById,
   getScaleReads,
   getScaleByQr,
+  importDailyRecord,
+  listScales,
   countScrapKindUsage,
   deleteScrapKind,
   getScrapKindById,
@@ -485,6 +487,12 @@ export async function saveDailyRecordAction(input: {
         // 既存行は元の記録者をそのまま残す（誰が入れたかを後から書き換えない）。
         kirokusha: asStr(e.kirokusha, 120) || recorder,
         ijo: asStr(e.ijo),
+        // Excelから取り込んだ行が持つ発生元（部署・機械・品種・工程）。
+        // 新しい画面では入力しないが、編集して保存し直しても消えないように持ち回る。
+        busho: asStr(e.busho, 50),
+        kikai: asStr(e.kikai, 50),
+        zairyo: asStr(e.zairyo, 50),
+        kotei: asStr(e.kotei, 50),
       });
     }
     await saveDailyRecord(s.companyId, {
@@ -1064,5 +1072,209 @@ export async function importMonthlyCsvAction(
     return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行）` };
   } catch (e) {
     return fail((e as Error).message);
+  }
+}
+
+// ===== ① 日次記録: Excel（紙様式）の記録票の取込（生産管理部・調達部のメンバーと管理者のみ） =====
+
+/** 取込1回分の結果。日付ごとにどうなったかを画面に出す。 */
+export interface DailyImportResult {
+  ok: boolean;
+  message: string;
+  /** 取り込んだ日付 */
+  imported: string[];
+  /** 既に記録があるので飛ばした日付（上書きを選べば取り込める） */
+  skipped: string[];
+  failed: { date: string; message: string }[];
+  /** 取込のために新しく作った種類（設定 > スクラップ種類に追加される） */
+  createdKinds: string[];
+}
+
+const importFailed = (message: string): DailyImportResult => ({
+  ok: false,
+  message,
+  imported: [],
+  skipped: [],
+  failed: [],
+  createdKinds: [],
+});
+
+/**
+ * Excelの日次記録票（箱の種類ごとのブック）を、日付×工場の記録票として取り込む。
+ *
+ * - 明細の重量はサーバー側で計算し直す（投入重量−箱重量。片方しか無い行は送られてきた重量）
+ * - 累積（投入前/投入後）は箱ごとの積み上げで埋める（Excelの「累積」列と同じ考え方）
+ * - Excelに責任者のサインがある日は承認済みとして取り込む（承認者はサインの名前）
+ * - 既に記録がある日は既定で飛ばす。mode="overwrite" のときだけ置き換える
+ */
+export async function importDailyExcelAction(input: {
+  factory: string;
+  mode: "skip" | "overwrite";
+  days: {
+    recordDate: string;
+    sekininsha?: string;
+    shonin?: string;
+    tonyuKanryo?: boolean;
+    hakoZanryo?: unknown;
+    kaishuSokuteichi?: unknown;
+    biko?: string;
+    entries: Record<string, unknown>[];
+  }[];
+}): Promise<DailyImportResult> {
+  try {
+    const s = await requireOperationsSession();
+    const factory = asStr(input.factory, 50);
+    if (!factory) return importFailed("取込先の工場を選んでください。");
+    // 所属工場のあるユーザーは自工場にしか取り込めない（サーバー側で必ず防ぐ）
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return importFailed(`所属工場（${restriction.factory}）にのみ取り込めます。`);
+    }
+    const days = Array.isArray(input.days) ? input.days : [];
+    if (days.length === 0) return importFailed("取込データがありません。");
+    if (days.length > 40) return importFailed("一度に取込できるのは40日分までです。");
+
+    // 種類マスタに無い箱の種類（銅スクラップなど）は、取込のときに作る
+    const kinds = await listScrapKinds(s.companyId);
+    const kindNames = new Set(kinds.map((k) => k.name));
+    let nextSort = kinds.reduce((m, k) => Math.max(m, k.sort), 0);
+    const createdKinds: string[] = [];
+    for (const day of days) {
+      for (const e of day.entries ?? []) {
+        const kind = asStr(e.kind, 20);
+        if (!kind || kindNames.has(kind)) continue;
+        nextSort += 1;
+        await upsertScrapKind(s.companyId, { name: kind, sort: nextSort, active: true });
+        kindNames.add(kind);
+        createdKinds.push(kind);
+      }
+    }
+
+    // 箱（重量計）は、その種類の登録が1台だけのときに紐づける。
+    // 複数ある・未登録のときは種類だけ残す（後から画面で直せる）。
+    const scales = await listScales(s.companyId, { factory, activeOnly: true });
+    const scaleOfKind = new Map<string, Scale>();
+    for (const kind of kindNames) {
+      const hit = scales.filter((sc) => sc.kind === kind);
+      if (hit.length === 1) scaleOfKind.set(kind, hit[0]);
+    }
+
+    const imported: string[] = [];
+    const skipped: string[] = [];
+    const failed: { date: string; message: string }[] = [];
+
+    for (const day of days) {
+      const recordDate = normDateStr(day.recordDate);
+      if (!recordDate) {
+        failed.push({ date: asStr(day.recordDate, 20), message: "日付が読み取れません" });
+        continue;
+      }
+      const rows = Array.isArray(day.entries) ? day.entries : [];
+      if (rows.length === 0) {
+        failed.push({ date: recordDate, message: "明細がありません" });
+        continue;
+      }
+      if (rows.length > 300) {
+        failed.push({ date: recordDate, message: "1日の明細が300件を超えています" });
+        continue;
+      }
+      const prev = await getDailyRecord(s.companyId, recordDate, factory);
+      if (prev && prev.entries.length > 0 && input.mode !== "overwrite") {
+        skipped.push(recordDate);
+        continue;
+      }
+
+      // 箱ごとの累積（投入前＝それまでの合計、投入後＝投入後の合計）
+      const cum = new Map<string, number>();
+      const entries: DailyEntry[] = [];
+      for (const e of rows) {
+        const kindRaw = asStr(e.kind, 20);
+        const kind = kindNames.has(kindRaw) ? kindRaw : (kinds[0]?.name ?? SCALE_KIND_LIST[0]);
+        const gross = toNumOrNull(e.gross);
+        const tare = toNumOrNull(e.tare);
+        // 重量は必ずサーバーで決める。投入重量と箱重量が揃っていればその差、
+        // 片方しか無い行（実投入だけの記録）は送られてきた重量を使う。
+        const weight =
+          gross !== null && tare !== null
+            ? Math.round((gross - tare) * 1000) / 1000
+            : Math.round((toNumOrNull(e.weight) ?? 0) * 1000) / 1000;
+        if (!(weight > 0)) continue;
+        const before = cum.get(kind) ?? 0;
+        const after = Math.round((before + weight) * 1000) / 1000;
+        cum.set(kind, after);
+        const scale = scaleOfKind.get(kind) ?? null;
+        entries.push({
+          jikoku: asStr(e.jikoku, 10),
+          hinshu: kind,
+          scaleId: scale?.id ?? null,
+          scaleName: scale?.name ?? kind,
+          grossWeight: gross,
+          tareWeight: tare,
+          weight,
+          cumBefore: before,
+          cumAfter: after,
+          cumBeforeReason: "",
+          cumAfterReason: "",
+          cumBeforeReadId: null,
+          cumAfterReadId: null,
+          kirokusha: asStr(e.kirokusha, 120),
+          ijo: asStr(e.ijo),
+          busho: asStr(e.busho, 50),
+          kikai: asStr(e.kikai, 50),
+          zairyo: asStr(e.zairyo, 50),
+          kotei: asStr(e.kotei, 50),
+        });
+      }
+      if (entries.length === 0) {
+        failed.push({ date: recordDate, message: "取り込める明細がありません" });
+        continue;
+      }
+
+      // Excelで責任者がサインしている日は、その時点で承認された記録として扱う
+      const shonin = asStr(day.shonin, 50);
+      try {
+        await importDailyRecord(
+          s.companyId,
+          {
+            recordDate,
+            factory,
+            sekininsha: asStr(day.sekininsha, 50),
+            zenjitsuOk: prev?.zenjitsuOk ?? false,
+            hakoZanryo: toNumOrNull(day.hakoZanryo) ?? 0,
+            kaishiCum: {},
+            kaishuSokuteichi: toNumOrNull(day.kaishuSokuteichi),
+            tonyuKanryo: Boolean(day.tonyuKanryo),
+            shonin,
+            biko: asStr(day.biko, 2000),
+            updatedBy: `${s.loginId ?? s.userName}（Excel取込）`,
+            entries,
+          },
+          shonin
+            ? { status: "approved", approvedBy: `${shonin}（Excel）` }
+            : { status: "draft", approvedBy: "" }
+        );
+        imported.push(recordDate);
+      } catch (e) {
+        failed.push({ date: recordDate, message: (e as Error).message });
+      }
+    }
+
+    revalidatePath("/daily");
+    revalidatePath("/summary");
+    revalidatePath("/");
+    const parts = [`取込 ${imported.length}日`];
+    if (skipped.length) parts.push(`既存のため飛ばし ${skipped.length}日`);
+    if (failed.length) parts.push(`エラー ${failed.length}日`);
+    if (createdKinds.length) parts.push(`種類を追加: ${createdKinds.join("・")}`);
+    return {
+      ok: failed.length === 0,
+      message: parts.join(" / "),
+      imported,
+      skipped,
+      failed,
+      createdKinds,
+    };
+  } catch (e) {
+    return importFailed((e as Error).message);
   }
 }

@@ -18,6 +18,7 @@ export const config = {
   matcher: [
     "/",
     "/daily",
+    "/daily/import",
     "/summary",
     "/first",
     "/guide",

@@ -50,6 +50,14 @@ type EntryDraft = {
   cumAfterReadId: string | null;
   kirokusha: string;
   ijo: string;
+  /**
+   * Excel（紙様式）から取り込んだ行だけが持つ発生元。画面では表示のみで、
+   * 保存し直しても消えないようにそのまま持ち回る。
+   */
+  busho: string;
+  kikai: string;
+  zairyo: string;
+  kotei: string;
 };
 
 /** モバイルでの拡大表示を避けるため、入力は 16px（text-base）を基準にする */
@@ -83,6 +91,14 @@ function entryReason(e: EntryDraft): string {
   ]
     .filter(Boolean)
     .join(" ／ ");
+}
+
+/**
+ * 発生元（部署 / 機械 / 品種 / 工程）。Excelの記録票から取り込んだ行だけが持つ。
+ * 新しい画面では入力しない項目なので、値があるときだけ小さく添える。
+ */
+function entryOrigin(e: EntryDraft): string {
+  return [e.busho, e.kikai, e.zairyo, e.kotei].filter(Boolean).join(" / ");
 }
 
 /** 現在時刻 HH:MM（JST）。時刻は入力した時間が自動で入る。 */
@@ -209,6 +225,10 @@ export default function DailyRecordForm({
       cumAfterReadId: e.cumAfterReadId ?? null,
       kirokusha: e.kirokusha,
       ijo: e.ijo,
+      busho: e.busho ?? "",
+      kikai: e.kikai ?? "",
+      zairyo: e.zairyo ?? "",
+      kotei: e.kotei ?? "",
     }))
   );
   const [kaishu, setKaishu] = useState(
@@ -477,6 +497,11 @@ export default function DailyRecordForm({
         cumAfterReadId: afterRead?.readId ?? null,
         kirokusha: userName, // 記録者はログインユーザー
         ijo,
+        // 発生元はExcelの記録票にしか無い項目（新しい画面では入力しない）
+        busho: "",
+        kikai: "",
+        zairyo: "",
+        kotei: "",
       },
     ]);
     // 次の投入に備えてクリア。投入前は今回の投入後が autoCumBefore として引き継がれる
@@ -511,6 +536,10 @@ export default function DailyRecordForm({
         cumAfterReadId: e.cumAfterReadId,
         kirokusha: e.kirokusha,
         ijo: e.ijo,
+        busho: e.busho,
+        kikai: e.kikai,
+        zairyo: e.zairyo,
+        kotei: e.kotei,
       })),
     };
   }
@@ -1015,6 +1044,7 @@ export default function DailyRecordForm({
                 const cb = toNumOrNull(e.cumBefore);
                 const ca = toNumOrNull(e.cumAfter);
                 const reason = entryReason(e);
+                const origin = entryOrigin(e);
                 return (
                   <li key={i} className="rounded-xl border border-[#e5e5e5] p-3">
                     <div className="flex items-start justify-between gap-2">
@@ -1026,6 +1056,7 @@ export default function DailyRecordForm({
                         <div className="mt-0.5 text-xs text-[#909090]">
                           {fmt(cb)} → {fmt(ca)} ／ 記録者 {e.kirokusha}
                         </div>
+                        {origin && <div className="mt-0.5 text-xs text-[#909090]">{origin}</div>}
                         {reason && (
                           <div className="mt-0.5 text-xs text-[#a15c00]">訂正: {reason}</div>
                         )}
@@ -1067,6 +1098,10 @@ export default function DailyRecordForm({
                         <td className={td}>{e.jikoku}</td>
                         <td className={td}>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
+                          {/* Excelから取り込んだ行は発生元（部署・機械・品種）を添える */}
+                          {entryOrigin(e) && (
+                            <div className="mt-0.5 text-xs text-[#909090]">{entryOrigin(e)}</div>
+                          )}
                         </td>
                         <td className={tdNum}>{fmt(cb)}</td>
                         <td className={tdNum}>{fmt(ca)}</td>

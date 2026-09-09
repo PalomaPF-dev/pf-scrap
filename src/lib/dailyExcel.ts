@@ -173,7 +173,11 @@ function validMd(month: number, day: number): MonthDay | null {
  * range は「8.07-17」のような期間表記（最初の日付にまとめて取り込む）。
  */
 export function datesOfName(value: string): { dates: MonthDay[]; range: boolean } {
-  const s = value.normalize("NFKC").replace(/[\s　]/g, "");
+  // 「2026/6/29記入」のような年付きは、年を除いてから 月/日 を読む（"26/6" を月日と誤読しないため）
+  const s = value
+    .normalize("NFKC")
+    .replace(/[\s　]/g, "")
+    .replace(/20\d{2}[./年-]/g, "");
   const dates: MonthDay[] = [];
   const re = /(\d{1,2})[./\-月](\d{1,2})/g;
   let m: RegExpExecArray | null;
@@ -346,13 +350,25 @@ function ijoOf(v: XlsxCell): string {
 }
 
 /**
- * 明細行の余白（見出しの無い右側の列）にある日付。
- * 「【5.29・6.1分①】」のような複数日のシートで、行ごとにどの日の分かを示している。
+ * 明細行の余白（記録者・異常より右の列）に書かれた記入日。
+ * 「9/7記入」「6/9計測」「2026/6/29記入」のような文字や、日付のシリアル値。
+ * 現場はシートを前日のものから複製して使うため、シート名より行の記入日のほうが確か。
+ * 「①」「下銅」「トライ」や行番号のような数値は日付ではない。
  */
-function rowDateOf(row: XlsxCell[], from: number): string | null {
+function rowDateOf(row: XlsxCell[], from: number, year: number): string | null {
   for (let c = from; c < row.length; c++) {
     const v = row[c];
-    if (typeof v === "number" && v > 40000 && v < 60000) return serialToDate(v);
+    if (typeof v === "number") {
+      if (v > 40000 && v < 60000) return serialToDate(v);
+      continue;
+    }
+    if (typeof v !== "string") continue;
+    const raw = v.normalize("NFKC");
+    const md = datesOfName(raw).dates[0];
+    if (!md) continue;
+    const y = raw.match(/(20\d{2})/);
+    const d = ymd(y ? Number(y[1]) : year, md.month, md.day);
+    if (d) return d;
   }
   return null;
 }
@@ -381,6 +397,8 @@ function parseSheet(sheet: XlsxSheet, sd: SheetDates): DailyExcelSheet[] {
   const marginFrom = Math.max(...Object.values(col)) + 1;
 
   const byDate = new Map<string, DailyExcelEntry[]>();
+  // 余白の記入日がシート名の日付と違った行（日付 → 件数）。警告に出す
+  const rowDateMoved = new Map<string, number>();
   let lastTime = "";
   for (let r = headerRow + 1; r < entriesEnd; r++) {
     const row = rows[r] ?? [];
@@ -417,12 +435,10 @@ function parseSheet(sheet: XlsxSheet, sd: SheetDates): DailyExcelSheet[] {
 
     const jikoku = col.time >= 0 ? timeOf(row[col.time]) : "";
     if (jikoku) lastTime = jikoku;
-    // 複数日のシートだけ、行の余白の日付でどの日の分かを決める
-    let date = mainDate;
-    if (sd.dates.length > 1) {
-      const rd = rowDateOf(row, marginFrom);
-      if (rd && sd.dates.includes(rd)) date = rd;
-    }
+    // 行の余白に記入日があればその日、無ければシート名の日付
+    const rd = rowDateOf(row, marginFrom, Number(mainDate.slice(0, 4)));
+    const date = rd ?? mainDate;
+    if (rd && !sd.dates.includes(rd)) rowDateMoved.set(rd, (rowDateMoved.get(rd) ?? 0) + 1);
     const list = byDate.get(date) ?? [];
     list.push({
       row: r + 1,
@@ -445,12 +461,15 @@ function parseSheet(sheet: XlsxSheet, sd: SheetDates): DailyExcelSheet[] {
   // 日付セル。シート名と食い違うときの警告はブック単位で出す（parseDailyExcelWorkbook）
   const dateLabel = findLabel(rows, (s) => s === "日付", { to: headerRow });
   const cellDate = dateLabel ? dateOfCell(valueRightOf(rows[dateLabel.row] ?? [], dateLabel.col)) : null;
-  if (sd.range) {
-    warnings.push(`シート名が期間（複数日）の表記です。すべて ${mainDate} の記録として取り込みます`);
+  for (const [d, n] of [...rowDateMoved.entries()].sort()) {
+    warnings.push(`行の記入日が ${d} の ${n}件は、シート名（${mainDate}）ではなく ${d} の記録として取り込みます`);
+  }
+  if (sd.range && byDate.size === 1) {
+    warnings.push(`シート名が期間（複数日）の表記ですが行の記入日が無いので、すべて ${mainDate} の記録として取り込みます`);
   }
   if (sd.dates.length > 1 && byDate.size === 1) {
     warnings.push(
-      `シート名に複数の日付がありますが、行ごとの日付が無いので すべて ${mainDate} の記録として取り込みます`
+      `シート名に複数の日付がありますが、行の記入日が無いので すべて ${mainDate} の記録として取り込みます`
     );
   }
 
@@ -707,13 +726,60 @@ export interface DailyExcelSource {
   /** 箱の種類（kindMode=file のとき全明細、zairyo のとき品種が空の明細に使う） */
   kind: string;
   kindMode: KindMode;
+  /**
+   * Excelの品種・シート名の語 → アプリの種類 の読み替え（kindMode=zairyo のとき）。
+   * 直方のブックは品種列が「銅条／銅管」だが、アプリの種類は大口と同じ
+   * 「上銅／銅ダライ／銅スクラップ」でそろえる。
+   */
+  kindMap?: Record<string, string>;
   fileName: string;
   file: DailyExcelFile;
 }
 
-function kindOfEntry(src: DailyExcelSource, sheet: DailyExcelSheet, e: DailyExcelEntry): string {
+/** Excelの品種・シート名の語（読み替え前）。 */
+function rawKindOfEntry(src: DailyExcelSource, sheet: DailyExcelSheet, e: DailyExcelEntry): string {
   if (src.kindMode !== "zairyo") return src.kind;
   return sheet.kindHint || e.zairyo || src.kind;
+}
+
+function kindOfEntry(src: DailyExcelSource, sheet: DailyExcelSheet, e: DailyExcelEntry): string {
+  const raw = rawKindOfEntry(src, sheet, e);
+  return (src.kindMode === "zairyo" && src.kindMap?.[raw]) || raw;
+}
+
+/** 品種列から種類を決めるブックに出てくる、読み替え前の種類（出現順）。 */
+export function rawKinds(sources: DailyExcelSource[]): string[] {
+  const out: string[] = [];
+  for (const src of sources) {
+    if (src.kindMode !== "zairyo") continue;
+    for (const sheet of src.file.sheets) {
+      for (const e of sheet.entries) {
+        const k = rawKindOfEntry(src, sheet, e);
+        if (k && !out.includes(k)) out.push(k);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 読み替えの既定値。アプリの種類（大口の箱）に合わせる:
+ *   銅条（プレス・フィンプレスの打ち抜き）→ 上銅
+ *   銅管（ベンダーのパイプ端材・不良）→ 銅ダライ（大口はベンダーのパイプを銅ダライの箱に入れている）
+ *   下銅 → 銅スクラップ
+ * すでにアプリの種類と同じ名前なら、そのまま。
+ */
+const KIND_ALIASES: Record<string, string> = {
+  銅条: "上銅",
+  銅管: "銅ダライ",
+  下銅: "銅スクラップ",
+  下胴: "銅スクラップ",
+};
+
+export function defaultKindMap(raw: string[], appKinds: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of raw) out[k] = appKinds.includes(k) ? k : (KIND_ALIASES[k] ?? k);
+  return out;
 }
 
 /**

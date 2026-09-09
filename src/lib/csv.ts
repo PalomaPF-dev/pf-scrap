@@ -53,12 +53,37 @@ export function toCsv(rows: (string | number | null | undefined)[][]): string {
 
 /** File → テキスト（UTF-8優先、失敗時 Shift_JIS。Excel保存のCSVに対応）。ブラウザ専用。 */
 export async function readTextFile(file: File): Promise<string> {
-  const buf = await file.arrayBuffer();
+  return decodeText(await file.arrayBuffer());
+}
+
+/** バイト列 → テキスト（UTF-8優先、失敗時 Shift_JIS）。 */
+function decodeText(buf: ArrayBuffer): string {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(buf).replace(/^\uFEFF/, "");
   } catch {
     return new TextDecoder("shift_jis").decode(buf);
   }
+}
+
+/**
+ * File → 2次元配列。CSV/TSV でも Excelブック(.xlsx) でも同じ形で読む。ブラウザ専用。
+ * McFrameの出力などをCSVに保存し直さずそのまま取り込めるようにするための入口。
+ */
+export async function readSheetRows(file: File): Promise<string[][]> {
+  const buf = await file.arrayBuffer();
+  const head = new Uint8Array(buf, 0, Math.min(8, buf.byteLength));
+  // zip（=xlsx/xlsm）は "PK"
+  if (head[0] === 0x50 && head[1] === 0x4b) {
+    const { readXlsxRows } = await import("./xlsx");
+    return readXlsxRows(buf);
+  }
+  // 旧Excel形式(.xls)は複合ドキュメント。中身を読めないので案内を返す
+  if (head[0] === 0xd0 && head[1] === 0xcf) {
+    throw new Error(
+      "旧Excel形式(.xls)は取り込めません。Excelで「.xlsx」またはCSVとして保存し直してください。"
+    );
+  }
+  return parseCsv(decodeText(buf));
 }
 
 /** CSV をダウンロードさせる（UTF-8 BOM 付き）。ブラウザ専用。 */

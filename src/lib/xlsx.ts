@@ -1,195 +1,258 @@
 /**
- * 最小限の .xlsx 読み取り（依存パッケージなし・ブラウザ／Node 共用）。
+ * XLSX（Excelブック）→ 2次元配列。ブラウザ専用の最小リーダー。
  *
- * 現場のExcel（スクラップ日次記録票）を取り込むためだけの実装なので、
- * セルの「値」しか読まない（書式・グラフ・図形は無視する）。
- *   - ZIP は中央ディレクトリを見て必要なエントリだけ展開（deflate は DecompressionStream）
- *   - 共有文字列（sharedStrings.xml）とシートXMLの `<v>` / `<is>` だけを解釈
- *   - 数式セルは Excel が保存したキャッシュ値（`<v>`）を返す
- *
- * 日付・時刻はシリアル値（数値）のまま返す。1900年うるう年バグを含む変換は
- * 使う側（dailyExcel.ts）で行う。
+ * McFrameの実績出力や現場の集計表は .xlsx のまま渡されることが多いため、
+ * CSVに保存し直さなくても取込ボタンにそのまま渡せるようにする。
+ * 追加パッケージは使わず、zipの展開は DecompressionStream("deflate-raw")、
+ * XMLは正規表現で読む（取込に必要なのはセルの値だけで、書式や数式は読まない）。
  */
 
-export type XlsxCell = string | number | boolean | null;
+type ZipEntry = { method: number; start: number; size: number };
 
-export interface XlsxSheet {
-  name: string;
-  /** 行 × 列（どちらも0始まり）。空セルは null。 */
-  rows: XlsxCell[][];
-}
-
-const utf8 = new TextDecoder("utf-8");
-
-interface ZipEntry {
-  method: number;
-  offset: number;
-  compSize: number;
-}
-
-/** ZIP の中央ディレクトリを読み、エントリ名 → 位置の対応を作る。 */
-function readCentralDirectory(buf: ArrayBuffer): Map<string, ZipEntry> {
+/** zipの中央目録を読み、ファイル名 → 位置の索引を作る（展開は必要なものだけ後から行う）。 */
+function zipIndex(buf: ArrayBuffer): Map<string, ZipEntry> {
   const view = new DataView(buf);
   const bytes = new Uint8Array(buf);
-  // EOCD（End Of Central Directory）を末尾から探す。コメントは最大64KB。
+  // 末尾（コメント最大64KB）から EOCD レコードを探す
   let eocd = -1;
-  const min = Math.max(0, bytes.length - 22 - 0xffff);
+  const min = Math.max(0, bytes.length - 66000);
   for (let i = bytes.length - 22; i >= min; i--) {
     if (view.getUint32(i, true) === 0x06054b50) {
       eocd = i;
       break;
     }
   }
-  if (eocd < 0) throw new Error("Excelファイルとして読めません（ZIPの終端が見つかりません）。");
-
+  if (eocd < 0) throw new Error("Excelファイルとして読み取れませんでした。");
   const count = view.getUint16(eocd + 10, true);
-  let ptr = view.getUint32(eocd + 16, true);
+  let p = view.getUint32(eocd + 16, true);
+  if (p === 0xffffffff) throw new Error("このExcelファイルは取り込めません。CSVで保存し直してください。");
   const entries = new Map<string, ZipEntry>();
+  const dec = new TextDecoder("utf-8");
   for (let i = 0; i < count; i++) {
-    if (ptr + 46 > bytes.length || view.getUint32(ptr, true) !== 0x02014b50) break;
-    const method = view.getUint16(ptr + 10, true);
-    const compSize = view.getUint32(ptr + 20, true);
-    const nameLen = view.getUint16(ptr + 28, true);
-    const extraLen = view.getUint16(ptr + 30, true);
-    const commentLen = view.getUint16(ptr + 32, true);
-    const offset = view.getUint32(ptr + 42, true);
-    const name = utf8.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
-    // ZIP64（4GB超・65535エントリ超）は業務用のExcelでは出ないので対応しない
-    if (compSize === 0xffffffff || offset === 0xffffffff) {
-      throw new Error("このExcelファイル（ZIP64形式）には対応していません。");
-    }
-    entries.set(name, { method, offset, compSize });
-    ptr += 46 + nameLen + extraLen + commentLen;
+    if (p + 46 > bytes.length || view.getUint32(p, true) !== 0x02014b50) break;
+    const method = view.getUint16(p + 10, true);
+    const size = view.getUint32(p + 20, true);
+    const nameLen = view.getUint16(p + 28, true);
+    const extraLen = view.getUint16(p + 30, true);
+    const commentLen = view.getUint16(p + 32, true);
+    const local = view.getUint32(p + 42, true);
+    const name = dec.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    // 実データの開始位置はローカルヘッダーから求める（拡張領域の長さが中央目録と異なることがある）
+    const localName = view.getUint16(local + 26, true);
+    const localExtra = view.getUint16(local + 28, true);
+    entries.set(name, { method, start: local + 30 + localName + localExtra, size });
+    p += 46 + nameLen + extraLen + commentLen;
   }
   return entries;
 }
 
-/** エントリを展開してテキストで返す。無ければ null。 */
-async function readEntry(
-  buf: ArrayBuffer,
-  entries: Map<string, ZipEntry>,
-  name: string
-): Promise<string | null> {
-  const e = entries.get(name);
-  if (!e) return null;
-  const view = new DataView(buf);
-  const bytes = new Uint8Array(buf);
-  if (view.getUint32(e.offset, true) !== 0x04034b50) {
-    throw new Error("Excelファイルが壊れています（ZIPのヘッダーが不正）。");
-  }
-  const nameLen = view.getUint16(e.offset + 26, true);
-  const extraLen = view.getUint16(e.offset + 28, true);
-  const start = e.offset + 30 + nameLen + extraLen;
-  const data = bytes.subarray(start, start + e.compSize);
-  if (e.method === 0) return utf8.decode(data);
-  if (e.method !== 8) throw new Error("このExcelファイルの圧縮形式には対応していません。");
-  if (typeof DecompressionStream === "undefined") {
+/** zipの1エントリをテキストとして取り出す（見つからない場合は空文字）。 */
+async function unzipText(buf: ArrayBuffer, entry: ZipEntry | undefined): Promise<string> {
+  if (!entry) return "";
+  const raw = new Uint8Array(buf, entry.start, entry.size);
+  if (entry.method === 0) return new TextDecoder("utf-8").decode(raw);
+  if (entry.method !== 8 || typeof DecompressionStream === "undefined") {
     throw new Error(
-      "このブラウザではExcelの取込に対応していません。Chrome / Edge の最新版でお試しください。"
+      "お使いのブラウザではExcelファイルを直接読み取れません。Excelで「CSV」として保存してから取り込んでください。"
     );
   }
-  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
   return await new Response(stream).text();
 }
 
-const XML_ENTITIES: Record<string, string> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-};
-
-function unescapeXml(s: string): string {
-  if (!s.includes("&")) return s;
-  return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);/g, (m, ref: string) => {
-    if (ref[0] === "#") {
-      const code = ref[1] === "x" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
-    }
-    return XML_ENTITIES[ref] ?? m;
-  });
+/** XMLの文字参照・実体参照を戻す。 */
+function decodeXml(s: string): string {
+  return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
-/** タグの属性値を取り出す（`r="A11"` → A11）。 */
-function attr(tag: string, name: string): string {
-  const m = tag.match(new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`));
-  return m ? unescapeXml(m[1]) : "";
-}
-
-/**
- * `<t>` の中身をつなげる（リッチテキストは複数の `<r><t>` に分かれる）。
- * ふりがな（`<rPh>`）は本文ではないので落とす。これを含めると
- * 「祖父江」が「祖父江ソブエ」になってしまう。
- */
-function joinText(xml: string): string {
+/** <t> の中身を連結する。ふりがな（<rPh>）は本文ではないので落とす。 */
+function textOf(xml: string): string {
+  const body = xml.replace(/<rPh[\s\S]*?<\/rPh>/g, "");
   let out = "";
-  const body = xml.replace(/<rPh\b[\s\S]*?<\/rPh>/g, "");
-  const re = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(body))) out += unescapeXml(m[1]);
+  for (const m of body.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)) out += decodeXml(m[1]);
   return out;
 }
 
-function parseSharedStrings(xml: string): string[] {
+/** 共有文字列表（セルの t="s" が指す文字列）。 */
+function sharedStrings(xml: string): string[] {
   const out: string[] = [];
-  const re = /<si\b[^>]*>([\s\S]*?)<\/si>|<si\b[^>]*\/>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml))) out.push(m[1] ? joinText(m[1]) : "");
+  for (const m of xml.matchAll(/<si(?:\s[^>]*)?>([\s\S]*?)<\/si>|<si\s*\/>/g)) {
+    out.push(m[1] === undefined ? "" : textOf(m[1]));
+  }
   return out;
 }
 
-/** 列名（A, B, … AA）→ 0始まりの列番号。 */
-function colIndex(ref: string): number {
-  let n = 0;
-  for (const ch of ref) {
-    const c = ch.charCodeAt(0);
-    if (c < 65 || c > 90) break;
-    n = n * 26 + (c - 64);
+/** 表示形式が日付・時刻か（書式記号の y/m/d/h/s で判定。[$-411] や "文字" は書式記号ではない）。 */
+function isDateFormat(id: number, code: string | undefined): boolean {
+  if (code === undefined) return (id >= 14 && id <= 22) || (id >= 45 && id <= 47);
+  const c = code
+    .replace(/\[[^\]]*\]/g, "")
+    .replace(/"[^"]*"/g, "")
+    .replace(/\\./g, "");
+  return /[ymdhs]/i.test(c);
+}
+
+/** 書式番号（セルの s 属性）ごとに「日付として表示されているか」を返す。 */
+function dateStyles(xml: string): boolean[] {
+  const fmt = new Map<number, string>();
+  for (const m of xml.matchAll(/<numFmt\s[^>]*?numFmtId="(\d+)"[^>]*?formatCode="([^"]*)"/g)) {
+    fmt.set(Number(m[1]), decodeXml(m[2]));
   }
+  const block = xml.match(/<cellXfs[\s\S]*?<\/cellXfs>/)?.[0] ?? "";
+  const out: boolean[] = [];
+  for (const m of block.matchAll(/<xf\b[^>]*>/g)) {
+    const id = Number(m[0].match(/numFmtId="(\d+)"/)?.[1] ?? 0);
+    out.push(isDateFormat(id, fmt.get(id)));
+  }
+  return out;
+}
+
+/** Excelの日付シリアル値 → 'YYYY-MM-DD'（時刻があれば ' HH:MM:SS' つき）。 */
+function serialToText(serial: number, date1904: boolean): string {
+  // 1900年方式の起点は 1899-12-30（Excelの「1900年はうるう年」互換のため）。
+  const base = date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30);
+  const days = Math.floor(serial);
+  const secs = Math.round((serial - days) * 86400);
+  const d = new Date(base + days * 86400000 + secs * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const hms = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+  if (serial < 1) return hms;
+  const ymd = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+  return secs === 0 ? ymd : `${ymd} ${hms}`;
+}
+
+/** 列参照 'A' 'AB' → 0始まりの列番号。 */
+function colNum(ref: string): number {
+  let n = 0;
+  for (let i = 0; i < ref.length; i++) n = n * 26 + (ref.charCodeAt(i) - 64);
   return n - 1;
 }
 
-function parseSheetXml(xml: string, shared: string[]): XlsxCell[][] {
-  const rows: XlsxCell[][] = [];
-  const rowRe = /<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g;
-  let rowMatch: RegExpExecArray | null;
-  let autoRow = 0;
-  while ((rowMatch = rowRe.exec(xml))) {
-    const rowNo = Number(attr(rowMatch[1] ?? "", "r"));
-    const r = Number.isFinite(rowNo) && rowNo > 0 ? rowNo - 1 : autoRow;
-    autoRow = r + 1;
-    const body = rowMatch[2] ?? "";
-    const cells: XlsxCell[] = [];
-    const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
-    let cellMatch: RegExpExecArray | null;
-    let autoCol = 0;
-    while ((cellMatch = cellRe.exec(body))) {
-      const tag = cellMatch[1] ?? "";
-      const inner = cellMatch[2] ?? "";
-      const ref = attr(tag, "r");
-      const c = ref ? colIndex(ref) : autoCol;
-      autoCol = c + 1;
-      const type = attr(tag, "t");
-      let value: XlsxCell = null;
+/** シートXML → 2次元配列（空行は除く。CSV取込と同じ形にそろえる）。 */
+function sheetRows(
+  xml: string,
+  shared: string[],
+  dateStyle: boolean[],
+  date1904: boolean
+): string[][] {
+  const rows: string[][] = [];
+  for (const rm of xml.matchAll(/<row\b[^>]*?(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+    if (rm[1] === undefined) continue;
+    const cells: string[] = [];
+    let col = 0;
+    for (const cm of rm[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+      const attrs = cm[1];
+      const inner = cm[2] ?? "";
+      const ref = attrs.match(/\br="([A-Z]+)\d+"/)?.[1];
+      const at = ref ? colNum(ref) : col;
+      col = at + 1;
+      const type = attrs.match(/\bt="([^"]+)"/)?.[1] ?? "n";
+      let value = "";
       if (type === "inlineStr") {
-        value = joinText(inner);
+        value = textOf(inner);
       } else {
-        const v = inner.match(/<v\b[^>]*>([\s\S]*?)<\/v>/);
-        const raw = v ? unescapeXml(v[1]) : "";
-        if (raw === "") value = null;
-        else if (type === "s") value = shared[Number(raw)] ?? "";
-        else if (type === "str") value = raw;
-        else if (type === "b") value = raw === "1";
-        else if (type === "e") value = null; // #REF! などのエラーは空扱い
-        else {
-          const n = Number(raw);
-          value = Number.isFinite(n) ? n : raw;
+        const text = decodeXml(inner.match(/<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/)?.[1] ?? "");
+        if (type === "s") value = shared[Number(text)] ?? "";
+        else if (type === "b") value = text === "1" ? "TRUE" : "FALSE";
+        else if (type === "str" || type === "e") value = text;
+        else if (text !== "") {
+          const style = Number(attrs.match(/\bs="(\d+)"/)?.[1] ?? -1);
+          const num = Number(text);
+          value =
+            style >= 0 && dateStyle[style] && Number.isFinite(num)
+              ? serialToText(num, date1904)
+              : text;
         }
       }
-      if (typeof value === "string" && value === "") value = null;
-      while (cells.length < c) cells.push(null);
-      cells[c] = value;
+      while (cells.length < at) cells.push("");
+      cells.push(value);
+    }
+    if (cells.some((c) => c.trim() !== "")) rows.push(cells);
+  }
+  return rows;
+}
+
+/** xlsx（ArrayBuffer）→ 先頭シートの2次元配列。日付セルは 'YYYY-MM-DD' の文字列になる。 */
+export async function readXlsxRows(buf: ArrayBuffer): Promise<string[][]> {
+  const entries = zipIndex(buf);
+  const read = (name: string) => unzipText(buf, entries.get(name));
+  const workbook = await read("xl/workbook.xml");
+  const rels = await read("xl/_rels/workbook.xml.rels");
+  // 先頭シート（ブックの並び順）の実ファイルを rels から引く
+  const rid = workbook.match(/<sheet\b[^>]*?r:id="([^"]+)"/)?.[1] ?? "";
+  const target = rels.match(new RegExp(`<Relationship\\b[^>]*?Id="${rid}"[^>]*?Target="([^"]+)"`))?.[1];
+  let path = target ? (target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^\.\//, "")}`) : "";
+  if (!entries.has(path)) {
+    path = [...entries.keys()].filter((n) => /^xl\/worksheets\/.*\.xml$/.test(n)).sort()[0] ?? "";
+  }
+  if (!path) throw new Error("Excelファイルにシートが見つかりませんでした。");
+  const date1904 = /date1904="(1|true)"/.test(workbook);
+  const [sheet, sst, styles] = await Promise.all([
+    read(path),
+    read("xl/sharedStrings.xml"),
+    read("xl/styles.xml"),
+  ]);
+  return sheetRows(sheet, sharedStrings(sst), dateStyles(styles), date1904);
+}
+
+// ===== 全シートを「値のまま」読む（日次記録票の取込用） =====
+
+/** セルの値。数値（日付・時刻のシリアル値を含む）は数値のまま返す。空セルは null。 */
+export type XlsxCell = string | number | boolean | null;
+
+export interface XlsxSheet {
+  name: string;
+  /** 行 × 列（どちらも0始まり）。空行も位置を保つ（元シートの行番号で警告を出すため）。 */
+  rows: XlsxCell[][];
+}
+
+/**
+ * シートXML → 型付きの2次元配列。readXlsxRows と違い、
+ *   - 数値は数値のまま（日付・時刻の書式でも文字列にしない。取込側がシリアル値を解釈する）
+ *   - 空行も飛ばさず、行番号の位置を保つ
+ * 日次記録票のように「ラベルの位置」で読む帳票向け。
+ */
+function sheetCells(xml: string, shared: string[]): XlsxCell[][] {
+  const rows: XlsxCell[][] = [];
+  let autoRow = 0;
+  for (const rm of xml.matchAll(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+    const rowNo = Number(rm[1].match(/\br="(\d+)"/)?.[1] ?? 0);
+    const r = rowNo > 0 ? rowNo - 1 : autoRow;
+    autoRow = r + 1;
+    const cells: XlsxCell[] = [];
+    let col = 0;
+    for (const cm of (rm[2] ?? "").matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+      const attrs = cm[1];
+      const inner = cm[2] ?? "";
+      const ref = attrs.match(/\br="([A-Z]+)\d+"/)?.[1];
+      const at = ref ? colNum(ref) : col;
+      col = at + 1;
+      const type = attrs.match(/\bt="([^"]+)"/)?.[1] ?? "n";
+      let value: XlsxCell = null;
+      if (type === "inlineStr") {
+        value = textOf(inner);
+      } else {
+        const text = decodeXml(inner.match(/<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/)?.[1] ?? "");
+        if (text === "") value = null;
+        else if (type === "s") value = shared[Number(text)] ?? "";
+        else if (type === "b") value = text === "1";
+        else if (type === "str") value = text;
+        else if (type === "e") value = null; // #VALUE! などのエラーは空扱い
+        else {
+          const n = Number(text);
+          value = Number.isFinite(n) ? n : text;
+        }
+      }
+      if (value === "") value = null;
+      while (cells.length < at) cells.push(null);
+      cells[at] = value;
     }
     while (rows.length < r) rows.push([]);
     rows[r] = cells;
@@ -197,45 +260,32 @@ function parseSheetXml(xml: string, shared: string[]): XlsxCell[][] {
   return rows;
 }
 
-/**
- * .xlsx（ArrayBuffer）を読み、シートをブック内の並び順で返す。
- * 非表示シートも含める（取り込む側で中身を見て判断する）。
- */
+/** xlsx（ArrayBuffer）→ 全シート（ブックの並び順。非表示シートも含む）。 */
 export async function readXlsx(buf: ArrayBuffer): Promise<XlsxSheet[]> {
-  const entries = readCentralDirectory(buf);
-  const workbook = await readEntry(buf, entries, "xl/workbook.xml");
-  if (!workbook) throw new Error("Excelファイルとして読めません（workbook.xml がありません）。");
-
-  // rId → シートXMLのパス
-  const relsXml = (await readEntry(buf, entries, "xl/_rels/workbook.xml.rels")) ?? "";
+  const entries = zipIndex(buf);
+  const read = (name: string) => unzipText(buf, entries.get(name));
+  const workbook = await read("xl/workbook.xml");
+  if (!workbook) throw new Error("Excelファイルとして読み取れませんでした（workbook.xml がありません）。");
+  const rels = await read("xl/_rels/workbook.xml.rels");
   const targets = new Map<string, string>();
-  const relRe = /<Relationship\b([^>]*)\/>/g;
-  let rel: RegExpExecArray | null;
-  while ((rel = relRe.exec(relsXml))) {
-    const id = attr(rel[1], "Id");
-    let target = attr(rel[1], "Target");
+  for (const m of rels.matchAll(/<Relationship\b([^>]*)\/>/g)) {
+    const id = m[1].match(/\bId="([^"]*)"/)?.[1];
+    const target = decodeXml(m[1].match(/\bTarget="([^"]*)"/)?.[1] ?? "");
     if (!id || !target) continue;
-    target = target.startsWith("/") ? target.slice(1) : `xl/${target}`;
-    targets.set(id, target.replace(/^xl\/\.\.\//, ""));
+    targets.set(id, target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^\.\//, "")}`);
   }
-
-  const sharedXml = await readEntry(buf, entries, "xl/sharedStrings.xml");
-  const shared = sharedXml ? parseSharedStrings(sharedXml) : [];
-
+  const shared = sharedStrings(await read("xl/sharedStrings.xml"));
   const sheets: XlsxSheet[] = [];
-  const sheetRe = /<sheet\b([^>]*)\/>/g;
-  let sheetMatch: RegExpExecArray | null;
-  let fallbackNo = 0;
-  while ((sheetMatch = sheetRe.exec(workbook))) {
-    const tag = sheetMatch[1];
-    const name = attr(tag, "name");
+  let n = 0;
+  for (const m of workbook.matchAll(/<sheet\b([^>]*)\/>/g)) {
+    const name = decodeXml(m[1].match(/\bname="([^"]*)"/)?.[1] ?? "");
     if (!name) continue;
-    fallbackNo++;
-    const rid = attr(tag, "r:id") || attr(tag, "id");
-    const path = targets.get(rid) ?? `xl/worksheets/sheet${fallbackNo}.xml`;
-    const xml = await readEntry(buf, entries, path);
-    sheets.push({ name, rows: xml ? parseSheetXml(xml, shared) : [] });
+    n++;
+    const rid = m[1].match(/\br:id="([^"]+)"/)?.[1] ?? m[1].match(/\bid="([^"]+)"/)?.[1] ?? "";
+    const path = targets.get(rid) ?? `xl/worksheets/sheet${n}.xml`;
+    const xml = await read(path);
+    sheets.push({ name, rows: xml ? sheetCells(xml, shared) : [] });
   }
-  if (sheets.length === 0) throw new Error("シートが見つかりませんでした。");
+  if (sheets.length === 0) throw new Error("Excelファイルにシートが見つかりませんでした。");
   return sheets;
 }

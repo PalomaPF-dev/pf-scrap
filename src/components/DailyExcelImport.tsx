@@ -7,10 +7,13 @@ import { importDailyExcelAction, type DailyImportResult } from "@/lib/actions";
 import {
   buildDailyImport,
   commonZairyo,
+  defaultKindMap,
   guessKind,
   guessYear,
   parseDailyExcelWorkbook,
+  rawKinds,
   type DailyExcelFile,
+  type DailyExcelSource,
   type DailyImportDay,
   type KindMode,
 } from "@/lib/dailyExcel";
@@ -64,6 +67,9 @@ export default function DailyExcelImport({
   const [year, setYear] = useState<number>(new Date().getFullYear());
   const [files, setFiles] = useState<LoadedFile[]>([]);
   const [mode, setMode] = useState<"skip" | "overwrite">("skip");
+  // Excelの品種（銅条／銅管／下銅）→ アプリの種類（上銅／銅ダライ／銅スクラップ）の読み替え。
+  // 直方は部署ごとのブックで品種列を使うが、種類は大口と同じ名前でそろえる
+  const [kindMap, setKindMap] = useState<Record<string, string>>({});
   // Excelに責任者サインが無い日も承認済みにする（直方のブックはサイン欄がほぼ空）
   const [approveAll, setApproveAll] = useState(false);
   const [error, setError] = useState("");
@@ -71,9 +77,20 @@ export default function DailyExcelImport({
   const [result, setResult] = useState<DailyImportResult | null>(null);
   const [pending, startTransition] = useTransition();
 
+  const sources: DailyExcelSource[] = files.map((f) => ({
+    kind: f.kind,
+    kindMode: f.kindMode,
+    kindMap,
+    fileName: f.name,
+    file: f.parsed,
+  }));
+  // 読み替え表に出す品種（読み替え前）。既定値は大口の箱に合わせる
+  const kindNames = kinds.map((k) => k.name);
+  const raw = rawKinds(sources);
+  const kindMapView: Record<string, string> = { ...defaultKindMap(raw, kindNames), ...kindMap };
   const days: DailyImportDay[] = files.length
     ? buildDailyImport(
-        files.map((f) => ({ kind: f.kind, kindMode: f.kindMode, fileName: f.name, file: f.parsed })),
+        sources.map((s) => ({ ...s, kindMap: kindMapView })),
         { factory: target }
       )
     : [];
@@ -334,6 +351,29 @@ export default function DailyExcelImport({
               </li>
             ))}
           </ul>
+        )}
+        {raw.length > 0 && (
+          <div className="mt-3 rounded-xl border border-[#e5e5e5] p-3">
+            <p className="text-sm font-medium text-[#333333]">Excelの品種 → アプリの種類</p>
+            <p className="mt-0.5 text-xs text-[#909090]">
+              種類は工場をまたいで同じ名前でそろえます（大口の箱: 上銅／銅ダライ／銅スクラップ）。
+              直方の品種列はここで読み替えます。
+            </p>
+            <div className="mt-2 flex flex-wrap gap-3">
+              {raw.map((k) => (
+                <label key={k} className="flex items-center gap-2 text-sm">
+                  <span className="rounded-md bg-[#f0f0ee] px-2 py-0.5 text-xs font-bold text-[#555555]">{k}</span>
+                  →
+                  <input
+                    list="scrap-kind-options"
+                    value={kindMapView[k] ?? k}
+                    onChange={(e) => setKindMap((prev) => ({ ...prev, [k]: e.target.value }))}
+                    className={`${input} w-36`}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
         )}
         <datalist id="scrap-kind-options">
           {kinds.map((k) => (

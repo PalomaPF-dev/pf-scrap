@@ -10,11 +10,18 @@ import {
 } from "./session";
 import {
   addAdjustment,
+  clearBagStart,
+  closeBag,
+  correctBagClose,
   deleteAdjustment,
+  deleteEmptyBag,
   deleteDailyRecord,
   deleteFirstArticle,
   deleteItem,
   deleteScale,
+  getBagById,
+  getBagChainSeeds,
+  getBagStart,
   getDailyRecord,
   getDailyStatus,
   getItemById,
@@ -29,7 +36,13 @@ import {
   getScrapKindById,
   KUBUN_LIST,
   listItems,
+  listOpenBags,
   listScrapKinds,
+  openBag,
+  reopenBag,
+  setBagApproval,
+  setBagStart,
+  syncClosedBagTotals,
   upsertScrapKind,
   SCALE_KIND_LIST,
   saveDailyRecord,
@@ -44,6 +57,7 @@ import {
   upsertProcureDays,
   upsertScale,
   type DailyEntry,
+  type ScrapBag,
   type McframeDayRow,
   type McframeQtyRow,
   type ProcureDay,
@@ -250,6 +264,8 @@ export async function saveScaleAction(input: {
   capacity?: unknown;
   /** 目量（最小表示単位） kg。空欄可 */
   division?: unknown;
+  /** 袋を交換する目安 kg。空欄なら既定値 */
+  bagTargetKg?: unknown;
 }): Promise<ActionResult> {
   try {
     const s = await requireOperationsSession();
@@ -275,6 +291,8 @@ export async function saveScaleAction(input: {
       // 未入力は null のまま（AI読取で何も仮定しない）。0や負の値は未入力と同じ扱い。
       capacity: positiveOrNull(input.capacity),
       division: positiveOrNull(input.division),
+      // 袋の交換の目安。未入力は既定値（BAG_TARGET_KG）を使う
+      bagTargetKg: positiveOrNull(input.bagTargetKg),
     });
     revalidatePath("/scales");
     revalidatePath("/daily");
@@ -372,8 +390,44 @@ export async function saveDailyRecordAction(input: {
         if (n !== null && asStr(k, 50)) kaishiCum[asStr(k, 50)] = n;
       }
     }
-    // 累積の連携チェック用。箱ごとに「次に入るはずの投入前累積」を持ち回る。
+    // ===== 袋（スクラップ袋） =====
+    // 明細は「その投入が入った袋」を持つ（袋管理より前の明細は null のまま）。
+    const bagIds = (Array.isArray(input.entries) ? input.entries : [])
+      .map((e) => asStr(e.bagId ?? "", 50))
+      .filter(Boolean);
+    const bags = new Map<string, ScrapBag>();
+    for (const id of new Set(bagIds)) {
+      const bag = await getBagById(s.companyId, id);
+      if (!bag) return fail("袋が見つかりません。画面を再読み込みしてください。");
+      if (bag.factory !== factory) {
+        return fail(`袋「${bag.bagNo}」は別の工場（${bag.factory}）のものです。`);
+      }
+      bags.set(id, bag);
+    }
+    // 締め済みの袋に新しい投入は足せない。締めた時点の数字が後から変わってしまうため。
+    // 既にその袋で保存されている件数を超えたら「足した」と判断する。
+    const storedPerBag = new Map<string, number>();
+    for (const e of prev?.entries ?? []) {
+      if (e.bagId) storedPerBag.set(e.bagId, (storedPerBag.get(e.bagId) ?? 0) + 1);
+    }
+    const incomingPerBag = new Map<string, number>();
+    for (const id of bagIds) incomingPerBag.set(id, (incomingPerBag.get(id) ?? 0) + 1);
+    for (const [id, n] of incomingPerBag) {
+      const bag = bags.get(id);
+      if (bag && bag.status !== "open" && n > (storedPerBag.get(id) ?? 0)) {
+        return fail(
+          `袋「${bag.bagNo}」は締め済みです。新しい投入は、いま記録中の袋に記録してください。`
+        );
+      }
+    }
+
+    // 累積の連携チェック用。「次に入るはずの投入前の表示値」を持ち回る。
+    // 袋がある明細は袋ごと（袋を交換すると表示値が 0 に戻るので、重量計では繋がらない）。
+    // 袋管理より前の明細は、従来どおり重量計ごと（キーは scaleId）。
     const expectedCum = new Map<string, number>(Object.entries(kaishiCum));
+    // 日をまたいだ袋は前日の最後の投入後を引き継ぐ。まだ投入が無ければ袋の開始値。
+    const bagSeeds = await getBagChainSeeds(s.companyId, [...bags.keys()], prev?.id ?? null);
+    for (const [id, bag] of bags) expectedCum.set(id, bagSeeds.get(id) ?? bag.startCum);
 
     // AI読取の値（サーバー側のログ）。採用値がこれと違うときだけ訂正理由を求める。
     // ログはクライアントから書き換えられないので、これが「機械が読んだ事実」になる。
@@ -426,7 +480,8 @@ export async function saveDailyRecordAction(input: {
       }
       if (!kindNames.includes(kind)) kind = kindNames[0] ?? SCALE_KIND_LIST[0];
 
-      const cumKey = scaleId ?? scaleName;
+      const bagId = asStr(e.bagId ?? "", 50) || null;
+      const cumKey = bagId ?? scaleId ?? scaleName;
       const cumBeforeReadId = asStr(e.cumBeforeReadId ?? "", 50) || null;
       const cumAfterReadId = asStr(e.cumAfterReadId ?? "", 50) || null;
       const cumBeforeReason = asStr(e.cumBeforeReason, 200);
@@ -483,6 +538,7 @@ export async function saveDailyRecordAction(input: {
         cumAfterReason: afterCorrected ? cumAfterReason : "",
         cumBeforeReadId,
         cumAfterReadId,
+        bagId,
         // 記録者は「所属（工場 職場）＋氏名」。ログインユーザーから毎回サーバーで組み立てる。
         // 既存行は元の記録者をそのまま残す（誰が入れたかを後から書き換えない）。
         kirokusha: asStr(e.kirokusha, 120) || recorder,
@@ -512,10 +568,16 @@ export async function saveDailyRecordAction(input: {
       updatedBy: s.loginId ?? s.userName,
       entries,
     });
+    // 締め済みの袋の合計を取り直す。承認済みの中身が変わっていたら承認を外す
+    // （管理者が確認した数字と違うものを、承認済みのままにしない）。
+    const revoked = await syncClosedBagTotals(s.companyId, [...bags.keys()]);
     revalidatePath("/daily");
     revalidatePath("/");
     const total = entries.reduce((t, e) => t + e.weight, 0);
-    return { ok: true, message: `保存しました（当日合計 ${total.toFixed(1)} kg）。` };
+    const revokedMsg = revoked.length
+      ? `（袋 ${revoked.map((b) => b.bagNo).join("・")} は中身が変わったため承認を外しました。再度承認してください）`
+      : "";
+    return { ok: true, message: `保存しました（当日合計 ${total.toFixed(1)} kg）。${revokedMsg}` };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -605,6 +667,358 @@ export async function rejectDailyRecordAction(
     });
     revalidatePath("/daily");
     return { ok: true, message: "差し戻しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+// ===== スクラップ袋（交換までを1区切りにする） =====
+
+/**
+ * 同じ重量計で袋を二重に開こうとしたときは、DB の部分ユニーク索引が弾く。
+ * 現場に出るのは「袋が二重になっている」ことなので、そう読める文言に直す。
+ */
+function bagErrorMessage(e: unknown): string {
+  const code = (e as { code?: string; sourceError?: { code?: string } })?.code
+    ?? (e as { sourceError?: { code?: string } })?.sourceError?.code;
+  if (code === "23505") {
+    return "この重量計では別の袋が記録中です。画面を再読み込みして、記録中の袋を確認してください。";
+  }
+  return (e as Error).message;
+}
+
+/** 記録者・承認者の表示名（所属＋氏名）。日次記録と同じ規則で残す。 */
+async function actorName(s: {
+  userId: string;
+  userName?: string | null;
+  loginId?: string | null;
+}): Promise<string> {
+  const affiliation = await getUserAffiliation(s.userId);
+  return [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" ");
+}
+
+/**
+ * 袋を開く（新しいカゴ＋袋をセットしたとき）。
+ * 通常は風袋引きして 0kg を確認してから始めるので開始の表示値は 0。
+ * 使いかけの袋から記録を始めるときだけ、その時点の表示値を入れる。
+ */
+export async function openBagAction(input: {
+  factory: string;
+  scaleId: string;
+  date: string;
+  startCum: unknown;
+  /** 風袋引きして 0kg を確認したか（開始が 0 のときは必須） */
+  taraOk: boolean;
+  note: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    if (!isDateStr(input.date)) return fail("日付が正しくありません。");
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を入力してください。");
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）の袋のみ開始できます。`);
+    }
+    const scale = await getScaleById(s.companyId, asStr(input.scaleId, 50));
+    if (!scale) return fail("重量計が見つかりません。一覧から選び直してください。");
+    const open = await listOpenBags(s.companyId, factory);
+    if (open.some((b) => b.scaleId === scale.id)) {
+      return fail(
+        `「${scale.name}」にはすでに記録中の袋があります。交換するときは「袋を交換する」から締めてください。`
+      );
+    }
+    // 袋運用の開始日より前の日付には袋を作らない。
+    // その期間は従来どおり日単位の記録として残す（過去を袋で塗り替えない）。
+    const bagStart = await getBagStart(s.companyId, factory);
+    const effectiveStart = bagStart.startOn ?? todayStr();
+    if (input.date < effectiveStart) {
+      return fail(
+        `${effectiveStart} から袋単位の管理を始めています。それより前の ${input.date} は日単位の記録なので、袋は開けません。`
+      );
+    }
+    const startCum = toNum(input.startCum);
+    if (startCum < 0) return fail("開始の表示値は 0 以上で入力してください。");
+    if (startCum === 0 && !input.taraOk) {
+      return fail(
+        "風袋引きして 0kg を確認してから開始してください。0kg でない場合は、その表示値を入力してください。"
+      );
+    }
+    const bag = await openBag(s.companyId, {
+      factory,
+      scaleId: scale.id,
+      scaleName: scale.name,
+      kind: scale.kind,
+      openedOn: input.date,
+      openedBy: await actorName(s),
+      startCum,
+      note: asStr(input.note, 500),
+    });
+    revalidatePath("/daily");
+    return {
+      ok: true,
+      message: `袋 ${bag.bagNo} を開始しました（開始の表示値 ${startCum.toFixed(1)} kg）。`,
+    };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/**
+ * 袋を締める（＝交換する）。カゴを降ろす前の表示値がこの袋の重量になる。
+ * 続けて次の袋を開くところまでを1回の操作にする（現場の交換と同じ順番）。
+ */
+export async function closeBagAction(input: {
+  bagId: string;
+  date: string;
+  closeCum: unknown;
+  closeCumReadId: string | null;
+  closeCumReason: string;
+  note: string;
+  /** 続けて次の袋を開くか（新しいカゴを載せて風袋引きした直後） */
+  openNext: boolean;
+  taraOk: boolean;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    if (!isDateStr(input.date)) return fail("日付が正しくありません。");
+    const bag = await getBagById(s.companyId, asStr(input.bagId, 50));
+    if (!bag) return fail("袋が見つかりません。画面を再読み込みしてください。");
+    if (bag.status !== "open") return fail(`袋 ${bag.bagNo} はすでに締められています。`);
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && bag.factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）の袋のみ締められます。`);
+    }
+    if (input.date < bag.openedOn) {
+      return fail(`袋 ${bag.bagNo} は ${bag.openedOn} に開いています。それより前の日付では締められません。`);
+    }
+    const closeCum = toNumOrNull(input.closeCum);
+    if (closeCum === null) {
+      return fail("交換直前の表示値がありません。カゴを降ろす前に読み取るか、手入力してください。");
+    }
+    if (closeCum < bag.startCum) {
+      return fail(
+        `交換直前の表示値（${closeCum} kg）が、この袋の開始の表示値（${bag.startCum} kg）より小さくなっています。読み取りを確認してください。`
+      );
+    }
+
+    // AI読取の値を人が変えたときは理由を残す（明細の訂正と同じ規則）。
+    // 読取ログはサーバーしか書けないので、これが「機械が読んだ事実」になる。
+    const readId = asStr(input.closeCumReadId ?? "", 50) || null;
+    const reason = asStr(input.closeCumReason, 200);
+    if (readId) {
+      const reads = await getScaleReads(s.companyId, [readId]);
+      const ai = reads.get(readId);
+      if (
+        ai?.value !== undefined &&
+        ai.value !== null &&
+        Math.abs(closeCum - ai.value) > 0.0005 &&
+        !reason
+      ) {
+        return fail(
+          `交換直前の表示値がAI読取値 ${ai.value} kg と違います。訂正する場合は理由を入力してください。`
+        );
+      }
+    }
+
+    const who = await actorName(s);
+    const ok = await closeBag(s.companyId, bag.id, {
+      closedOn: input.date,
+      closedBy: who,
+      closeCum,
+      closeCumReadId: readId,
+      closeCumReason: reason,
+      // 締めた時点の明細合計。保存済みの明細から取る（未保存の投入は含まれない）
+      totalWeight: bag.runningTotal,
+      note: asStr(input.note, 500),
+    });
+    if (!ok) return fail("袋を締められませんでした。画面を再読み込みしてください。");
+
+    const weight = Math.round((closeCum - bag.startCum) * 1000) / 1000;
+    const gap = Math.round((weight - bag.runningTotal) * 1000) / 1000;
+    let message =
+      `袋 ${bag.bagNo} を締めました。この袋は ${weight.toFixed(1)} kg でした` +
+      `（記録した投入の合計 ${bag.runningTotal.toFixed(1)} kg`;
+    message += Math.abs(gap) > 0.0005 ? `／差 ${gap.toFixed(1)} kg）。` : "）。";
+
+    if (input.openNext) {
+      if (!input.taraOk) {
+        return {
+          ok: true,
+          message:
+            message +
+            " 次の袋は開いていません。新しいカゴを載せて風袋引きし、0kg を確認してから「袋を開始する」を押してください。",
+        };
+      }
+      if (!bag.scaleId) return { ok: true, message };
+      const next = await openBag(s.companyId, {
+        factory: bag.factory,
+        scaleId: bag.scaleId,
+        scaleName: bag.scaleName,
+        kind: bag.kind,
+        openedOn: input.date,
+        openedBy: who,
+        startCum: 0,
+        note: "",
+      });
+      message += ` 続けて袋 ${next.bagNo} を開始しました。`;
+    }
+    revalidatePath("/daily");
+    revalidatePath("/");
+    return { ok: true, message };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/** 袋の締めを承認（管理者のみ）。1日に複数回、袋ごとに確認する。 */
+export async function approveBagAction(bagId: string): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const bag = await getBagById(s.companyId, asStr(bagId, 50));
+    if (!bag) return fail("袋が見つかりません。");
+    if (bag.status === "open") return fail("まだ締められていない袋は承認できません。");
+    if (bag.status === "approved") return fail(`袋 ${bag.bagNo} はすでに承認されています。`);
+    await setBagApproval(s.companyId, bag.id, {
+      status: "approved",
+      approvedBy: (await actorName(s)) || "承認者",
+    });
+    revalidatePath("/daily");
+    revalidatePath("/summary");
+    return { ok: true, message: `袋 ${bag.bagNo} を承認しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 締めの表示値を直す（管理者のみ）。袋は締めたまま数字だけ入れ直す。
+ * 交換すると次の袋が開くので、記録中に戻さずに直せる経路が要る
+ * （読み違い・撮り直しの訂正はこちらが本筋）。
+ */
+export async function correctBagCloseAction(input: {
+  bagId: string;
+  closeCum: unknown;
+  reason: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const bag = await getBagById(s.companyId, asStr(input.bagId, 50));
+    if (!bag) return fail("袋が見つかりません。");
+    if (bag.status === "open") {
+      return fail("この袋は記録中です。締めるときに表示値を入力してください。");
+    }
+    const closeCum = toNumOrNull(input.closeCum);
+    if (closeCum === null) return fail("直したあとの表示値を入力してください。");
+    if (closeCum < bag.startCum) {
+      return fail(
+        `表示値（${closeCum} kg）が、この袋の開始の表示値（${bag.startCum} kg）より小さくなっています。`
+      );
+    }
+    const reason = asStr(input.reason, 200);
+    if (!reason) return fail("訂正理由を入力してください（記録として残ります）。");
+    const ok = await correctBagClose(s.companyId, bag.id, { closeCum, reason });
+    if (!ok) return fail("締め値を直せませんでした。画面を再読み込みしてください。");
+    const weight = Math.round((closeCum - bag.startCum) * 1000) / 1000;
+    revalidatePath("/daily");
+    revalidatePath("/");
+    return {
+      ok: true,
+      message:
+        `袋 ${bag.bagNo} の締め値を ${closeCum.toFixed(1)} kg に直しました` +
+        `（この袋は ${weight.toFixed(1)} kg）。` +
+        (bag.status === "approved" ? " 数字が変わったので承認待ちに戻しました。" : ""),
+    };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/**
+ * 締めの取り消し（管理者のみ）。締めたのが間違いだった袋を記録中へ戻し、
+ * 続けてその袋に投入できるようにする。
+ *
+ * 交換のときは次の袋が自動で開くので、そのままでは「1台の重量計に記録中の袋は1つ」に
+ * 引っかかって戻せない。次の袋にまだ投入が1件も無ければ、交換で開いただけの袋なので
+ * 消してから戻す。すでに投入があるなら戻せないので、締め値の訂正へ案内する。
+ */
+export async function reopenBagAction(bagId: string): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const bag = await getBagById(s.companyId, asStr(bagId, 50));
+    if (!bag) return fail("袋が見つかりません。");
+    if (bag.status === "open") return fail("この袋は記録中です。");
+
+    let removed = "";
+    if (bag.scaleId) {
+      const open = (await listOpenBags(s.companyId, bag.factory)).find(
+        (b) => b.scaleId === bag.scaleId
+      );
+      if (open) {
+        if (open.entryCount > 0) {
+          return fail(
+            `次の袋 ${open.bagNo} に投入が ${open.entryCount} 件記録されているため、記録中に戻せません（1台の重量計に記録中の袋は1つまで）。締め値の数字だけを直す場合は「締め値を直す」を使ってください。`
+          );
+        }
+        if (!(await deleteEmptyBag(s.companyId, open.id))) {
+          return fail("次の袋を戻せませんでした。画面を再読み込みしてください。");
+        }
+        removed = open.bagNo;
+      }
+    }
+
+    const ok = await reopenBag(s.companyId, bag.id);
+    if (!ok) return fail("締めを取り消せませんでした。画面を再読み込みしてください。");
+    revalidatePath("/daily");
+    revalidatePath("/");
+    return {
+      ok: true,
+      message:
+        `袋 ${bag.bagNo} を記録中に戻しました。` +
+        (removed ? `交換で開いた袋 ${removed}（投入なし）は取り消しました。` : ""),
+    };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/**
+ * 袋運用の開始日を決める（生産管理部・調達部のメンバーと管理者）。
+ * この日から袋単位、それより前は従来どおり日単位の記録として扱う。
+ * 空文字を渡すと設定を消し、「最初に袋を開いた日」からの推定に戻る。
+ */
+export async function saveBagStartAction(input: {
+  factory: string;
+  startOn: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を選んでください。");
+    const startOn = asStr(input.startOn, 10);
+    if (!startOn) {
+      await clearBagStart(s.companyId, factory);
+      revalidatePath("/settings");
+      revalidatePath("/daily");
+      revalidatePath("/summary");
+      revalidatePath("/bags");
+      return { ok: true, message: `${factory} の開始日の設定を消しました（記録から推定します）。` };
+    }
+    if (!isDateStr(startOn)) return fail("開始日は年月日で入力してください。");
+    await setBagStart(
+      s.companyId,
+      factory,
+      startOn,
+      [await getUserAffiliation(s.userId), s.userName || s.loginId || ""].filter(Boolean).join(" ")
+    );
+    revalidatePath("/settings");
+    revalidatePath("/daily");
+    revalidatePath("/summary");
+    revalidatePath("/bags");
+    return {
+      ok: true,
+      message: `${factory} は ${startOn} から袋単位の管理になります（それより前は日単位の記録のままです）。`,
+    };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -1219,6 +1633,8 @@ export async function importDailyExcelAction(input: {
           cumAfterReason: "",
           cumBeforeReadId: null,
           cumAfterReadId: null,
+          // Excelの期間は袋管理より前なので、袋には紐づけない（袋なし＝日単位の記録）
+          bagId: null,
           kirokusha: asStr(e.kirokusha, 120),
           ijo: asStr(e.ijo),
           busho: asStr(e.busho, 50),

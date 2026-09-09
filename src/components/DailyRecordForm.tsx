@@ -25,17 +25,25 @@ import {
   type DailyStatus,
   type Scale,
   type ScalePhotoResult,
+  type ScrapBag,
   type ScrapKind,
 } from "@/lib/scrapTypes";
 import { fmt, fmtPct, toNum, toNumOrNull } from "@/lib/format";
 import DateNav from "@/components/DateNav";
 import ScaleCamera from "@/components/ScaleCamera";
+import ScrapBagPanel, {
+  ResultBanner,
+  ScrapBagList,
+  type PanelMessage,
+} from "@/components/ScrapBagPanel";
 
 /** 明細行のドラフト（入力値は文字列で保持し、表示時に計算） */
 type EntryDraft = {
   jikoku: string;
   scaleId: string | null;
   scaleName: string;
+  /** この投入が入った袋。袋管理より前の明細は null */
+  bagId: string | null;
   kind: string;
   gross: string;
   tare: string;
@@ -184,6 +192,10 @@ export default function DailyRecordForm({
   factoryLocked,
   initial,
   scales,
+  openBags,
+  dayBags,
+  bagEra,
+  bagStartOn,
   kinds,
   userName,
   isAdmin,
@@ -194,6 +206,14 @@ export default function DailyRecordForm({
   factoryLocked: boolean;
   initial: DailyRecord | null;
   scales: Scale[];
+  /** 記録中の袋（重量計ごとに最大1つ）。投入はこの袋に入る */
+  openBags: ScrapBag[];
+  /** その日に関わった袋（記録中・締め済み・承認済み） */
+  dayBags: ScrapBag[];
+  /** この日が袋単位の管理の対象か（袋運用の開始日以降か） */
+  bagEra: boolean;
+  /** 袋運用の開始日 YYYY-MM-DD（表示用） */
+  bagStartOn: string;
   /** スクラップ種類（設定マスタ。並び順＝表示順・色の順） */
   kinds: ScrapKind[];
   userName: string;
@@ -214,6 +234,7 @@ export default function DailyRecordForm({
       jikoku: e.jikoku,
       scaleId: e.scaleId,
       scaleName: e.scaleName || e.hinshu,
+      bagId: e.bagId ?? null,
       kind: e.hinshu,
       gross: e.grossWeight !== null ? String(e.grossWeight) : "",
       tare: e.tareWeight !== null ? String(e.tareWeight) : "",
@@ -238,13 +259,15 @@ export default function DailyRecordForm({
   );
   const [tonyuKanryo, setTonyuKanryo] = useState(initial?.tonyuKanryo ?? false);
   const [biko, setBiko] = useState(initial?.biko ?? "");
-  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
-  // 読み取り・記録の結果は2でも3でも出るので、同じ見た目を両方に置く
-  const messageBanner = message ? (
-    <p className={`mt-2 text-sm ${message.ok ? "text-[#2f6b2f]" : "text-[#dc000c]"}`}>
-      {message.text}
-    </p>
-  ) : null;
+  const [message, setMessage] = useState<PanelMessage | null>(null);
+  // どこまで保存したか。行の削除は無いので「先頭から savedCount 件までが保存済み」。
+  // 締めの合計は保存済みの明細から出すため、未保存があるうちは袋を締めさせない。
+  const [savedCount, setSavedCount] = useState(initial?.entries.length ?? 0);
+  // 読み取り・記録の結果は2でも3でも出るので、同じ見た目を両方に置く。
+  // 小さな文字だと見落とすため（現場から報告あり）、見出しつきの枠で大きく出す。
+  const messageBanner = message ? <ResultBanner msg={message} className="mt-3" /> : null;
+  // 終礼集計の入力（責任者・回収箱測定値・備考など）を触ったか。保存ボタンの強調に使う
+  const [fieldsDirty, setFieldsDirty] = useState(false);
 
   // ===== 箱（重量計）選択 =====
   const [selectedScale, setSelectedScale] = useState<Scale | null>(null);
@@ -270,22 +293,62 @@ export default function DailyRecordForm({
   /** QR値から重量計を引く。写真1枚目の「どの箱を撮ったか」の判定に使う。 */
   const scaleByQr = useMemo(() => new Map(scales.map((s) => [s.qrCode, s])), [scales]);
 
-  /** 指定の箱の「直前の投入後の表示値」。桁ズレ（10倍）の検出に使う。 */
-  const lastCumAfterOf = useCallback(
+  /**
+   * 指定の重量計で、その日に記録中だった袋。投入はこの袋に入る。
+   * 過去の日を開いているときは、その日より後に開いた袋には入れない。
+   */
+  const bagOf = useCallback(
+    (scaleId: string): ScrapBag | null =>
+      bagEra
+        ? (openBags.find((b) => b.scaleId === scaleId && b.openedOn <= date) ?? null)
+        : null,
+    [openBags, date, bagEra]
+  );
+  const currentBag = selectedScale ? bagOf(selectedScale.id) : null;
+
+  /**
+   * 指定の重量計の「次に入るはずの投入前の表示値」。
+   * 累積は袋の中だけで繋がる（袋を交換すると表示値が 0 に戻るため、重量計で繋ぐと
+   * 交換のたびに前の袋の値が出てしまう）。袋の中では
+   *   この画面の同じ袋の直前の投入後 → 保存済みの最後の投入後（日をまたいでも続く）
+   *   → 袋の開始の表示値
+   * の順に引き継ぐ。袋管理より前の明細は、従来どおり重量計で繋ぐ。
+   */
+  const chainValueOf = useCallback(
     (scaleId: string): number | null => {
-      const last = [...entries].reverse().find((e) => e.scaleId === scaleId && e.cumAfter !== "");
+      const bag = bagOf(scaleId);
+      if (bag) {
+        const last = [...entries].reverse().find((e) => e.bagId === bag.id && e.cumAfter !== "");
+        if (last) return toNumOrNull(last.cumAfter);
+        if (bag.lastCum !== null) return bag.lastCum;
+        return bag.startCum;
+      }
+      const last = [...entries]
+        .reverse()
+        .find((e) => e.scaleId === scaleId && !e.bagId && e.cumAfter !== "");
       return last ? toNumOrNull(last.cumAfter) : null;
     },
-    [entries]
+    [entries, bagOf]
+  );
+
+  /**
+   * AI読取の桁ズレ（10倍）判定に渡す「直前の表示値」。
+   * 袋を開いた直後（まだ投入が無く開始が 0）は比べる相手がないので渡さない。
+   * 前の袋の値と比べると、新しい袋の小さな表示を誤って弾いてしまう。
+   */
+  const lastCumAfterOf = useCallback(
+    (scaleId: string): number | null => {
+      const v = chainValueOf(scaleId);
+      return v !== null && v > 0 ? v : null;
+    },
+    [chainValueOf]
   );
 
   const autoCumBefore = useMemo(() => {
     if (!selectedScale) return "";
-    const last = [...entries]
-      .reverse()
-      .find((e) => e.scaleId === selectedScale.id && e.cumAfter !== "");
-    return last ? last.cumAfter : "";
-  }, [selectedScale, entries]);
+    const v = chainValueOf(selectedScale.id);
+    return v === null ? "" : String(v);
+  }, [selectedScale, chainValueOf]);
 
   /**
    * 投入前の「機械の値」。AIで読み取れていればその値、無ければ連携値
@@ -345,6 +408,29 @@ export default function DailyRecordForm({
   );
   const sairitsu = kaishu !== "" && total > 0 ? (toNum(kaishu) - total) / total : null;
 
+  /** まだ保存していない投入のうち、いまの袋の分。締める前に保存してもらう。 */
+  const currentBagUnsaved = useMemo(() => {
+    if (!currentBag) return { count: 0, weight: 0 };
+    const list = entries.slice(savedCount).filter((e) => e.bagId === currentBag.id);
+    return {
+      count: list.length,
+      weight: list.reduce((t, e) => t + (entryWeight(e) ?? 0), 0),
+    };
+  }, [entries, savedCount, currentBag]);
+
+  /** まだ保存できていない投入の件数と、未保存かどうか（保存ボタンの見た目に使う）。 */
+  const unsavedCount = Math.max(0, entries.length - savedCount);
+  const unsaved = unsavedCount > 0 || fieldsDirty;
+
+  /** 袋に紐づいていない投入の件数（袋運用の期間なら、袋を開く前に記録した分）。 */
+  const noBagCount = useMemo(() => entries.filter((e) => !e.bagId).length, [entries]);
+
+  /** 明細に袋Noを出すための対応表（袋管理より前の明細は空欄になる）。 */
+  const bagNoById = useMemo(
+    () => new Map(dayBags.map((b) => [b.id, b.bagNo])),
+    [dayBags]
+  );
+
   function moveTo(next: { factory?: string }) {
     const q = new URLSearchParams(searchParams.toString());
     if (next.factory) q.set("factory", next.factory);
@@ -393,11 +479,15 @@ export default function DailyRecordForm({
         }
       }
       if (r.value === null) {
+        // 理由（note）には撮り直しの案内まで入っている。二重に付けると長くて読めない。
+        const note = r.note?.trim();
         setMessage({
           ok: false,
+          title: "読み取れませんでした",
           text:
-            (r.note ? `表示値を読み取れませんでした（${r.note}）。` : "表示値を読み取れませんでした。") +
-            "もう一度撮るか、手入力してください。",
+            note && note.includes("手入力")
+              ? note
+              : [note, "もう一度撮るか、手入力してください。"].filter(Boolean).join(" "),
         });
         // 読めなくても手入力できるよう、入力欄は開けておく
         if (phase === "before") setBeforeFix(true);
@@ -419,9 +509,12 @@ export default function DailyRecordForm({
       const where = phase === "before" ? "投入前" : "投入後";
       setMessage({
         ok: true,
+        title: `${where} ${fmt(r.value)} kg を読み取りました`,
         text:
-          `${scale ? `「${scale.name}」の` : ""}${where}の表示値 ${fmt(r.value)} kg を読み取りました。` +
-          (r.confidence === "medium" ? "（読み取りに少し自信がありません。値を確認してください）" : ""),
+          `${scale ? `「${scale.name}」の表示値です。` : ""}` +
+          (r.confidence === "medium"
+            ? "読み取りに少し自信がありません。値を確認してください。"
+            : ""),
       });
     });
   }
@@ -448,6 +541,13 @@ export default function DailyRecordForm({
     setMessage(null);
     if (!selectedScale) {
       setMessage({ ok: false, text: "投入先のスクラップ箱（重量計）を選択してください。" });
+      return;
+    }
+    if (bagEra && !currentBag) {
+      setMessage({
+        ok: false,
+        text: `「${selectedScale.name}」の袋が開いていません。新しいカゴと袋をセットして「袋を開始する」を押してください。`,
+      });
       return;
     }
     if (toNumOrNull(cumBefore) === null) {
@@ -479,12 +579,14 @@ export default function DailyRecordForm({
       });
       return;
     }
-    setEntries((prev) => [
-      ...prev,
+    const weight = scrapWeight;
+    const next: EntryDraft[] = [
+      ...entries,
       {
         jikoku: nowTime(), // 時刻は記録した時間が自動で入る
         scaleId: selectedScale.id,
         scaleName: selectedScale.name,
+        bagId: currentBag?.id ?? null,
         kind: selectedScale.kind,
         // 新様式は表示値の差で出すので、投入前重量・箱重量は持たない
         gross: "",
@@ -503,17 +605,38 @@ export default function DailyRecordForm({
         zairyo: "",
         kotei: "",
       },
-    ]);
+    ];
+    setEntries(next);
     // 次の投入に備えてクリア。投入前は今回の投入後が autoCumBefore として引き継がれる
     resetReading();
     setIjo("");
-    setMessage({
-      ok: true,
-      text: `${fmt(scrapWeight)} kg を記録しました。忘れずに保存してください。`,
+
+    // 記録したらそのまま保存する。以前は「記録する」→「保存」の2操作で、
+    // 同じ見た目のボタンが並んで押し間違いが起きていた。保存に失敗したときだけ
+    // 未保存として残り、画面下の「保存」で送り直せる。
+    setMessage({ ok: true, title: `${fmt(weight)} kg を記録しました`, text: "保存しています…" });
+    startTransition(async () => {
+      const res = await saveDailyRecordAction(buildPayload(next));
+      if (res.ok) {
+        setSavedCount(next.length);
+        setFieldsDirty(false);
+        setMessage({
+          ok: true,
+          title: `${fmt(weight)} kg を記録しました`,
+          text: "保存しました。次の投入に進めます。",
+        });
+        router.refresh();
+      } else {
+        setMessage({
+          ok: false,
+          title: "保存できませんでした",
+          text: `${res.message ?? ""} 記録は画面に残っています。画面下の「保存」でもう一度お試しください。`,
+        });
+      }
     });
   }
 
-  function buildPayload() {
+  function buildPayload(list: EntryDraft[] = entries) {
     return {
       recordDate: date,
       factory,
@@ -521,11 +644,12 @@ export default function DailyRecordForm({
       kaishuSokuteichi: kaishu,
       tonyuKanryo,
       biko,
-      entries: entries.map((e) => ({
+      entries: list.map((e) => ({
         jikoku: e.jikoku,
         hinshu: e.kind,
         scaleId: e.scaleId,
         scaleName: e.scaleName,
+        bagId: e.bagId,
         grossWeight: e.gross,
         tareWeight: e.tare,
         cumBefore: e.cumBefore,
@@ -547,9 +671,18 @@ export default function DailyRecordForm({
   function save() {
     setMessage(null);
     startTransition(async () => {
+      const saving = entries.length;
       const res = await saveDailyRecordAction(buildPayload());
-      setMessage({ ok: res.ok, text: res.message ?? "" });
-      if (res.ok) router.refresh();
+      setMessage({
+        ok: res.ok,
+        title: res.ok ? "保存しました" : "保存できませんでした",
+        text: res.message ?? "",
+      });
+      if (res.ok) {
+        setSavedCount(saving);
+        setFieldsDirty(false);
+        router.refresh();
+      }
     });
   }
 
@@ -587,8 +720,6 @@ export default function DailyRecordForm({
   /** 選択肢の表示名。設備番号があれば先頭に付けて現場の呼び名と一致させる */
   const scaleLabel = (s: Scale) => (s.equipNo ? `${s.equipNo}　${s.name}` : s.name);
 
-  const btnPrimary =
-    "inline-flex h-11 items-center justify-center gap-1.5 rounded-lg bg-[#b4632c] px-4 text-sm font-semibold text-white hover:bg-[#96521f] disabled:opacity-50";
   return (
     <div className="space-y-3 pb-24 sm:space-y-4 sm:pb-0">
       {/* 対象日・工場・状態 */}
@@ -624,7 +755,10 @@ export default function DailyRecordForm({
             <input
               type="text"
               value={sekininsha}
-              onChange={(e) => setSekininsha(e.target.value)}
+              onChange={(e) => {
+                setSekininsha(e.target.value);
+                setFieldsDirty(true);
+              }}
               className={input}
               placeholder={userName}
               disabled={locked}
@@ -685,6 +819,22 @@ export default function DailyRecordForm({
             <p className="mb-3 rounded-lg bg-[#f7f7f5] px-3 py-2 text-sm text-[#707070]">
               スクラップ箱が未選択です。
             </p>
+          )}
+
+          {/*
+            いまの袋。袋は「開いてから交換するまで」が1区切りで、1日に何度も変わり、
+            夜勤帯の投入で翌日まで続くこともある。袋が開いていないと投入は記録できない。
+          */}
+          {selectedScale && bagEra && (
+            <ScrapBagPanel
+              date={date}
+              factory={factory}
+              scale={selectedScale}
+              bag={currentBag}
+              unsavedCount={currentBagUnsaved.count}
+              unsavedWeight={currentBagUnsaved.weight}
+              onMessage={setMessage}
+            />
           )}
 
           <div className="mb-3">
@@ -1008,15 +1158,29 @@ export default function DailyRecordForm({
             />
           </label>
 
+          {/*
+            結果は記録ボタンの「上」に出す。下に置くと、画面下に固定した保存バーに
+            隠れて読み飛ばされる（現場から報告あり）。
+          */}
+          {messageBanner}
+
           <button
             onClick={addEntry}
-            disabled={pending}
-            className="mt-4 inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#b4632c] text-base font-semibold text-white hover:bg-[#96521f] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-6 sm:text-sm"
+            disabled={pending || (bagEra && !currentBag)}
+            /*
+              この画面の主操作。読み取り（青・高さ12）と間違えないよう、オレンジの塗りは
+              このボタンだけにし、背を高く（16）して間隔も広く取る。
+            */
+            className="mt-6 inline-flex h-16 w-full items-center justify-center gap-2 rounded-2xl bg-[#b4632c] text-lg font-bold text-white shadow-sm hover:bg-[#96521f] disabled:opacity-50 sm:h-12 sm:w-auto sm:px-8 sm:text-base"
           >
-            <Plus className="h-5 w-5" />
+            <Plus className="h-6 w-6 sm:h-5 sm:w-5" />
             投入完了として記録する
           </button>
-          {messageBanner}
+          {selectedScale && bagEra && !currentBag && (
+            <p className="mt-1.5 text-xs text-[#a15c00]">
+              「{selectedScale.name}」の袋が開いていません。1の「袋を開始する」から始めてください。
+            </p>
+          )}
         </Step>
       )}
 
@@ -1054,7 +1218,10 @@ export default function DailyRecordForm({
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
                         </div>
                         <div className="mt-0.5 text-xs text-[#909090]">
-                          {fmt(cb)} → {fmt(ca)} ／ 記録者 {e.kirokusha}
+                          {fmt(cb)} → {fmt(ca)}
+                          {e.bagId && bagNoById.has(e.bagId) ? ` ／ 袋 ${bagNoById.get(e.bagId)}` : ""}
+                          {" ／ 記録者 "}
+                          {e.kirokusha}
                         </div>
                         {origin && <div className="mt-0.5 text-xs text-[#909090]">{origin}</div>}
                         {reason && (
@@ -1075,6 +1242,7 @@ export default function DailyRecordForm({
                 <thead>
                   <tr>
                     <th className={th}>時刻</th>
+                    <th className={th}>袋</th>
                     <th className={th}>種類</th>
                     <th className={`${th} text-right`}>投入前</th>
                     <th className={`${th} text-right`}>投入後</th>
@@ -1096,6 +1264,7 @@ export default function DailyRecordForm({
                     return (
                       <tr key={i}>
                         <td className={td}>{e.jikoku}</td>
+                        <td className={td}>{(e.bagId && bagNoById.get(e.bagId)) || ""}</td>
                         <td className={td}>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
                           {/* Excelから取り込んだ行は発生元（部署・機械・品種）を添える */}
@@ -1129,6 +1298,24 @@ export default function DailyRecordForm({
         )}
       </section>
 
+      {/* 袋の記録（紙の記入用紙・Excelの1枚に対応する単位）。袋運用の期間だけ出す */}
+      {bagEra ? (
+        <>
+          {noBagCount > 0 && (
+            <p className="rounded-2xl border border-[#dc000c] bg-[#fdecea] px-4 py-3 text-sm text-[#dc000c]">
+              袋に紐づいていない投入が {noBagCount} 件あります。袋を開く前に記録した分です。
+              重量は当日合計に入っていますが、袋の重量には入りません。
+            </p>
+          )}
+          <ScrapBagList bags={dayBags} isAdmin={isAdmin} onMessage={setMessage} />
+        </>
+      ) : (
+        <section className="rounded-2xl border border-[#e5e5e5] bg-[#f7f7f5] p-4 text-sm text-[#707070] sm:p-5">
+          この日は袋単位の管理を始める前です（{bagStartOn} から袋単位）。
+          従来どおり日単位の記録として扱います。
+        </section>
+      )}
+
       {/* 【3】終礼集計（承認者はここで当日を承認する） */}
       <Step n={3} title="終礼集計">
         <div className="space-y-3 text-sm">
@@ -1145,7 +1332,10 @@ export default function DailyRecordForm({
                 step="0.1"
                 min="0"
                 value={kaishu}
-                onChange={(e) => setKaishu(e.target.value)}
+                onChange={(e) => {
+                  setKaishu(e.target.value);
+                  setFieldsDirty(true);
+                }}
                 className={numInput}
                 disabled={locked}
               />
@@ -1165,7 +1355,10 @@ export default function DailyRecordForm({
             <input
               type="checkbox"
               checked={tonyuKanryo}
-              onChange={(e) => setTonyuKanryo(e.target.checked)}
+              onChange={(e) => {
+                setTonyuKanryo(e.target.checked);
+                setFieldsDirty(true);
+              }}
               className="h-5 w-5 accent-[#b4632c]"
               disabled={locked}
             />
@@ -1176,7 +1369,10 @@ export default function DailyRecordForm({
             <textarea
               rows={3}
               value={biko}
-              onChange={(e) => setBiko(e.target.value)}
+              onChange={(e) => {
+                setBiko(e.target.value);
+                setFieldsDirty(true);
+              }}
               className="rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-base focus:border-[#b4632c] focus:outline-none disabled:bg-[#f0f0ee] sm:text-sm"
               disabled={locked}
             />
@@ -1226,7 +1422,7 @@ export default function DailyRecordForm({
               </>
             ) : (
               <p className="text-xs text-[#707070]">
-                終礼時に承認者が確認して承認します。記録が済んだら「保存」してください。
+                終礼時に承認者が確認して承認します。投入は記録した時点で保存されています。
               </p>
             )}
           </div>
@@ -1237,12 +1433,29 @@ export default function DailyRecordForm({
       {!locked && (
         <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#e5e5e5] bg-white/95 p-3 backdrop-blur sm:static sm:z-auto sm:rounded-2xl sm:border sm:p-4">
           <div className="flex items-center gap-2">
-            <button onClick={save} disabled={pending} className={`${btnPrimary} flex-1 sm:flex-none`}>
-              <Save className="h-4 w-4" />
-              保存
+            {/*
+              記録すると自動で保存されるので、ふだんこのボタンは押さなくてよい。
+              未保存が残っているとき（保存に失敗した・終礼の欄を直した）だけ目立たせる。
+              いつもオレンジの塗りだと、記録ボタンと見分けがつかず押し間違いの元になる。
+            */}
+            <button
+              onClick={save}
+              disabled={pending}
+              className={`inline-flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg px-4 text-sm font-semibold disabled:opacity-50 sm:flex-none ${
+                unsaved
+                  ? "bg-[#b4632c] text-white hover:bg-[#96521f]"
+                  : "border border-[#cfcac3] bg-white text-[#555555] hover:bg-[#f7f7f5]"
+              }`}
+            >
+              {unsaved ? <Save className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
+              {unsaved
+                ? `保存${unsavedCount > 0 ? `（未保存 ${unsavedCount}件）` : ""}`
+                : "保存済み"}
             </button>
-            <span className="hidden text-xs text-[#909090] sm:inline">
-              投入を記録したら「保存」してください。終礼時に承認者が確認して当日を承認します。
+            <span className="text-xs text-[#909090]">
+              {unsaved
+                ? "未保存の入力があります。押して保存してください。"
+                : "記録すると自動で保存されます。"}
             </span>
           </div>
         </div>

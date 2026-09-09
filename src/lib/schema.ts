@@ -192,6 +192,9 @@ async function buildSchema(): Promise<void> {
   // 累積値の連携（2026-08）: 投入前の累積は「朝礼後の累積値」または同じ箱の直前の
   // 投入後累積が自動で入る。そのままでは編集できず、訂正するときだけ理由を残す。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_before_reason TEXT NOT NULL DEFAULT ''`);
+  // Excel（紙様式）からの取込（2026-09）: 記録票の「品種」（銅条・パイプ等の材質）。
+  // hinshu は箱の種類に使っているため別の列に持つ。部署・機械・工程は既存の列をそのまま使う。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS zairyo TEXT NOT NULL DEFAULT ''`);
   // 箱（重量計）ごとの朝礼後の累積値。{ "<scale_id>": 123.4 } 形式。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS kaishi_cum JSONB NOT NULL DEFAULT '{}'::jsonb`);
 

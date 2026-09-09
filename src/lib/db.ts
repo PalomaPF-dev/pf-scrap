@@ -33,6 +33,7 @@ import {
   type FaStatus as _FaStatus,
   type ScrapItem as _ScrapItem,
   type ScrapKind as _ScrapKind,
+  type DailyEntry as _DailyEntry,
   type DailyRecord as _DailyRecord,
   type DailyStatus as _DailyStatus,
   type Scale as _Scale,
@@ -43,6 +44,7 @@ type ScrapItem = _ScrapItem;
 type ScrapKind = _ScrapKind;
 type FirstArticle = _FirstArticle;
 type FaStatus = _FaStatus;
+type DailyEntry = _DailyEntry;
 type DailyRecord = _DailyRecord;
 type DailyStatus = _DailyStatus;
 type Scale = _Scale;
@@ -476,6 +478,10 @@ function mapDailyRecord(r: any, entries: any[]): DailyRecord {
       bagId: e.bag_id ?? null,
       kirokusha: e.kirokusha,
       ijo: e.ijo,
+      busho: e.busho ?? "",
+      kikai: e.kikai ?? "",
+      zairyo: e.zairyo ?? "",
+      kotei: e.kotei ?? "",
     })),
   };
 }
@@ -515,7 +521,8 @@ export async function getDailyRecord(
   const entries = await sql`
     SELECT jikoku, hinshu, scale_id, scale_name, gross_weight, tare_weight,
            weight, cum_before, cum_after, cum_before_reason, cum_after_reason,
-           cum_before_read_id, cum_after_read_id, bag_id, kirokusha, ijo
+           cum_before_read_id, cum_after_read_id, bag_id, kirokusha, ijo,
+           busho, kikai, zairyo, kotei
     FROM scrap_daily_entries WHERE record_id = ${r.id} ORDER BY sort ASC`;
   return mapDailyRecord(r, entries);
 }
@@ -553,24 +560,87 @@ export async function saveDailyRecord(
       updated_at = NOW()
     RETURNING id`;
   const recordId = rows[0].id as string;
-  await sql`DELETE FROM scrap_daily_entries WHERE record_id = ${recordId}`;
-  for (let i = 0; i < rec.entries.length; i++) {
-    const e = rec.entries[i];
-    await sql`
+  await replaceDailyEntries(companyId, recordId, rec.entries);
+}
+
+/**
+ * 明細を全置換する（記録票の保存・取込で共通）。
+ * 削除と挿入を1つのトランザクションにまとめる（途中で失敗して明細が消えたままにならない。
+ * Excel取込では1日に100件超の明細があるので、1本ずつ往復するより速い）。
+ */
+async function replaceDailyEntries(
+  companyId: string,
+  recordId: string,
+  entries: DailyEntry[]
+): Promise<void> {
+  const sql = getSql();
+  const queries = [sql`DELETE FROM scrap_daily_entries WHERE record_id = ${recordId}`];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    queries.push(sql`
       INSERT INTO scrap_daily_entries (
         company_id, record_id, jikoku, hinshu, scale_id, scale_name,
         gross_weight, tare_weight, weight, cum_before, cum_after,
         cum_before_reason, cum_after_reason, cum_before_read_id, cum_after_read_id,
-        bag_id, kirokusha, ijo, sort
+        bag_id, kirokusha, ijo, busho, kikai, zairyo, kotei, sort
       )
       VALUES (
         ${companyId}, ${recordId}, ${e.jikoku}, ${e.hinshu}, ${e.scaleId}, ${e.scaleName},
         ${e.grossWeight}, ${e.tareWeight}, ${e.weight}, ${e.cumBefore}, ${e.cumAfter},
         ${e.cumBeforeReason ?? ""}, ${e.cumAfterReason ?? ""},
         ${e.cumBeforeReadId ?? null}, ${e.cumAfterReadId ?? null},
-        ${e.bagId ?? null}, ${e.kirokusha}, ${e.ijo}, ${i}
-      )`;
+        ${e.bagId ?? null}, ${e.kirokusha}, ${e.ijo},
+        ${e.busho ?? ""}, ${e.kikai ?? ""}, ${e.zairyo ?? ""}, ${e.kotei ?? ""}, ${i}
+      )`);
   }
+  await sql.transaction(queries);
+}
+
+/**
+ * Excel（紙様式）の日次記録票を取り込む。日付×工場で upsert し、明細は全置換。
+ * 通常の保存（saveDailyRecord）と違い、承認状態も一緒に入れる:
+ * Excelに責任者のサインがある日は、その時点で承認された記録なので approved にし、
+ * 承認者にサインの名前を残す（誰の承認かを後から追えるようにする）。
+ */
+export async function importDailyRecord(
+  companyId: string,
+  rec: Omit<
+    DailyRecord,
+    "id" | "status" | "appliedBy" | "appliedAt" | "approvedBy" | "approvedAt" | "rejectComment"
+  >,
+  approval: { status: DailyStatus; approvedBy: string }
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  const approvedAt = approval.status === "approved" ? new Date().toISOString() : null;
+  const rows = await sql`
+    INSERT INTO scrap_daily_records (
+      company_id, record_date, factory, sekininsha, zenjitsu_ok, hako_zanryo,
+      kaishi_cum, kaishu_sokuteichi, tonyu_kanryo, shonin, biko, updated_by,
+      status, approved_by, approved_at
+    ) VALUES (
+      ${companyId}, ${rec.recordDate}, ${rec.factory}, ${rec.sekininsha}, ${rec.zenjitsuOk},
+      ${rec.hakoZanryo}, ${JSON.stringify(rec.kaishiCum ?? {})}::jsonb,
+      ${rec.kaishuSokuteichi}, ${rec.tonyuKanryo}, ${rec.shonin},
+      ${rec.biko}, ${rec.updatedBy},
+      ${approval.status}, ${approval.approvedBy}, ${approvedAt}
+    )
+    ON CONFLICT (company_id, record_date, factory) DO UPDATE SET
+      sekininsha = EXCLUDED.sekininsha,
+      zenjitsu_ok = EXCLUDED.zenjitsu_ok,
+      hako_zanryo = EXCLUDED.hako_zanryo,
+      kaishi_cum = EXCLUDED.kaishi_cum,
+      kaishu_sokuteichi = EXCLUDED.kaishu_sokuteichi,
+      tonyu_kanryo = EXCLUDED.tonyu_kanryo,
+      shonin = EXCLUDED.shonin,
+      biko = EXCLUDED.biko,
+      updated_by = EXCLUDED.updated_by,
+      status = EXCLUDED.status,
+      approved_by = EXCLUDED.approved_by,
+      approved_at = EXCLUDED.approved_at,
+      updated_at = NOW()
+    RETURNING id`;
+  await replaceDailyEntries(companyId, rows[0].id as string, rec.entries);
 }
 
 // ===== スクラップ袋 =====

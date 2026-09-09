@@ -143,6 +143,15 @@ export interface DailyEntry {
   /** 記録者（ログインユーザーを自動記録） */
   kirokusha: string;
   ijo: string;
+  /**
+   * 紙様式（Excel）から取り込んだ行だけが持つ発生元の情報。
+   * 新しい画面の入力では使わないが、取り込んだ記録を編集・再保存しても消えないよう持ち回る。
+   * 部署 / 機械 / 品種（銅条・パイプ等の材質） / 工程。
+   */
+  busho: string;
+  kikai: string;
+  zairyo: string;
+  kotei: string;
 }
 
 export interface DailyRecord {

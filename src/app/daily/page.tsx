@@ -1,5 +1,5 @@
-import { BarChart3 } from "lucide-react";
-import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
+import { BarChart3, FileSpreadsheet } from "lucide-react";
+import { requireEntitledSession, getFactoryRestriction, canUseOperations } from "@/lib/session";
 import { getUserAffiliation } from "@/lib/authDb";
 import {
   KUBUN_LIST,
@@ -91,6 +91,8 @@ export default async function DailyPage({
   }
 
   const isAdmin = session.role === "admin";
+  // Excel取込は、マスタ・取込と同じ範囲（生産管理部・調達部のメンバーと管理者）だけに出す
+  const canOperate = await canUseOperations(session);
   // 記録者は「所属（部署／工場 職場）＋氏名」。保存時にサーバーでも同じ規則で組み立てる。
   const recorder = [affiliation, session.userName].filter(Boolean).join(" ");
   // 当日の記録スクラップ合計（理論値との突合に使う）
@@ -174,7 +176,16 @@ export default async function DailyPage({
       </section>
 
       {/* 月間集計は別タブ（工場・種類で絞り込める） */}
-      <div className="mt-4 flex justify-end">
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        {canOperate && (
+          <a
+            href="/daily/import"
+            className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
+          >
+            <FileSpreadsheet className="h-4 w-4" />
+            Excel取込
+          </a>
+        )}
         <a
           href={`/summary?ym=${ym}${factoryLocked ? "" : `&factory=${encodeURIComponent(factory)}`}`}
           className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"

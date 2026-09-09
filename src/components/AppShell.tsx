@@ -43,12 +43,13 @@ const NAV_OPERATIONS: NavItem[] = [
   { href: "/settings", label: "設定", icon: Settings },
 ];
 
-/** 表示順は 照合 → 日次記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類 → 使い方。 */
+/** 表示順は 照合 → 日次記録 → 袋の記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類 → 使い方。 */
 function navFor(canOperate: boolean): NavItem[] {
   if (!canOperate) return [...NAV_COMMON, NAV_GUIDE];
-  const [dashboard, daily, summary, first] = NAV_COMMON;
+  // NAV_COMMON の並びと数が変わったら、ここも合わせること（項目が黙って消える）
+  const [dashboard, daily, bags, summary, first] = NAV_COMMON;
   const [procurement, ...masters] = NAV_OPERATIONS;
-  return [dashboard, daily, summary, procurement, first, ...masters, NAV_GUIDE];
+  return [dashboard, daily, bags, summary, procurement, first, ...masters, NAV_GUIDE];
 }
 
 /** スクラップアプリのテーマ（銅色、アクティブは角丸＋丸バー）。 */

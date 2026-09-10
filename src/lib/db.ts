@@ -1476,7 +1476,7 @@ export async function listFirstArticles(
   const sql = getSql();
   const rows = await sql`
     SELECT f.measured_on, f.hinmoku_cd, f.kakuno_cd, f.weight, f.sokuteisha,
-      f.status, f.approved_by, f.reject_comment,
+      f.status, f.approved_by, f.reject_comment, f.note,
       (SELECT hinmei FROM scrap_items i
         WHERE i.company_id = f.company_id
           AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
@@ -1503,6 +1503,7 @@ export async function listFirstArticles(
     status: (r.status ?? "approved") as FaStatus,
     approvedBy: r.approved_by ?? "",
     rejectComment: r.reject_comment ?? "",
+    note: r.note ?? "",
     hinmei: r.hinmei ?? null,
     kanseiJuryo: numOrNull(r.kansei_juryo),
   }));
@@ -1529,6 +1530,94 @@ export async function upsertFirstArticle(
     ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
       weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
       status = 'pending', approved_by = '', approved_at = NULL, reject_comment = ''`;
+}
+
+/**
+ * 品目CDから品目マスターの候補を引く（Excel取込で格納場所CDを決めるため）。
+ * 1つの品目CDに複数の子図番があるので、品目CD×格納場所CD単位に畳む。
+ * 構成重量は子図番の合計、完成重量(理論)は子図番順の先頭（calc.ts と同じ扱い）。
+ */
+export async function listItemRefs(
+  companyId: string,
+  codes: string[]
+): Promise<
+  {
+    hinmokuCD: string;
+    kakunoCD: string;
+    seizoBashoCD: string;
+    factory: string;
+    kanseiJuryo: number;
+    koseiJuryo: number;
+  }[]
+> {
+  await ensureSchema();
+  const sql = getSql();
+  if (codes.length === 0) return [];
+  const rows = await sql`
+    SELECT kanri_zuban, kakuno_cd,
+      (ARRAY_AGG(seizo_basho_cd ORDER BY ko_zuban)) [1] AS seizo_basho_cd,
+      (ARRAY_AGG(factory ORDER BY ko_zuban)) [1] AS factory,
+      (ARRAY_AGG(kansei_juryo ORDER BY ko_zuban)) [1] AS kansei_juryo,
+      SUM(kosei_juryo) AS kosei_juryo
+    FROM scrap_items
+    WHERE company_id = ${companyId} AND kanri_zuban = ANY(${codes}::text[])
+    GROUP BY kanri_zuban, kakuno_cd`;
+  return rows.map((r: any) => ({
+    hinmokuCD: r.kanri_zuban,
+    kakunoCD: r.kakuno_cd,
+    seizoBashoCD: r.seizo_basho_cd ?? "",
+    factory: r.factory ?? "",
+    kanseiJuryo: num(r.kansei_juryo),
+    koseiJuryo: num(r.kosei_juryo),
+  }));
+}
+
+/**
+ * 初品測定の一括取込（過去分の移行用。承認済みで入れる）。
+ * 同じ 測定日×品目CD×格納場所CD は上書き。取込件数を返す。
+ */
+export async function bulkUpsertFirstArticles(
+  companyId: string,
+  rows: {
+    measuredOn: string;
+    hinmokuCD: string;
+    kakunoCD: string;
+    weight: number;
+    sokuteisha: string;
+    note: string;
+  }[],
+  approvedBy: string,
+  chunkSize = 500
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  // 同一チャンクに同じ一意キーが2行あると ON CONFLICT DO UPDATE が失敗するため畳む（後勝ち）
+  const uniq = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) uniq.set(`${r.measuredOn}\t${r.hinmokuCD}\t${r.kakunoCD}`, r);
+  const list = [...uniq.values()];
+  let count = 0;
+  for (let i = 0; i < list.length; i += chunkSize) {
+    const c = list.slice(i, i + chunkSize);
+    await sql`
+      INSERT INTO scrap_first_articles
+        (company_id, measured_on, hinmoku_cd, kakuno_cd, weight, sokuteisha,
+         status, approved_by, approved_at, note)
+      SELECT ${companyId}, t.d, t.h, t.k, t.w, t.s, 'approved', ${approvedBy}, NOW(), t.n
+      FROM unnest(
+        ${c.map((x) => x.measuredOn)}::date[],
+        ${c.map((x) => x.hinmokuCD)}::text[],
+        ${c.map((x) => x.kakunoCD)}::text[],
+        ${c.map((x) => x.weight)}::numeric[],
+        ${c.map((x) => x.sokuteisha)}::text[],
+        ${c.map((x) => x.note)}::text[]
+      ) AS t(d, h, k, w, s, n)
+      ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
+        weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
+        status = 'approved', approved_by = EXCLUDED.approved_by,
+        approved_at = NOW(), reject_comment = '', note = EXCLUDED.note`;
+    count += c.length;
+  }
+  return count;
 }
 
 /** 初品測定の承認/差し戻し（管理者のみが呼ぶ）。 */

@@ -86,6 +86,31 @@ export async function readSheetRows(file: File): Promise<string[][]> {
   return parseCsv(decodeText(buf));
 }
 
+/**
+ * File → シートごとの2次元配列。Excelブックは全シート、CSVは1枚として返す。ブラウザ専用。
+ * 1つのブックに様式違いの記録が同居することがあるため、取込側で全シートを見たいときに使う。
+ */
+export async function readSheetTables(file: File): Promise<{ name: string; rows: string[][] }[]> {
+  const buf = await file.arrayBuffer();
+  const head = new Uint8Array(buf, 0, Math.min(8, buf.byteLength));
+  if (head[0] === 0x50 && head[1] === 0x4b) {
+    const { readXlsx } = await import("./xlsx");
+    // 取込側は文字列で扱う（日付はシリアル値のまま渡り、取込側が日付に直す）
+    return (await readXlsx(buf)).map((s) => ({
+      name: s.name,
+      rows: s.rows.map((r) =>
+        Array.from(r, (c) => (c === null || c === undefined ? "" : String(c)))
+      ),
+    }));
+  }
+  if (head[0] === 0xd0 && head[1] === 0xcf) {
+    throw new Error(
+      "旧Excel形式(.xls)は取り込めません。Excelで「.xlsx」またはCSVとして保存し直してください。"
+    );
+  }
+  return [{ name: file.name, rows: parseCsv(decodeText(buf)) }];
+}
+
 /** CSV をダウンロードさせる（UTF-8 BOM 付き）。ブラウザ専用。 */
 export function downloadCsv(filename: string, rows: (string | number | null | undefined)[][]): void {
   const blob = new Blob(["\uFEFF" + toCsv(rows)], { type: "text/csv;charset=utf-8" });

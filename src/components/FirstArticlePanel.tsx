@@ -485,6 +485,7 @@ export default function FirstArticlePanel({
                   <div className="mt-0.5 text-xs text-[#909090]">
                     測定者 {h.sokuteisha} ／ 理論 {fmt(h.kanseiJuryo, 6)}
                   </div>
+                  {h.note && <div className="mt-0.5 text-xs text-[#a15c00]">{h.note}</div>}
                 </div>
                 <span className="shrink-0 text-right text-lg font-bold tabular-nums">
                   {fmt(h.weight, 6)}
@@ -564,7 +565,10 @@ export default function FirstArticlePanel({
                     >
                       {fmt(diff, 6)}
                     </td>
-                    <td className={td}>{h.sokuteisha}</td>
+                    <td className={td}>
+                      {h.sokuteisha}
+                      {h.note && <div className="text-xs text-[#a15c00]">{h.note}</div>}
+                    </td>
                     <td className={td}>
                       <StatusTag h={h} />
                       {h.status === "approved" && h.approvedBy && (

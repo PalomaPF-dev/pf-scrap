@@ -50,6 +50,8 @@ import {
   updateDailyStatus,
   updateFirstArticleStatus,
   upsertFirstArticle,
+  bulkUpsertFirstArticles,
+  listItemRefs,
   upsertItem,
   bulkUpsertItems,
   upsertMcframeQty,
@@ -1195,6 +1197,192 @@ export async function rejectFirstArticleAction(
     revalidatePath("/first");
     revalidatePath("/");
     return { ok: true, message: "差し戻しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 初品測定のExcel/CSV一括取込（過去分の移行用・管理者のみ）。
+ * 現場のブックは1件ずつ承認して回せる量ではないので、取り込んだ時点で承認済みにする
+ * （＝取込操作そのものが管理者による一括承認）。
+ *
+ * 桁ズレの直し方: 品目マスターの完成重量(理論) →（無ければ）構成重量 →（無ければ）
+ * その品目の測定値の中央値、を基準に、10のべき乗ぶんズレていて基準に十分近づく値だけ直す。
+ * 測定値どうしの中央値を基準にすると、同じ品目の記録がまとめて桁違いのとき
+ * （多数派が誤り）に逆へ直してしまうため、マスターを先に見る。
+ * 10のべき乗では説明できないズレは直さず「要確認」として件数を返す。
+ */
+export async function importFirstArticlesAction(input: {
+  factory?: string;
+  rows: {
+    hinmokuCD?: unknown;
+    kakunoCD?: unknown;
+    seizoBashoCD?: unknown;
+    measuredOn?: unknown;
+    weight?: unknown;
+  }[];
+}): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const rows = Array.isArray(input?.rows) ? input.rows : [];
+    if (rows.length === 0) return fail("取込データがありません。");
+    if (rows.length > 30000) return fail("一度に取込できるのは30,000行までです。");
+    const factory = asStr(input?.factory, 50);
+
+    type Parsed = {
+      hinmokuCD: string;
+      kakunoHint: string;
+      seizoHint: string;
+      measuredOn: string;
+      weight: number;
+    };
+    const parsed: Parsed[] = [];
+    let bad = 0;
+    for (const r of rows) {
+      const hinmokuCD = asStr(r.hinmokuCD, 50);
+      const measuredOn = normDateStr(r.measuredOn);
+      const weight = toNum(r.weight);
+      if (!hinmokuCD || !measuredOn || weight <= 0) {
+        bad++;
+        continue;
+      }
+      parsed.push({
+        hinmokuCD,
+        kakunoHint: asStr(r.kakunoCD, 50),
+        seizoHint: asStr(r.seizoBashoCD, 50),
+        measuredOn,
+        weight,
+      });
+    }
+    if (parsed.length === 0) return fail("品目CD・測定日・実測重量を読み取れる行がありませんでした。");
+
+    // 品目マスターから格納場所CDを決める（同じ品目CDが複数の格納場所にあるときは工場で絞る）
+    const refs = await listItemRefs(s.companyId, [...new Set(parsed.map((p) => p.hinmokuCD))]);
+    const byCode = new Map<string, typeof refs>();
+    for (const ref of refs) {
+      const list = byCode.get(ref.hinmokuCD);
+      if (list) list.push(ref);
+      else byCode.set(ref.hinmokuCD, [ref]);
+    }
+    type Resolved = Parsed & { ref: (typeof refs)[number] };
+    const resolved: Resolved[] = [];
+    const unknownCodes = new Set<string>();
+    const ambiguousCodes = new Set<string>();
+    for (const p of parsed) {
+      let cand = byCode.get(p.hinmokuCD) ?? [];
+      if (cand.length === 0) {
+        unknownCodes.add(p.hinmokuCD);
+        continue;
+      }
+      const narrow = (list: typeof cand, f: (r: (typeof refs)[number]) => boolean) => {
+        const hit = list.filter(f);
+        return hit.length > 0 ? hit : list;
+      };
+      if (p.kakunoHint) cand = narrow(cand, (r) => r.kakunoCD === p.kakunoHint);
+      if (cand.length > 1 && p.seizoHint) cand = narrow(cand, (r) => r.seizoBashoCD === p.seizoHint);
+      if (cand.length > 1 && factory) cand = narrow(cand, (r) => r.factory === factory);
+      if (cand.length > 1) {
+        ambiguousCodes.add(p.hinmokuCD);
+        continue;
+      }
+      resolved.push({ ...p, ref: cand[0] });
+    }
+    if (resolved.length === 0) {
+      return fail(
+        `取り込める行がありませんでした。品目マスターに無い品目CD: ${[...unknownCodes].slice(0, 10).join(", ")}${unknownCodes.size > 10 ? " ほか" : ""}`
+      );
+    }
+
+    // 品目ごとの基準値（マスター優先、無ければ測定値の中央値）
+    const groups = new Map<string, Resolved[]>();
+    for (const r of resolved) {
+      const k = `${r.ref.hinmokuCD}\t${r.ref.kakunoCD}`;
+      const list = groups.get(k);
+      if (list) list.push(r);
+      else groups.set(k, [r]);
+    }
+    const median = (a: number[]) => {
+      const t = [...a].sort((x, y) => x - y);
+      return t[Math.floor(t.length / 2)] ?? 0;
+    };
+
+    const sokuteisha = `Excel取込${factory ? `（${factory}）` : ""}`;
+    const out: {
+      measuredOn: string;
+      hinmokuCD: string;
+      kakunoCD: string;
+      weight: number;
+      sokuteisha: string;
+      note: string;
+    }[] = [];
+    const fixed: string[] = [];
+    let fixedCount = 0;
+    const check: string[] = [];
+    let checkCount = 0;
+    for (const [, list] of groups) {
+      const ref = list[0].ref;
+      const anchor =
+        ref.kanseiJuryo > 0
+          ? ref.kanseiJuryo
+          : ref.koseiJuryo > 0
+            ? ref.koseiJuryo
+            : median(list.map((r) => r.weight));
+      for (const r of list) {
+        let weight = r.weight;
+        let note = "Excel取込";
+        if (anchor > 0) {
+          const k = Math.round(Math.log10(weight / anchor));
+          if (k !== 0 && Math.abs(k) <= 3) {
+            // 10で割った端数（0.017499999…）が残らないよう有効桁で丸める
+            const scaled = Number((weight / 10 ** k).toPrecision(10));
+            // 10のべき乗ぶん直して基準に十分近づくときだけ採用する
+            if (Math.abs(scaled / anchor - 1) <= 0.35) {
+              note = `Excel取込・桁補正 ${r.weight} → ${scaled}`;
+              if (fixedCount < 8) fixed.push(`${r.hinmokuCD} ${r.measuredOn} ${r.weight}→${scaled}`);
+              fixedCount++;
+              weight = scaled;
+            }
+          }
+          const gap = weight / anchor;
+          if (gap > 2 || gap < 0.5) {
+            if (checkCount < 8) check.push(`${r.hinmokuCD} ${r.measuredOn} ${weight}（理論${anchor}）`);
+            checkCount++;
+          }
+        }
+        out.push({
+          measuredOn: r.measuredOn,
+          hinmokuCD: ref.hinmokuCD,
+          kakunoCD: ref.kakunoCD,
+          weight,
+          sokuteisha,
+          note,
+        });
+      }
+    }
+    const count = await bulkUpsertFirstArticles(
+      s.companyId,
+      out,
+      s.userName || s.loginId || ""
+    );
+    revalidatePath("/first");
+    revalidatePath("/mcframe");
+    revalidatePath("/");
+    const lines = [`取込完了: ${count}件を承認済みで登録しました。`];
+    if (fixedCount) {
+      lines.push(`桁補正 ${fixedCount}件（他の日の水準に合わせました）: ${fixed.join(" / ")}${fixedCount > fixed.length ? " ほか" : ""}`);
+    }
+    if (checkCount) {
+      lines.push(`要確認 ${checkCount}件（理論値と2倍以上ちがい、桁ズレでは説明できません。そのまま登録しています）: ${check.join(" / ")}${checkCount > check.length ? " ほか" : ""}`);
+    }
+    if (unknownCodes.size) {
+      lines.push(`品目マスターに無く取り込めなかった品目CD ${unknownCodes.size}件: ${[...unknownCodes].slice(0, 10).join(", ")}${unknownCodes.size > 10 ? " ほか" : ""}`);
+    }
+    if (ambiguousCodes.size) {
+      lines.push(`格納場所を特定できなかった品目CD ${ambiguousCodes.size}件（工場を選び直してください）: ${[...ambiguousCodes].slice(0, 10).join(", ")}`);
+    }
+    if (bad) lines.push(`読み取れなかった行 ${bad}件`);
+    return { ok: true, message: lines.join("\n") };
   } catch (e) {
     return fail((e as Error).message);
   }

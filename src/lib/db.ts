@@ -1648,13 +1648,38 @@ export async function updateFirstArticleStatus(
   }
 }
 
-/** 申請中（pending）の初品測定の件数。ポータルの承認待ちバッジ用。 */
-export async function countPendingFirstArticles(companyId: string): Promise<number> {
+/**
+ * 申請中（pending）の初品測定の件数。ポータルの承認待ちバッジ用。
+ * factory 指定でその工場の品目のみ（品目マスターの工場で判定。一覧の絞り込みと同じ扱い）。
+ */
+export async function countPendingFirstArticles(
+  companyId: string,
+  factory: string | null = null
+): Promise<number> {
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
-    SELECT COUNT(*)::int AS n FROM scrap_first_articles
-    WHERE company_id = ${companyId} AND status = 'pending'`;
+    SELECT COUNT(*)::int AS n FROM scrap_first_articles f
+    WHERE f.company_id = ${companyId} AND f.status = 'pending'
+      AND (${factory}::text IS NULL OR EXISTS (
+        SELECT 1 FROM scrap_items i
+        WHERE i.company_id = f.company_id
+          AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
+          AND (i.factory = ${factory} OR i.factory = '')))`;
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** 締め済みで未承認（status='closed'）の袋の件数。ポータルの承認待ちバッジ用。 */
+export async function countPendingBags(
+  companyId: string,
+  factory: string | null = null
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT COUNT(*)::int AS n FROM scrap_bags
+    WHERE company_id = ${companyId} AND status = 'closed'
+      AND (${factory}::text IS NULL OR factory = ${factory})`;
   return Number(rows[0]?.n ?? 0);
 }
 

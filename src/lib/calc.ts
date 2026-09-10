@@ -56,13 +56,19 @@ function monthEnd(ym: string): string {
  * 単品完成重量は「対象日（月なら月末）以前の最新の承認済み初品実測」を優先（無ければマスター理論値）。
  * factory 指定でその工場の品目のみ（null=全社）。
  */
+export interface ItemRowsResult {
+  rows: MonthlyItemRow[];
+  /** 工場で絞ったときに集計から外した品目（他工場・マスター未登録）。件数と加工数 */
+  skipped: { items: number; qty: number };
+}
+
 async function itemRows(
   companyId: string,
   mode: "day" | "month",
   ym: string,
   qdate: string,
   factory: string | null
-): Promise<MonthlyItemRow[]> {
+): Promise<ItemRowsResult> {
   await ensureSchema();
   const sql = getSql();
   // 単品完成重量の基準日（月なら月末）
@@ -105,9 +111,17 @@ async function itemRows(
         AND f.status = 'approved'
         AND f.measured_on <= ${asOf}::date
       ORDER BY f.measured_on DESC LIMIT 1
-    ) fa ON true
-    WHERE (${factory}::text IS NULL OR COALESCE(i.cnt, 0) > 0)`;
-  const out: MonthlyItemRow[] = rows.map((r: any) => {
+    ) fa ON true`;
+  // 工場で絞るとき、その工場の品目マスターに無い行（他工場・未登録）は集計から外す。
+  // 黙って落とすと完成重量が過小に見えるので、外した件数と加工数を呼び出し元へ返す。
+  const skipped = { items: 0, qty: 0 };
+  const target = rows.filter((r: any) => {
+    if (factory === null || Number(r.cnt) > 0) return true;
+    skipped.items++;
+    skipped.qty += Number(r.qty) || 0;
+    return false;
+  });
+  const out: MonthlyItemRow[] = target.map((r: any) => {
     const qty = Number(r.qty) || 0;
     const found = Number(r.all_cnt) > 0;
     const theoUnit = Number(r.theo_unit) || 0;
@@ -136,25 +150,34 @@ async function itemRows(
     };
   });
   out.sort((a, b) => b.scrap - a.scrap);
-  return out;
+  return { rows: out, skipped };
+}
+
+/** 対象月の品目別計算（日別加工数がある月は日別の合計を使う）。除外件数つき。 */
+export function monthlyItemRowsDetailed(
+  companyId: string,
+  ym: string,
+  factory: string | null = null
+): Promise<ItemRowsResult> {
+  return itemRows(companyId, "month", ym, `${ym}-01`, factory);
 }
 
 /** 対象月の品目別計算（日別加工数がある月は日別の合計を使う）。 */
-export function monthlyItemRows(
+export async function monthlyItemRows(
   companyId: string,
   ym: string,
   factory: string | null = null
 ): Promise<MonthlyItemRow[]> {
-  return itemRows(companyId, "month", ym, `${ym}-01`, factory);
+  return (await itemRows(companyId, "month", ym, `${ym}-01`, factory)).rows;
 }
 
 /** 対象日の品目別計算（日別加工数のみ）。 */
-export function dailyItemRows(
+export async function dailyItemRows(
   companyId: string,
   date: string,
   factory: string | null = null
 ): Promise<MonthlyItemRow[]> {
-  return itemRows(companyId, "day", date.slice(0, 7), date, factory);
+  return (await itemRows(companyId, "day", date.slice(0, 7), date, factory)).rows;
 }
 
 export interface DailyBom {
@@ -251,6 +274,10 @@ export interface MonthlySummary {
   ym: string;
   perKubun: Record<string, KubunSummary>;
   itemRows: MonthlyItemRow[];
+  /** McFrameの加工数が入っている月か（false のとき完成重量・理論スクラップは出せない） */
+  hasMcframe: boolean;
+  /** 工場で絞ったときに集計から外した品目（他工場・マスター未登録）。件数と加工数 */
+  skippedItems: { items: number; qty: number };
   daily: { total: number; byKind: Record<string, number>; days: number };
   baikyaku: number | null;
   diff6: number | null;
@@ -317,10 +344,13 @@ async function resolveZaiko(
   ym: string,
   factory: string | null,
   depth = 0
-): Promise<KubunAmounts | null> {
+): Promise<{ amounts: KubunAmounts; anchored: boolean } | null> {
   const inp = await getMonthlyInput(companyId, ym, factory);
   if (inp && (inp.zaikoDojo !== null || inp.zaikoDokan !== null || inp.zaikoSonota !== null)) {
-    return { 銅条: inp.zaikoDojo ?? 0, 銅管: inp.zaikoDokan ?? 0, その他: inp.zaikoSonota ?? 0 };
+    return {
+      amounts: { 銅条: inp.zaikoDojo ?? 0, 銅管: inp.zaikoDokan ?? 0, その他: inp.zaikoSonota ?? 0 },
+      anchored: true,
+    };
   }
   if (depth >= 18) return null;
   const pm = prevYmOf(ym);
@@ -331,9 +361,12 @@ async function resolveZaiko(
   const usage = await usageBomByKubun(companyId, pm, factory);
   const adj = await monthlyAdjSums(companyId, pm, factory);
   return {
-    銅条: prev.銅条 + konyu.銅条 - usage.銅条 + adj.銅条,
-    銅管: prev.銅管 + konyu.銅管 - usage.銅管 + adj.銅管,
-    その他: prev.その他 + konyu.その他 - usage.その他 + adj.その他,
+    amounts: {
+      銅条: prev.amounts.銅条 + konyu.銅条 - usage.銅条 + adj.銅条,
+      銅管: prev.amounts.銅管 + konyu.銅管 - usage.銅管 + adj.銅管,
+      その他: prev.amounts.その他 + konyu.その他 - usage.その他 + adj.その他,
+    },
+    anchored: false,
   };
 }
 
@@ -343,17 +376,24 @@ export async function monthlySummary(
   ym: string,
   factory: string | null = null
 ): Promise<MonthlySummary> {
-  const [inp, itemRows, daily, procure] = await Promise.all([
+  const [inp, bom, daily, procure] = await Promise.all([
     getMonthlyInput(companyId, ym, factory),
-    monthlyItemRows(companyId, ym, factory),
+    monthlyItemRowsDetailed(companyId, ym, factory),
     dailyMonthTotals(companyId, ym, factory),
     monthlyProcureSums(companyId, ym, factory),
   ]);
-  const [zaiko, zaikoNext, konyu] = await Promise.all([
+  const itemRows = bom.rows;
+  const [zaikoRes, zaikoNextRes, konyu] = await Promise.all([
     resolveZaiko(companyId, ym, factory),
     resolveZaiko(companyId, nextYm(ym), factory),
     effectiveKonyu(companyId, ym, factory),
   ]);
+  const zaiko = zaikoRes?.amounts ?? null;
+  const zaikoNext = zaikoNextRes?.amounts ?? null;
+  // 翌月の月初在庫が「棚卸で確定した値」のときだけ在庫法が成り立つ。
+  // 理論ロールした値を使うと 使用量 = 月初 + 購入 − (月初 + 購入 − 構成法使用量) となり、
+  // 中身は構成法そのものなのに「在庫法」と表示されてしまう（循環）。
+  const invMethodOk = zaikoNextRes?.anchored === true;
 
   const perKubun: Record<string, KubunSummary> = {};
   for (const kb of [...KUBUN_LIST, "全体"]) {
@@ -381,11 +421,11 @@ export async function monthlySummary(
     t.zaiko = zaiko ? zaiko[kb] : null;
     t.konyu = konyu ? konyu[kb] : null;
     t.zaikoNext = zaikoNext ? zaikoNext[kb] : null;
-    if (t.zaiko !== null && t.konyu !== null && t.zaikoNext !== null) {
+    if (invMethodOk && t.zaiko !== null && t.konyu !== null && t.zaikoNext !== null) {
       t.usageInv = t.zaiko + t.konyu - t.zaikoNext;
     }
     const usage = t.usageInv !== null ? t.usageInv : t.usageBom;
-    t.method = t.usageInv !== null ? "在庫法" : "構成法";
+    t.method = t.usageInv !== null ? "在庫法" : hasBom ? "構成法" : null;
     // 完成重量が算出できない月（McFrame加工数が未取込）は理論スクラップも不明とする。
     // 0扱いにすると「使用量まるごとがスクラップ」という誤った数字になる。
     t.scrapTheo = hasBom ? usage - t.finished : null;
@@ -396,11 +436,11 @@ export async function monthlySummary(
     t.zaiko = sum(zaiko);
     t.konyu = sum(konyu);
     t.zaikoNext = sum(zaikoNext);
-    if (t.zaiko !== null && t.konyu !== null && t.zaikoNext !== null) {
+    if (invMethodOk && t.zaiko !== null && t.konyu !== null && t.zaikoNext !== null) {
       t.usageInv = t.zaiko + t.konyu - t.zaikoNext;
     }
     const usage = t.usageInv !== null ? t.usageInv : t.usageBom;
-    t.method = t.usageInv !== null ? "在庫法" : "構成法";
+    t.method = t.usageInv !== null ? "在庫法" : hasBom ? "構成法" : null;
     t.scrapTheo = hasBom ? usage - t.finished : null;
   }
 
@@ -414,6 +454,8 @@ export async function monthlySummary(
     ym,
     perKubun,
     itemRows,
+    hasMcframe: hasBom,
+    skippedItems: bom.skipped,
     daily,
     baikyaku,
     // ⑥ 売却 vs 日次記録

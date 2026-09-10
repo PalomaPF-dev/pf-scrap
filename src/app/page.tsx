@@ -106,8 +106,19 @@ export default async function DashboardPage({
       <section className="mb-6 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
         <h2 className="mb-1 text-sm font-bold text-[#333333]">月次サマリー（区分別）</h2>
         <p className="mb-3 text-xs text-[#909090]">
-          使用量 = 月初在庫 + 購入重量 − 翌月月初在庫（未入力時は構成重量ベース） / 理論スクラップ = 使用量 − 完成重量
+          使用量 = 月初在庫 + 購入重量 − 翌月月初在庫（翌月の月初在庫が未入力の月は構成重量ベース） / 理論スクラップ = 使用量 − 完成重量
         </p>
+        {!s.hasMcframe && (
+          <p className="mb-3 rounded-lg bg-[#fff3e0] px-3 py-2 text-xs text-[#a15c00]">
+            この月はMcFrameの加工数が未取込です。完成重量・理論スクラップは月末に取り込むと出ます（「-」で表示）。
+          </p>
+        )}
+        {s.skippedItems.items > 0 && (
+          <p className="mb-3 rounded-lg bg-[#fdecea] px-3 py-2 text-xs text-[#dc000c]">
+            品目マスターにこの工場の登録が無い {s.skippedItems.items}品目（加工数 {fmt(s.skippedItems.qty, 0)}）を集計から外しています。
+            品目マスターに登録すると完成重量・理論スクラップに含まれます。
+          </p>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-sm">
             <thead>
@@ -133,12 +144,12 @@ export default async function DashboardPage({
                     <td className={tdNum}>{fmt(r.zaiko)}</td>
                     <td className={tdNum}>{fmt(r.konyu)}</td>
                     <td className={tdNum}>{fmt(r.zaikoNext)}</td>
-                    <td className={tdNum}>{fmt(usage)}</td>
+                    <td className={tdNum}>{fmt(r.method === null ? null : usage)}</td>
                     <td className={td}>
                       <MethodBadge method={r.method} />
                     </td>
-                    <td className={tdNum}>{fmt(r.usageBom)}</td>
-                    <td className={tdNum}>{fmt(r.finished)}</td>
+                    <td className={tdNum}>{fmt(s.hasMcframe ? r.usageBom : null)}</td>
+                    <td className={tdNum}>{fmt(s.hasMcframe ? r.finished : null)}</td>
                     <td className={`${tdNum} ${r.scrapTheo !== null && r.scrapTheo < 0 ? "text-[#dc000c]" : ""}`}>
                       {fmt(r.scrapTheo)}
                     </td>

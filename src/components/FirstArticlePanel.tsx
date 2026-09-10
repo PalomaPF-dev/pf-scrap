@@ -512,6 +512,7 @@ export default function FirstArticlePanel({
                     </button>
                   </>
                 )}
+                {isAdmin && (
                 <button
                   onClick={() => remove(h)}
                   className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#e5e5e5] px-3 text-xs text-[#dc000c]"
@@ -519,6 +520,7 @@ export default function FirstArticlePanel({
                   <Trash2 className="h-3.5 w-3.5" />
                   削除
                 </button>
+                )}
               </div>
             </li>
           ))}
@@ -597,6 +599,7 @@ export default function FirstArticlePanel({
                             </button>
                           </>
                         )}
+                        {isAdmin && (
                         <button
                           onClick={() => remove(h)}
                           className="rounded p-1 text-[#dc000c] hover:bg-[#fdecea]"
@@ -604,6 +607,7 @@ export default function FirstArticlePanel({
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
+                        )}
                       </div>
                     </td>
                   </tr>

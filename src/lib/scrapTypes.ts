@@ -279,6 +279,8 @@ export interface FirstArticle {
   status: FaStatus;
   approvedBy: string;
   rejectComment: string;
+  /** 取込の由来メモ（Excel取込・桁補正の記録）。手入力は空 */
+  note: string;
   /** 品目マスターの表示用（品名・理論値）。未登録は null */
   hinmei: string | null;
   kanseiJuryo: number | null;

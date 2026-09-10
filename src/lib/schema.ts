@@ -319,6 +319,9 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS approved_by TEXT NOT NULL DEFAULT ''`);
   await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`);
   await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS reject_comment TEXT NOT NULL DEFAULT ''`);
+  // 取込の由来メモ（例: 「Excel取込」「Excel取込・桁補正 0.175 → 0.0175」）。
+  // 桁を直した値は、元の記入値が分かるようにここへ残す。
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT ''`);
   // ワークフロー導入前の既存測定値は承認済みとして扱う（計算結果を変えない）
   {
     const applied = await sql`SELECT 1 FROM pf_scrap_migrations WHERE key = 'fa_status_backfill_v1' LIMIT 1`.catch(() => []);

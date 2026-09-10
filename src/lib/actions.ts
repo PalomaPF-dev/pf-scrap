@@ -1142,16 +1142,34 @@ export async function saveFirstArticleAction(input: {
   }
 }
 
+/**
+ * 初品測定の削除（管理者のみ）。
+ * 承認済みの測定値を消すと完成重量の計算が理論値へ戻るため、日次記録の削除と同じ扱いにする。
+ * 測り直しは同じ日に登録し直せば上書きされる（削除は要らない）。
+ */
 export async function deleteFirstArticleAction(
   measuredOn: string,
   hinmokuCD: string,
   kakunoCD: string
 ): Promise<ActionResult> {
   try {
-    const s = await requireEntitledSession();
+    const s = await requireAdminSession();
     if (!isDateStr(measuredOn)) return fail("日付が正しくありません。");
-    await deleteFirstArticle(s.companyId, measuredOn, asStr(hinmokuCD, 50), asStr(kakunoCD, 50));
+    const hinmoku = asStr(hinmokuCD, 50);
+    const kakuno = asStr(kakunoCD, 50);
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted) {
+      const refs = await listItemRefs(s.companyId, [hinmoku]);
+      const ref = refs.find((r) => r.kakunoCD === kakuno);
+      // 工場が分からない品目（マスター未登録）は、取り違えを避けるため触らせない
+      if (!ref || (ref.factory && ref.factory !== restriction.factory)) {
+        return fail(`所属工場（${restriction.factory}）の品目のみ削除できます。`);
+      }
+    }
+    await deleteFirstArticle(s.companyId, measuredOn, hinmoku, kakuno);
     revalidatePath("/first");
+    revalidatePath("/mcframe");
+    revalidatePath("/");
     return { ok: true, message: "削除しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1227,8 +1245,17 @@ export async function importFirstArticlesAction(input: {
     const s = await requireAdminSession();
     const rows = Array.isArray(input?.rows) ? input.rows : [];
     if (rows.length === 0) return fail("取込データがありません。");
-    if (rows.length > 30000) return fail("一度に取込できるのは30,000行までです。");
-    const factory = asStr(input?.factory, 50);
+    // Server Action の本文上限（next.config.ts の bodySizeLimit）に収まる行数にする
+    if (rows.length > 20000) return fail("一度に取込できるのは20,000行までです。期間で分けて取り込んでください。");
+    let factory = asStr(input?.factory, 50);
+    // 日次記録のExcel取込と同じく、所属工場つきのユーザーは自工場だけ
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted) {
+      if (factory && factory !== restriction.factory) {
+        return fail(`所属工場（${restriction.factory}）にのみ取り込めます。`);
+      }
+      factory = restriction.factory!;
+    }
 
     type Parsed = {
       hinmokuCD: string;

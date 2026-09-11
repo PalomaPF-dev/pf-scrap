@@ -113,6 +113,22 @@ export default async function DashboardPage({
             この月はMcFrameの加工数が未取込です。完成重量・理論スクラップは月末に取り込むと出ます（「-」で表示）。
           </p>
         )}
+        {s.mcframe.dayRows > 0 && s.mcframe.monthRows > 0 && (
+          <p className="mb-3 rounded-lg bg-[#f7f7f5] px-3 py-2 text-xs text-[#707070]">
+            この月は日別の加工数（{s.mcframe.dayRows}件）を使っています。過去データ移行で入れた月次の取込値（
+            {s.mcframe.monthRows}件）は二重計上を避けるため未使用です。
+          </p>
+        )}
+        {s.procureCoverage && s.procureCoverage.entered < s.procureCoverage.inMonth && (
+          <p className="mb-3 rounded-lg bg-[#fff3e0] px-3 py-2 text-xs text-[#a15c00]">
+            購入・売却は調達入力（日次）の合計を使っています。この月の入力は
+            {s.procureCoverage.inMonth}日中 {s.procureCoverage.entered}日分だけです（
+            <Link href={`/procurement?ym=${ym}`} className="underline">
+              調達入力
+            </Link>
+            ）。入力漏れがあると使用量・差異が過小になります。月次入力の値は使いません。
+          </p>
+        )}
         {s.skippedItems.items > 0 && (
           <p className="mb-3 rounded-lg bg-[#fdecea] px-3 py-2 text-xs text-[#dc000c]">
             品目マスターにこの工場の登録が無い {s.skippedItems.items}品目（加工数 {fmt(s.skippedItems.qty, 0)}）を集計から外しています。

@@ -1774,6 +1774,25 @@ export async function upsertMcframeDays(
 }
 
 /** 対象月に日別の加工数が入っているか（月次集計で日別を優先するかの判定）。 */
+/**
+ * 対象月の加工数が「日別」「月次取込（過去データ移行）」のどちらで入っているか。
+ * 併存する月は日別だけを使う（二重計上を避けるため）ので、画面でその旨を出すのに使う。
+ */
+export async function mcframeSources(
+  companyId: string,
+  ym: string
+): Promise<{ days: number; months: number }> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT
+      (SELECT COUNT(*)::int FROM scrap_mcframe_days
+        WHERE company_id = ${companyId} AND to_char(qdate, 'YYYY-MM') = ${ym}) AS days,
+      (SELECT COUNT(*)::int FROM scrap_mcframe_qty
+        WHERE company_id = ${companyId} AND ym = ${ym}) AS months`;
+  return { days: Number(rows[0]?.days ?? 0), months: Number(rows[0]?.months ?? 0) };
+}
+
 export async function hasMcframeDays(companyId: string, ym: string): Promise<boolean> {
   await ensureSchema();
   const sql = getSql();

@@ -179,8 +179,10 @@ export async function upsertItem(
       seizo_basho_mei = EXCLUDED.seizo_basho_mei,
       kakuno_mei = EXCLUDED.kakuno_mei,
       factory = EXCLUDED.factory,
+      auto_added = false,
       updated_at = NOW()
     RETURNING id`;
+  await dropAutoAddedDuplicates(companyId);
   return rows[0].id as string;
 }
 
@@ -235,10 +237,94 @@ export async function bulkUpsertItems(
         seizo_basho_mei = EXCLUDED.seizo_basho_mei,
         kakuno_mei = EXCLUDED.kakuno_mei,
         factory = EXCLUDED.factory,
+        auto_added = false,
         updated_at = NOW()`;
     count += c.length;
   }
+  await dropAutoAddedDuplicates(companyId);
   return count;
+}
+
+/**
+ * 本物の品目マスター行が入った品目について、McFrame実績から自動登録した仮行を消す。
+ * 仮行（重量0）が残ると、完成重量(理論)を子図番順の先頭から取る集計で 0 を拾ってしまう。
+ */
+async function dropAutoAddedDuplicates(companyId: string): Promise<void> {
+  const sql = getSql();
+  await sql`
+    DELETE FROM scrap_items a
+    WHERE a.company_id = ${companyId} AND a.auto_added = true
+      AND EXISTS (
+        SELECT 1 FROM scrap_items b
+        WHERE b.company_id = a.company_id AND b.auto_added = false
+          AND b.kanri_zuban = a.kanri_zuban AND b.kakuno_cd = a.kakuno_cd)`;
+}
+
+/**
+ * McFrameの製造実績に出てくる品目のうち、品目マスターに無いものを登録する。
+ * McFrameが正なので取り込むが、実績出力には構成重量・完成重量(理論)が無いので重量は0のまま。
+ * 既にある品目（本物・仮を問わず）は触らない。登録した品目CDの一覧を返す。
+ */
+export async function addMissingItemsFromMcframe(
+  companyId: string,
+  items: {
+    hinmokuCD: string;
+    kakunoCD: string;
+    hinmei: string;
+    kakunoMei: string;
+    seizoBashoCD: string;
+    seizoBashoMei: string;
+  }[],
+  factoryOptions: string[]
+): Promise<{ hinmokuCD: string; kakunoCD: string; hinmei: string }[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const uniq = new Map<string, (typeof items)[number]>();
+  for (const it of items) {
+    if (!it.hinmokuCD || !it.kakunoCD) continue;
+    uniq.set(`${it.hinmokuCD}\t${it.kakunoCD}`, it);
+  }
+  if (uniq.size === 0) return [];
+  const list = [...uniq.values()];
+  const known = await sql`
+    SELECT DISTINCT kanri_zuban, kakuno_cd FROM scrap_items
+    WHERE company_id = ${companyId}
+      AND kanri_zuban = ANY(${list.map((x) => x.hinmokuCD)}::text[])`;
+  const have = new Set(known.map((r: any) => `${r.kanri_zuban}\t${r.kakuno_cd}`));
+  const missing = list.filter((x) => !have.has(`${x.hinmokuCD}\t${x.kakunoCD}`));
+  if (missing.length === 0) return [];
+  // 工場は場所名から推定する（「直方内胴組立」→「直方」）。分からなければ空（全工場から見える）
+  const guessFactory = (it: (typeof items)[number]) => {
+    const hay = `${it.kakunoMei} ${it.seizoBashoMei}`;
+    // 「直方工場」のように工場名に接尾辞が付いていても拾えるようにする
+    const hit = factoryOptions
+      .filter((f) => f && (hay.includes(f) || hay.includes(f.replace(/(工場|製造所)$/, ""))))
+      .sort((a, b) => b.length - a.length);
+    return hit[0] ?? "";
+  };
+  const chunkSize = 200;
+  for (let i = 0; i < missing.length; i += chunkSize) {
+    const c = missing.slice(i, i + chunkSize);
+    await sql`
+      INSERT INTO scrap_items (
+        company_id, kanri_zuban, hinmei, kubun, ko_zuban, tani,
+        kosei_juryo, kansei_juryo, seizo_basho_cd, seizo_basho_mei,
+        kakuno_cd, kakuno_mei, factory, auto_added
+      )
+      SELECT ${companyId}, t.z, t.n, 'その他', '', 'K', 0, 0, t.sc, t.sm, t.kc, t.km, t.f, true
+      FROM unnest(
+        ${c.map((x) => x.hinmokuCD)}::text[], ${c.map((x) => x.hinmei)}::text[],
+        ${c.map((x) => x.seizoBashoCD)}::text[], ${c.map((x) => x.seizoBashoMei)}::text[],
+        ${c.map((x) => x.kakunoCD)}::text[], ${c.map((x) => x.kakunoMei)}::text[],
+        ${c.map((x) => guessFactory(x))}::text[]
+      ) AS t(z, n, sc, sm, kc, km, f)
+      ON CONFLICT (company_id, kanri_zuban, kakuno_cd, ko_zuban) DO NOTHING`;
+  }
+  return missing.map((x) => ({
+    hinmokuCD: x.hinmokuCD,
+    kakunoCD: x.kakunoCD,
+    hinmei: x.hinmei,
+  }));
 }
 
 export async function deleteItem(companyId: string, id: string): Promise<void> {

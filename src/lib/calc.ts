@@ -32,7 +32,8 @@ export interface MonthlyItemRow {
   found: boolean;
   qty: number;
   unitFinished: number;
-  unitSource: "実測" | "理論" | "未登録";
+  /** 実測 / 理論（マスターの完成重量） / 重量未設定（マスターにあるが重量0） / 未登録（マスターに無い） */
+  unitSource: "実測" | "理論" | "重量未設定" | "未登録";
   faDate: string | null;
   usage: number;
   finished: number;
@@ -129,8 +130,10 @@ async function itemRows(
       SELECT (ARRAY_AGG(kubun ORDER BY ko_zuban)) [1] AS kubun,
              (ARRAY_AGG(hinmei ORDER BY ko_zuban)) [1] AS hinmei,
              (ARRAY_AGG(kansei_juryo ORDER BY ko_zuban)) [1] AS kansei_juryo,
-             SUM(kosei_juryo) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS kosei_sum,
-             COUNT(*) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS cnt,
+             SUM(kosei_juryo) FILTER (
+               WHERE ${factory}::text IS NULL OR factory = ${factory} OR factory = '') AS kosei_sum,
+             COUNT(*) FILTER (
+               WHERE ${factory}::text IS NULL OR factory = ${factory} OR factory = '') AS cnt,
              COUNT(*) AS all_cnt
       FROM scrap_items s
       WHERE s.company_id = ${companyId}
@@ -165,7 +168,8 @@ async function itemRows(
       found,
       qty,
       unitFinished,
-      unitSource: measDays > 0 ? "実測" : found ? "理論" : "未登録",
+      unitSource:
+        measDays > 0 ? "実測" : !found ? "未登録" : theoUnit > 0 ? "理論" : "重量未設定",
       faDate:
         r.fa_date instanceof Date
           ? r.fa_date.toISOString().slice(0, 10)
@@ -262,8 +266,10 @@ export async function mcframeDayTotals(
     FROM scrap_mcframe_days m
     LEFT JOIN LATERAL (
       SELECT (ARRAY_AGG(kansei_juryo ORDER BY ko_zuban)) [1] AS kansei_juryo,
-             SUM(kosei_juryo) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS kosei_sum,
-             COUNT(*) FILTER (WHERE ${factory}::text IS NULL OR factory = ${factory}) AS cnt
+             SUM(kosei_juryo) FILTER (
+               WHERE ${factory}::text IS NULL OR factory = ${factory} OR factory = '') AS kosei_sum,
+             COUNT(*) FILTER (
+               WHERE ${factory}::text IS NULL OR factory = ${factory} OR factory = '') AS cnt
       FROM scrap_items s
       WHERE s.company_id = ${companyId}
         AND s.kanri_zuban = m.hinmoku_cd AND s.kakuno_cd = m.kakuno_cd

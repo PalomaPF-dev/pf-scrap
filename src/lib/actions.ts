@@ -50,7 +50,9 @@ import {
   updateDailyStatus,
   updateFirstArticleStatus,
   upsertFirstArticle,
+  addMissingItemsFromMcframe,
   bulkUpsertFirstArticles,
+  listFactoryOptions,
   listItemRefs,
   upsertItem,
   bulkUpsertItems,
@@ -1429,6 +1431,19 @@ export async function importMcframeAction(
     date?: unknown;
     ym?: unknown;
     qty?: unknown;
+  }[],
+  /**
+   * 実績に出てくる品目の情報（品目CD×格納場所CDで一意）。
+   * McFrameが正なので、品目マスターに無い品目はここから登録する
+   * （実績出力には重量が無いため、構成重量・完成重量は未設定のままになる）。
+   */
+  items?: {
+    hinmokuCD?: unknown;
+    kakunoCD?: unknown;
+    hinmei?: unknown;
+    kakunoMei?: unknown;
+    seizoBashoCD?: unknown;
+    seizoBashoMei?: unknown;
   }[]
 ): Promise<ActionResult> {
   try {
@@ -1472,6 +1487,24 @@ export async function importMcframeAction(
     }
     const dayCount = days.size ? await upsertMcframeDays(s.companyId, [...days.values()]) : 0;
     const monthCount = months.size ? await upsertMcframeQty(s.companyId, [...months.values()]) : 0;
+    // 品目マスターに無い品目を登録する（McFrameの実績が正）
+    let added: { hinmokuCD: string; kakunoCD: string; hinmei: string }[] = [];
+    if (Array.isArray(items) && items.length > 0) {
+      const factories = await listFactoryOptions(s.companyId);
+      added = await addMissingItemsFromMcframe(
+        s.companyId,
+        items.slice(0, 20000).map((it) => ({
+          hinmokuCD: asStr(it.hinmokuCD, 50),
+          kakunoCD: asStr(it.kakunoCD, 50),
+          hinmei: asStr(it.hinmei, 200),
+          kakunoMei: asStr(it.kakunoMei, 200),
+          seizoBashoCD: asStr(it.seizoBashoCD, 50),
+          seizoBashoMei: asStr(it.seizoBashoMei, 200),
+        })),
+        factories
+      );
+      if (added.length > 0) revalidatePath("/items");
+    }
     revalidatePath("/mcframe");
     revalidatePath("/daily");
     revalidatePath("/");
@@ -1479,10 +1512,20 @@ export async function importMcframeAction(
       dayCount ? `日別 ${dayCount}件` : "",
       monthCount ? `月次 ${monthCount}件` : "",
     ].filter(Boolean);
-    return {
-      ok: true,
-      message: `取込完了: ${parts.join(" / ") || "0件"}（読取不可行: ${bad}件）`,
-    };
+    const lines = [`取込完了: ${parts.join(" / ") || "0件"}（読取不可行: ${bad}件）`];
+    if (added.length > 0) {
+      const sample = added
+        .slice(0, 8)
+        .map((a) => `${a.hinmokuCD}/${a.kakunoCD}${a.hinmei ? `（${a.hinmei}）` : ""}`)
+        .join(", ");
+      lines.push(
+        `品目マスターに無かった ${added.length}品目を登録しました（重量は未設定）: ${sample}${added.length > 8 ? " ほか" : ""}`
+      );
+      lines.push(
+        "実績には構成重量・完成重量が無いため、この品目の完成重量・理論スクラップは0のままです。品目マスターで重量を入れるか、McFrameの品目マスター出力を取り込んでください。"
+      );
+    }
+    return { ok: true, message: lines.join("\n") };
   } catch (e) {
     return fail((e as Error).message);
   }

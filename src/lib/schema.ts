@@ -85,6 +85,10 @@ async function buildSchema(): Promise<void> {
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_company_idx ON scrap_items(company_id)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_ko_zuban_idx ON scrap_items(company_id, ko_zuban)`);
+  // McFrameの製造実績取込で自動登録した品目の目印。
+  // 実績には品名と場所しか無く、構成重量・完成重量(理論)は入らないため、
+  // 後から本物の品目マスターを取り込んだらこの行は消す（重量0の行が残ると完成重量が0になる）。
+  await safeDdl(() => sql`ALTER TABLE scrap_items ADD COLUMN IF NOT EXISTS auto_added BOOLEAN NOT NULL DEFAULT false`);
 
   // スクラップ種類マスター（上銅 / 銅ダライ / 銅スクラップ …）。
   // 種類は現場の運用で増えるため、定数ではなく設定で足せるようにする。

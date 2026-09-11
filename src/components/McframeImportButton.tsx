@@ -17,6 +17,8 @@ import { toNum } from "@/lib/format";
  *     1行目が英語・2行目が日本語の2段見出しでもそのまま読む）
  *   - 品目CD, 格納場所CD, 日付, 加工数（月次は 日付 の代わりに 年月）
  * 同じ品目が同じ日に複数行あっても、取込時に合計される。
+ * 品目マスターに無い品目は、実績の品名・場所から登録する（McFrameが正）。
+ * ただし実績出力に重量は無いので、構成重量・完成重量は未設定のままになる。
  * CSVの文字コードは UTF-8 / Shift_JIS 自動判定。
  */
 export default function McframeImportButton() {
@@ -72,6 +74,10 @@ export default function McframeImportButton() {
 
     let start: number;
     let idxItem: number, idxKakuno: number, idxPeriod: number, idxQty: number;
+    let idxHinmei = -1;
+    let idxKakunoMei = -1;
+    let idxSeizoCD = -1;
+    let idxSeizoMei = -1;
     if (head >= 0) {
       const h = rows[head];
       // McFrameの出力は見出しが2段（英語＋日本語）のことがあるので、続く見出し行も読み飛ばす
@@ -86,6 +92,11 @@ export default function McframeImportButton() {
           ? find(h, "出来高計上日", "yield_ac_dt", "出来高実績日", "yield_act_dt", "日付", "完成日", "実績日")
           : find(h, "年月", "日付");
       idxQty = find(h, "基準単位良品数量", "base_unit_yield_qty", "加工数", "良品数量", "数量", "qty");
+      // 品目マスターに無い品目を登録するための情報（実績出力にあれば拾う）
+      idxHinmei = find(h, "品名", "itm_nm");
+      idxKakunoMei = find(h, "格納場所名", "strg_loc_nm");
+      idxSeizoCD = find(h, "製造場所cd", "mfg_loc_cd");
+      idxSeizoMei = find(h, "製造場所名", "mfg_loc_nm");
     } else {
       // 見出し無し: 品目CD, 格納場所CD, 日付(年月), 加工数
       start = 0;
@@ -102,14 +113,42 @@ export default function McframeImportButton() {
       );
       return;
     }
+    const cell = (r: string[], i: number) => (i >= 0 ? String(r[i] ?? "").trim() : "");
+    // 品目マスターに無い品目を登録するため、品目CD×格納場所CDごとに品名と場所を集める
+    const itemInfo = new Map<
+      string,
+      {
+        hinmokuCD: string;
+        kakunoCD: string;
+        hinmei: string;
+        kakunoMei: string;
+        seizoBashoCD: string;
+        seizoBashoMei: string;
+      }
+    >();
     const records = rows
       .slice(start)
       .filter((r) => String(r[idxItem] ?? "").trim() !== "")
       .map((r) => {
         const period = String(r[idxPeriod] ?? "").trim();
+        const hinmokuCD = String(r[idxItem] ?? "").trim();
+        const kakunoCD = String(r[idxKakuno] ?? "").trim();
+        if (kakunoCD) {
+          const key = `${hinmokuCD}\t${kakunoCD}`;
+          if (!itemInfo.has(key)) {
+            itemInfo.set(key, {
+              hinmokuCD,
+              kakunoCD,
+              hinmei: cell(r, idxHinmei),
+              kakunoMei: cell(r, idxKakunoMei),
+              seizoBashoCD: cell(r, idxSeizoCD),
+              seizoBashoMei: cell(r, idxSeizoMei),
+            });
+          }
+        }
         return {
-          hinmokuCD: String(r[idxItem] ?? "").trim(),
-          kakunoCD: String(r[idxKakuno] ?? "").trim(),
+          hinmokuCD,
+          kakunoCD,
           date: mode === "daily" ? period : "",
           ym: mode === "daily" ? "" : period,
           qty: String(r[idxQty] ?? "").trim(),
@@ -130,7 +169,7 @@ export default function McframeImportButton() {
       else merged.set(key, { ...r });
     }
     startTransition(async () => {
-      const res = await importMcframeAction([...merged.values()]);
+      const res = await importMcframeAction([...merged.values()], [...itemInfo.values()]);
       setMessage(res.message ?? "");
       if (res.ok) router.refresh();
     });

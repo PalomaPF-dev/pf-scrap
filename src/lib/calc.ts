@@ -3,6 +3,7 @@ import { ensureSchema } from "./schema";
 import {
   dailyMonthTotals,
   getMonthlyInput,
+  mcframeSources,
   monthlyAdjSums,
   monthlyProcureSums,
   KUBUN_LIST,
@@ -16,7 +17,7 @@ import {
  *
  *   使用量(在庫法)   = 月初在庫 + 購入重量 − 翌月月初在庫
  *   使用量(構成法)   = Σ(加工数 × 構成重量)          … McFrame取込 × 品目マスター
- *   完成重量         = Σ(加工数 × 単品完成重量)       … 単品完成重量は初品実測を優先
+ *   完成重量         = Σ(その日の加工数 × その日の単品完成重量) … 実測はその生産日以前の最新を使う
  *   理論スクラップ   = 使用量 − 完成重量 (在庫法があれば在庫法、なければ構成法)
  *   ⑥ 売却 − 日次記録合計
  *   ⑦ 売却 − 理論スクラップ (=Excelの「売量vs理論」) / 日次記録 − 理論スクラップ
@@ -36,6 +37,12 @@ export interface MonthlyItemRow {
   usage: number;
   finished: number;
   scrap: number;
+}
+
+/** YYYY-MM の日数 */
+function daysInMonth(ym: string): number {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
 }
 
 /** YYYY-MM の月末日（YYYY-MM-DD） */
@@ -71,28 +78,53 @@ async function itemRows(
 ): Promise<ItemRowsResult> {
   await ensureSchema();
   const sql = getSql();
-  // 単品完成重量の基準日（月なら月末）
+  // 実測は「その生産日以前の最新の承認済み実測」を使う。月次も日ごとに掛けてから合計するので、
+  // 日別表の合計と月次表の合計が一致する（月の途中で測り直した品目もその日から新しい値になる）。
+  // 日付を持たない過去データ移行の月次取込値だけは、月末時点の実測で評価する。
   const asOf = mode === "day" ? qdate : monthEnd(ym);
   const rows = await sql`
     WITH src AS (
-      SELECT hinmoku_cd, kakuno_cd, SUM(qty)::numeric AS qty
+      SELECT hinmoku_cd, kakuno_cd, qdate, SUM(qty)::numeric AS qty
       FROM scrap_mcframe_days
       WHERE company_id = ${companyId}
         AND ((${mode} = 'day' AND qdate = ${qdate}::date)
           OR (${mode} = 'month' AND to_char(qdate, 'YYYY-MM') = ${ym}))
-      GROUP BY hinmoku_cd, kakuno_cd
+      GROUP BY hinmoku_cd, kakuno_cd, qdate
       UNION ALL
       -- 日別が1件も無い月だけ、月次取込値を使う（二重計上を避ける）
-      SELECT hinmoku_cd, kakuno_cd, qty FROM scrap_mcframe_qty q
+      SELECT hinmoku_cd, kakuno_cd, NULL::date, qty FROM scrap_mcframe_qty q
       WHERE q.company_id = ${companyId} AND ${mode} = 'month' AND q.ym = ${ym}
         AND NOT EXISTS (
           SELECT 1 FROM scrap_mcframe_days d
           WHERE d.company_id = ${companyId} AND to_char(d.qdate, 'YYYY-MM') = ${ym})
+    ),
+    -- 生産日ごとに、その日に有効だった実測値を引き当てる
+    val AS (
+      SELECT s.hinmoku_cd, s.kakuno_cd, s.qty, fa.weight AS fa_weight, fa.measured_on AS fa_date
+      FROM src s
+      LEFT JOIN LATERAL (
+        SELECT weight, measured_on FROM scrap_first_articles f
+        WHERE f.company_id = ${companyId}
+          AND f.hinmoku_cd = s.hinmoku_cd AND f.kakuno_cd = s.kakuno_cd
+          AND f.status = 'approved'
+          AND f.measured_on <= COALESCE(s.qdate, ${asOf}::date)
+        ORDER BY f.measured_on DESC LIMIT 1
+      ) fa ON true
+    ),
+    agg AS (
+      SELECT hinmoku_cd, kakuno_cd,
+        SUM(qty) AS qty,
+        -- 実測が引き当たった日の重量合計と、引き当たらなかった日の加工数（理論値で評価する）
+        SUM(qty * COALESCE(fa_weight, 0)) AS meas_weight,
+        SUM(CASE WHEN fa_weight IS NULL THEN qty ELSE 0 END) AS qty_no_meas,
+        MAX(fa_date) AS fa_date,
+        COUNT(*) FILTER (WHERE fa_weight IS NOT NULL) AS meas_days
+      FROM val GROUP BY hinmoku_cd, kakuno_cd
     )
-    SELECT m.hinmoku_cd, m.kakuno_cd, m.qty,
+    SELECT m.hinmoku_cd, m.kakuno_cd, m.qty, m.meas_weight, m.qty_no_meas, m.meas_days,
       i.kubun, i.hinmei, i.kansei_juryo AS theo_unit, i.kosei_sum, i.cnt, i.all_cnt,
-      fa.weight AS fa_weight, fa.measured_on AS fa_date
-    FROM src m
+      m.fa_date
+    FROM agg m
     LEFT JOIN LATERAL (
       SELECT (ARRAY_AGG(kubun ORDER BY ko_zuban)) [1] AS kubun,
              (ARRAY_AGG(hinmei ORDER BY ko_zuban)) [1] AS hinmei,
@@ -103,15 +135,7 @@ async function itemRows(
       FROM scrap_items s
       WHERE s.company_id = ${companyId}
         AND s.kanri_zuban = m.hinmoku_cd AND s.kakuno_cd = m.kakuno_cd
-    ) i ON true
-    LEFT JOIN LATERAL (
-      SELECT weight, measured_on FROM scrap_first_articles f
-      WHERE f.company_id = ${companyId}
-        AND f.hinmoku_cd = m.hinmoku_cd AND f.kakuno_cd = m.kakuno_cd
-        AND f.status = 'approved'
-        AND f.measured_on <= ${asOf}::date
-      ORDER BY f.measured_on DESC LIMIT 1
-    ) fa ON true`;
+    ) i ON true`;
   // 工場で絞るとき、その工場の品目マスターに無い行（他工場・未登録）は集計から外す。
   // 黙って落とすと完成重量が過小に見えるので、外した件数と加工数を呼び出し元へ返す。
   const skipped = { items: 0, qty: 0 };
@@ -125,10 +149,14 @@ async function itemRows(
     const qty = Number(r.qty) || 0;
     const found = Number(r.all_cnt) > 0;
     const theoUnit = Number(r.theo_unit) || 0;
-    const faWeight = r.fa_weight === null || r.fa_weight === undefined ? null : Number(r.fa_weight);
-    const unitFinished = faWeight ?? theoUnit;
+    // 完成重量 = Σ(その日の加工数 × その日に有効だった実測値)。実測が無い日は理論値で評価する
+    const measWeight = Number(r.meas_weight) || 0;
+    const qtyNoMeas = Number(r.qty_no_meas) || 0;
+    const measDays = Number(r.meas_days) || 0;
+    const finished = measWeight + qtyNoMeas * theoUnit;
+    // 表の「単品完成重量」は、日ごとの値を加工数で加重平均した値（測り直した月は中間の値になる）
+    const unitFinished = qty > 0 ? finished / qty : theoUnit;
     const usage = qty * (Number(r.kosei_sum) || 0);
-    const finished = qty * unitFinished;
     return {
       hinmokuCD: r.hinmoku_cd,
       kakunoCD: r.kakuno_cd,
@@ -137,7 +165,7 @@ async function itemRows(
       found,
       qty,
       unitFinished,
-      unitSource: faWeight !== null ? "実測" : found ? "理論" : "未登録",
+      unitSource: measDays > 0 ? "実測" : found ? "理論" : "未登録",
       faDate:
         r.fa_date instanceof Date
           ? r.fa_date.toISOString().slice(0, 10)
@@ -278,6 +306,10 @@ export interface MonthlySummary {
   hasMcframe: boolean;
   /** 工場で絞ったときに集計から外した品目（他工場・マスター未登録）。件数と加工数 */
   skippedItems: { items: number; qty: number };
+  /** 加工数の取込元（日別と月次が併存する月は日別だけを使う） */
+  mcframe: { dayRows: number; monthRows: number };
+  /** 購入・売却に日次調達を使っているときの入力状況（何日分入っているか） */
+  procureCoverage: { entered: number; inMonth: number; used: boolean } | null;
   daily: { total: number; byKind: Record<string, number>; days: number };
   baikyaku: number | null;
   diff6: number | null;
@@ -376,11 +408,12 @@ export async function monthlySummary(
   ym: string,
   factory: string | null = null
 ): Promise<MonthlySummary> {
-  const [inp, bom, daily, procure] = await Promise.all([
+  const [inp, bom, daily, procure, sources] = await Promise.all([
     getMonthlyInput(companyId, ym, factory),
     monthlyItemRowsDetailed(companyId, ym, factory),
     dailyMonthTotals(companyId, ym, factory),
     monthlyProcureSums(companyId, ym, factory),
+    mcframeSources(companyId, ym),
   ]);
   const itemRows = bom.rows;
   const [zaikoRes, zaikoNextRes, konyu] = await Promise.all([
@@ -456,6 +489,12 @@ export async function monthlySummary(
     itemRows,
     hasMcframe: hasBom,
     skippedItems: bom.skipped,
+    mcframe: { dayRows: sources.days, monthRows: sources.months },
+    // 日次調達を使っている月は、何日分入力されているかを出す（月の一部だけだと購入・売却が過小になる）
+    procureCoverage:
+      procure.cnt > 0
+        ? { entered: procure.cnt, inMonth: daysInMonth(ym), used: true }
+        : null,
     daily,
     baikyaku,
     // ⑥ 売却 vs 日次記録

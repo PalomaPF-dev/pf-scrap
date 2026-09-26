@@ -73,7 +73,17 @@ function UseToggle({
  * - 記録で使われている工場は削除できない（記録は工場名を文字列で持っているため）
  * - 手で追加して、まだ使っていない工場・職場だけ削除できる
  */
-export default function FactoryMasterTable({ factories }: { factories: FactoryMaster[] }) {
+export default function FactoryMasterTable({
+  factories,
+  suggestions,
+}: {
+  factories: FactoryMaster[];
+  /**
+   * 記録に出てくる職場（紙の記録票の「部署」欄など）で、まだ職場として登録されていないもの。
+   * 工場名 → [{ 名前, 件数 }]。同じ名前で登録すれば、過去の記録もその職場として集計される。
+   */
+  suggestions: Record<string, { name: string; count: number }[]>;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [msg, setMsg] = useState<PanelMessage | null>(null);
@@ -231,6 +241,30 @@ export default function FactoryMasterTable({ factories }: { factories: FactoryMa
                         </li>
                       ))}
                     </ul>
+                  )}
+                  {(suggestions[f.name] ?? []).length > 0 && (
+                    <div className="mt-2 rounded-lg bg-[#f7f7f5] p-2">
+                      <p className="text-xs text-[#707070]">
+                        記録に出てくる職場（まだ登録していないもの）。押すとそのまま職場として登録し、
+                        過去の記録もその職場で集計されます。
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {(suggestions[f.name] ?? []).map((sg) => (
+                          <button
+                            key={sg.name}
+                            type="button"
+                            disabled={pending}
+                            onClick={() => run(() => addWorkplaceAction(f.name, sg.name))}
+                            aria-label={`${sg.name} を職場に登録`}
+                            className="inline-flex items-center gap-1 rounded-full border border-dashed border-[#b4632c] bg-white px-2.5 py-1 text-xs font-semibold text-[#b4632c] hover:bg-[#faf6ef] disabled:opacity-50"
+                          >
+                            <Plus className="h-3 w-3" />
+                            {sg.name}
+                            <span className="font-normal text-[#909090]">{sg.count.toLocaleString("ja-JP")}件</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
                   <form
                     className="mt-2 flex flex-wrap items-center gap-2"

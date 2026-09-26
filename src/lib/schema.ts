@@ -186,7 +186,8 @@ async function buildSchema(): Promise<void> {
   //   スクラップ重量 = 投入前重量(箱含む) − 箱重量(空き箱)
   // を自動計算する。スクラップ箱は常時重量計の上にあるため、累積表示値
   // （投入前 cum_before / 投入後 cum_after）も記録し、差分との整合を確認する。
-  // hinshu 列には箱の種類（上銅/銅ダライ）を入れる。busho/kikai/kotei は旧様式の名残（新規入力では未使用）。
+  // hinshu 列には箱の種類（上銅/銅ダライ）を入れる。kikai/kotei は旧様式の名残（新規入力では未使用）。
+  // busho は「どの職場のスクラップか」（2026-09〜 新規入力でも使う。紙の記録票の「部署」欄と同じ意味）。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS scale_id UUID`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS scale_name TEXT NOT NULL DEFAULT ''`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS gross_weight NUMERIC`);

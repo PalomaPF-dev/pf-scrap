@@ -1128,6 +1128,8 @@ export interface BagEntryRow {
   weight: number;
   kirokusha: string;
   ijo: string;
+  /** どの職場のスクラップか */
+  workplace: string;
 }
 
 export async function listBagEntriesByMonth(
@@ -1140,7 +1142,7 @@ export async function listBagEntriesByMonth(
   const rows = await sql`
     SELECT b.bag_no, b.status, b.factory, b.scale_name,
            r.record_date, e.jikoku, e.hinshu, e.cum_before, e.cum_after, e.weight,
-           e.kirokusha, e.ijo
+           e.kirokusha, e.ijo, e.busho
     FROM scrap_bags b
     JOIN scrap_daily_entries e ON e.bag_id = b.id
     JOIN scrap_daily_records r ON r.id = e.record_id
@@ -1161,6 +1163,7 @@ export async function listBagEntriesByMonth(
     weight: num(r.weight),
     kirokusha: r.kirokusha ?? "",
     ijo: r.ijo ?? "",
+    workplace: r.busho ?? "",
   }));
 }
 
@@ -2342,6 +2345,103 @@ export async function listFactoryMasters(companyId: string): Promise<FactoryMast
     out.push({ code: null, name, sort: 9999, active: true, source: "data", usage: n, workplaces: [] });
   }
   return out;
+}
+
+/**
+ * 日次記録で選べる職場（その工場の「使う」職場）。
+ * 投入の記録には職場名を文字列で残す（明細の busho 列）。
+ */
+export async function listWorkplaceOptions(companyId: string, factory: string): Promise<string[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT w.name, w.sort FROM portal_workplaces w
+    JOIN portal_factories f ON f.company_id = w.company_id AND f.code = w.factory_code
+    WHERE w.company_id = ${companyId} AND f.name = ${factory} AND w.active = true
+    ORDER BY w.sort ASC, w.name ASC`;
+  const out: string[] = [];
+  for (const r of rows) {
+    const n = String(r.name);
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+/**
+ * 記録に出てくる職場（部署）で、まだ職場マスタに無いもの。工場ごとに件数つきで返す。
+ * 紙の記録票（Excel）から取り込んだ行は「部署」欄に職場が入っているので、
+ * 設定画面で「そのまま職場として登録」できるようにするために使う。
+ */
+export async function listWorkplaceSuggestions(
+  companyId: string
+): Promise<Record<string, { name: string; count: number }[]>> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT r.factory, e.busho AS name, COUNT(*)::int AS n
+    FROM scrap_daily_entries e
+    JOIN scrap_daily_records r ON r.id = e.record_id
+    WHERE r.company_id = ${companyId} AND e.busho <> ''
+      AND NOT EXISTS (
+        SELECT 1 FROM portal_workplaces w
+        JOIN portal_factories f ON f.company_id = w.company_id AND f.code = w.factory_code
+        WHERE w.company_id = r.company_id AND f.name = r.factory AND w.name = e.busho
+      )
+    GROUP BY r.factory, e.busho
+    ORDER BY r.factory, n DESC, e.busho`;
+  const out: Record<string, { name: string; count: number }[]> = {};
+  for (const r of rows) {
+    const f = String(r.factory);
+    (out[f] ??= []).push({ name: String(r.name), count: Number(r.n) || 0 });
+  }
+  return out;
+}
+
+/** 月間の職場別集計（職場＝明細の busho。未入力は空文字）。 */
+export interface WorkplaceAggRow {
+  factory: string;
+  workplace: string;
+  /** 種類名 → 合計kg */
+  byKind: Record<string, number>;
+  total: number;
+  count: number;
+}
+
+export async function listWorkplaceAgg(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<WorkplaceAggRow[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT r.factory, e.busho AS workplace, e.hinshu, SUM(e.weight) AS w, COUNT(*)::int AS n
+    FROM scrap_daily_entries e
+    JOIN scrap_daily_records r ON r.id = e.record_id
+    WHERE r.company_id = ${companyId}
+      AND to_char(r.record_date, 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR r.factory = ${factory})
+    GROUP BY r.factory, e.busho, e.hinshu
+    ORDER BY r.factory, e.busho`;
+  const map = new Map<string, WorkplaceAggRow>();
+  for (const r of rows) {
+    const key = `${r.factory}\u0000${r.workplace}`;
+    const row =
+      map.get(key) ??
+      { factory: String(r.factory), workplace: String(r.workplace ?? ""), byKind: {}, total: 0, count: 0 };
+    const w = num(r.w);
+    row.byKind[String(r.hinshu)] = (row.byKind[String(r.hinshu)] ?? 0) + w;
+    row.total += w;
+    row.count += Number(r.n) || 0;
+    map.set(key, row);
+  }
+  // 職場が入っているものを先に、未入力（空）は各工場の最後に並べる
+  return [...map.values()].sort(
+    (a, b) =>
+      a.factory.localeCompare(b.factory) ||
+      Number(a.workplace === "") - Number(b.workplace === "") ||
+      a.workplace.localeCompare(b.workplace)
+  );
 }
 
 /** 手動で追加するマスタのコード。ポータルのコードと重ならないよう接頭辞を付ける。 */

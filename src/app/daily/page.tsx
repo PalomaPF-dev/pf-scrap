@@ -1,6 +1,6 @@
 import { BarChart3, FileSpreadsheet } from "lucide-react";
 import { requireEntitledSession, getFactoryRestriction, canUseOperations } from "@/lib/session";
-import { getUserAffiliation } from "@/lib/authDb";
+import { getUserAffiliation, getUserRoleFactory } from "@/lib/authDb";
 import {
   KUBUN_LIST,
   getDailyRecord,
@@ -8,6 +8,7 @@ import {
   listBagsForDate,
   listFactoryOptions,
   listOpenBags,
+  listWorkplaceOptions,
   listScaleReads,
   listScales,
   listScrapKinds,
@@ -47,6 +48,8 @@ export default async function DailyPage({
   let openBags: ScrapBag[];
   let dayBags: ScrapBag[];
   let bagStartOn: string;
+  let workplaces: string[];
+  let myWorkplace: string;
   let affiliation: string | null;
   let bom: DailyBom;
   try {
@@ -59,6 +62,10 @@ export default async function DailyPage({
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
     affiliation = await getUserAffiliation(session.userId);
+    // どの職場のスクラップかを選ぶ候補（設定で「使う」にした、この工場の職場）。
+    // 所属職場が候補にあれば最初から選んでおく。
+    workplaces = await listWorkplaceOptions(session.companyId, factory);
+    myWorkplace = (await getUserRoleFactory(session.companyId, session.userId)).workplace ?? "";
     // 袋運用の開始日。これより前の日は従来どおり日単位の記録として扱う。
     // 設定が無ければ「最初に袋を開いた日」、袋がまだ無ければ今日から。
     const bagStart = await getBagStart(session.companyId, factory);
@@ -117,6 +124,8 @@ export default async function DailyPage({
         dayBags={dayBags}
         bagEra={date >= bagStartOn}
         bagStartOn={bagStartOn}
+        workplaces={workplaces}
+        myWorkplace={myWorkplace}
         kinds={kinds}
         userName={recorder}
         isAdmin={isAdmin}

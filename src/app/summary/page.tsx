@@ -6,6 +6,8 @@ import {
   listDailyAgg,
   listFactoryOptions,
   listScrapKinds,
+  listWorkplaceAgg,
+  type WorkplaceAggRow,
   type DailyAggRow,
   type ScrapKind,
 } from "@/lib/db";
@@ -53,6 +55,7 @@ export default async function SummaryPage({
   let factory: string;
   let agg: DailyAggRow[];
   let kinds: ScrapKind[];
+  let wpAgg: WorkplaceAggRow[];
   const bagStartByFactory: Record<string, string> = {};
   try {
     const restriction = await getFactoryRestriction(session);
@@ -62,9 +65,11 @@ export default async function SummaryPage({
       ? [restriction.factory!]
       : await listFactoryOptions(session.companyId);
     factory = restriction.restricted ? restriction.factory! : (sp.factory ?? "").trim();
-    [agg, kinds] = await Promise.all([
+    [agg, kinds, wpAgg] = await Promise.all([
       listDailyAgg(session.companyId, ym, factory || null),
       listScrapKinds(session.companyId),
+      // どの職場のスクラップか（明細の職場＝紙の記録票の「部署」欄）
+      listWorkplaceAgg(session.companyId, ym, factory || null),
     ]);
     // 袋運用の開始日は工場ごと。これより前の日は「日単位の管理」として区別して出す。
     const targets = factory ? [factory] : [...new Set(agg.map((r) => r.factory))];
@@ -137,6 +142,18 @@ export default async function SummaryPage({
   // 表の列数（データ無しの行・合計行の colSpan 用）
   const cols = 4 + shownKinds.length + (kind ? 0 : 4) + 1 + (isAdmin ? 1 : 0);
   const restCols = (kind ? 1 : 4) + (isAdmin ? 1 : 0);
+
+  // 職場別。種類で絞っているときは、その種類の重量だけを見る。
+  // 職場が1件も入っていない月は出さない（入力していない工場で空の表を見せない）。
+  const wpRows = wpAgg
+    .map((r) => ({ ...r, shown: kind ? (r.byKind[kind] ?? 0) : r.total }))
+    .filter((r) => !kind || r.shown !== 0);
+  const showWorkplace = wpRows.some((r) => r.workplace !== "");
+  const wpTotal = wpRows.reduce((t, r) => t + r.shown, 0);
+  const wpExportHref =
+    `/api/export?type=workplaces&ym=${ym}` +
+    (factory ? `&factory=${encodeURIComponent(factory)}` : "") +
+    (kind ? `&kind=${encodeURIComponent(kind)}` : "");
 
   const exportHref =
     `/api/export?type=daily&ym=${ym}` +
@@ -283,6 +300,76 @@ export default async function SummaryPage({
                     </td>
                   ))}
                   {!kind && <td className={tdNum}>{fmt(grandTotal)}</td>}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* 職場別（どの職場からスクラップが出たか） */}
+      {showWorkplace && (
+        <section className="mt-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-bold text-[#333333]">職場別</h2>
+              <p className="mt-0.5 text-xs text-[#909090]">
+                どの職場から出たスクラップか。紙の記録票から取り込んだ分は「部署」欄の値です。
+              </p>
+            </div>
+            <a
+              href={wpExportHref}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-xs font-medium text-[#555555] hover:bg-[#f7f7f5]"
+            >
+              <FileDown className="h-4 w-4" />
+              職場別CSV
+            </a>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="print-table w-full border-collapse text-sm">
+              <thead>
+                <tr>
+                  {!factory && <th className={th}>工場</th>}
+                  <th className={th}>職場</th>
+                  <th className={thNum}>件数</th>
+                  {shownKinds.map((n) => (
+                    <th key={n} className={thNum}>
+                      {n}(kg)
+                    </th>
+                  ))}
+                  {!kind && <th className={thNum}>合計(kg)</th>}
+                  <th className={thNum}>割合</th>
+                </tr>
+              </thead>
+              <tbody>
+                {wpRows.map((r) => (
+                  <tr key={`${r.factory}|${r.workplace}`}>
+                    {!factory && <td className={td}>{r.factory}</td>}
+                    <td className={`${td} ${r.workplace ? "" : "text-[#909090]"}`}>
+                      {r.workplace || "（職場の入力なし）"}
+                    </td>
+                    <td className={tdNum}>{r.count}</td>
+                    {shownKinds.map((n) => (
+                      <td key={n} className={tdNum}>
+                        {fmt(r.byKind[n] ?? 0)}
+                      </td>
+                    ))}
+                    {!kind && <td className={`${tdNum} font-semibold`}>{fmt(r.total)}</td>}
+                    <td className={tdNum}>{fmtPct(wpTotal > 0 ? r.shown / wpTotal : null)}</td>
+                  </tr>
+                ))}
+                <tr className="bg-[#faf6ef] font-semibold">
+                  <td className={td} colSpan={factory ? 1 : 2}>
+                    合計
+                  </td>
+                  <td className={tdNum}>{wpRows.reduce((t, r) => t + r.count, 0)}</td>
+                  {shownKinds.map((n) => (
+                    <td key={n} className={tdNum}>
+                      {fmt(wpRows.reduce((t, r) => t + (r.byKind[n] ?? 0), 0))}
+                    </td>
+                  ))}
+                  {!kind && <td className={tdNum}>{fmt(wpTotal)}</td>}
+                  <td className={tdNum}></td>
                 </tr>
               </tbody>
             </table>

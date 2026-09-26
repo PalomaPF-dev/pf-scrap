@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState, useTransition } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   CheckCircle2,
@@ -102,11 +102,26 @@ function entryReason(e: EntryDraft): string {
 }
 
 /**
- * 発生元（部署 / 機械 / 品種 / 工程）。Excelの記録票から取り込んだ行だけが持つ。
- * 新しい画面では入力しない項目なので、値があるときだけ小さく添える。
+ * 発生元の補足（機械 / 品種 / 工程）。Excelの記録票から取り込んだ行だけが持つ。
+ * 職場（部署）は独立した列で出すので、ここには含めない。
  */
 function entryOrigin(e: EntryDraft): string {
-  return [e.busho, e.kikai, e.zairyo, e.kotei].filter(Boolean).join(" / ");
+  return [e.kikai, e.zairyo, e.kotei].filter(Boolean).join(" / ");
+}
+
+/** 端末の保存（localStorage）の変化を購読する。別タブで選び直したときにも追従する。 */
+function subscribeStorage(onChange: () => void): () => void {
+  window.addEventListener("storage", onChange);
+  return () => window.removeEventListener("storage", onChange);
+}
+
+/** 端末の保存から読む。使えない端末（プライベートモード等）では null。 */
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
 
 /** 現在時刻 HH:MM（JST）。時刻は入力した時間が自動で入る。 */
@@ -196,6 +211,8 @@ export default function DailyRecordForm({
   dayBags,
   bagEra,
   bagStartOn,
+  workplaces,
+  myWorkplace,
   kinds,
   userName,
   isAdmin,
@@ -214,6 +231,10 @@ export default function DailyRecordForm({
   bagEra: boolean;
   /** 袋運用の開始日 YYYY-MM-DD（表示用） */
   bagStartOn: string;
+  /** この工場で選べる職場（設定で「使う」にしたもの）。空なら職場は聞かない */
+  workplaces: string[];
+  /** ログインユーザーの所属職場（候補にあれば最初から選んでおく） */
+  myWorkplace: string;
   /** スクラップ種類（設定マスタ。並び順＝表示順・色の順） */
   kinds: ScrapKind[];
   userName: string;
@@ -275,6 +296,35 @@ export default function DailyRecordForm({
 
   // ===== 計量入力（AI読取） =====
   const [ijo, setIjo] = useState("");
+
+  // ===== どの職場のスクラップか =====
+  // 同じ人は同じ職場のスクラップを続けて記録するので、選んだ職場は端末に覚えておき、
+  // 次からは最初から選んだ状態にする（毎回選ばせると手間と押し間違いが増える）。
+  const workplaceKey = `scrap.workplace.${factory}`;
+  // 端末に覚えた職場。サーバーの描画では読めないので null とし、画面に出てから読む
+  // （useSyncExternalStore がサーバーと画面の食い違いを吸収する）。
+  const savedWorkplace = useSyncExternalStore(
+    subscribeStorage,
+    () => readStorage(workplaceKey),
+    () => null
+  );
+  // この画面で選び直した職場。選んでいなければ 前回の職場 → 所属職場 の順に使う
+  const [pickedWorkplace, setPickedWorkplace] = useState<string | null>(null);
+  const workplace =
+    pickedWorkplace ??
+    (savedWorkplace && workplaces.includes(savedWorkplace)
+      ? savedWorkplace
+      : workplaces.includes(myWorkplace)
+        ? myWorkplace
+        : "");
+  function setWorkplace(next: string) {
+    setPickedWorkplace(next);
+    try {
+      window.localStorage.setItem(workplaceKey, next);
+    } catch {
+      // 保存できなくても選択はこの画面で効く
+    }
+  }
   // 投入前・投入後とも「機械が出した値」を既定にし、変えるときだけ理由を残す。
   // read = AI読取の結果（readId と値）。null は読み取っていない状態。
   const [beforeRead, setBeforeRead] = useState<{ readId: string; value: number } | null>(null);
@@ -543,6 +593,14 @@ export default function DailyRecordForm({
       setMessage({ ok: false, text: "投入先のスクラップ箱（重量計）を選択してください。" });
       return;
     }
+    if (workplaces.length > 0 && !workplace) {
+      setMessage({
+        ok: false,
+        title: "職場を選んでください",
+        text: "どの職場のスクラップかを選んでから記録してください。",
+      });
+      return;
+    }
     if (bagEra && !currentBag) {
       setMessage({
         ok: false,
@@ -600,7 +658,9 @@ export default function DailyRecordForm({
         kirokusha: userName, // 記録者はログインユーザー
         ijo,
         // 発生元はExcelの記録票にしか無い項目（新しい画面では入力しない）
-        busho: "",
+        // どの職場のスクラップか。紙の記録票の「部署」欄と同じ列に入れて、
+        // 取り込んだ過去の記録と同じ切り口で集計できるようにする。
+        busho: workplace,
         kikai: "",
         zairyo: "",
         kotei: "",
@@ -1011,6 +1071,53 @@ export default function DailyRecordForm({
           title="投入して、投入後を読み取る"
           hint="スクラップ重量 = 投入後の表示値 − 投入前の表示値。箱は重量計に載ったままなので箱の重量は相殺されます。"
         >
+          {/*
+            どの職場のスクラップか。前回選んだ職場（無ければ所属職場）が最初から選ばれている。
+            ボタンの色は読み取り（青）・記録（オレンジ）と重ならないよう、濃いグレーにする。
+          */}
+          {workplaces.length > 0 && (
+            <div className="mb-4">
+              <div className="mb-1.5 text-sm font-bold text-[#333333]">どの職場のスクラップですか</div>
+              {workplaces.length <= 8 ? (
+                <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="職場">
+                  {workplaces.map((w) => (
+                    <button
+                      key={w}
+                      type="button"
+                      role="radio"
+                      aria-checked={workplace === w}
+                      onClick={() => setWorkplace(w)}
+                      className={`inline-flex h-11 items-center rounded-lg border px-4 text-base font-semibold sm:h-10 sm:text-sm ${
+                        workplace === w
+                          ? "border-[#333333] bg-[#333333] text-white"
+                          : "border-[#cfcac3] bg-white text-[#555555] hover:bg-[#f7f7f5]"
+                      }`}
+                    >
+                      {w}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <select
+                  value={workplace}
+                  onChange={(e) => setWorkplace(e.target.value)}
+                  aria-label="職場"
+                  className={`${input} w-full sm:w-72`}
+                >
+                  <option value="">選択してください</option>
+                  {workplaces.map((w) => (
+                    <option key={w} value={w}>
+                      {w}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!workplace && (
+                <p className="mt-1.5 text-xs text-[#a15c00]">職場を選んでから記録してください。</p>
+              )}
+            </div>
+          )}
+
           {/* ③ 投入のアナウンス。どの箱に入れるのかを取り違えないように大きく出す */}
           {selectedScale && toNumOrNull(cumBefore) !== null ? (
             <div className="mb-4 flex items-start gap-3 rounded-xl border-2 border-[#b4632c] bg-[#faf6ef] px-4 py-3.5">
@@ -1213,9 +1320,14 @@ export default function DailyRecordForm({
                   <li key={i} className="rounded-xl border border-[#e5e5e5] p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-sm font-bold tabular-nums">{e.jikoku}</span>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
+                          {e.busho && (
+                            <span className="rounded-md bg-[#f0f0ee] px-1.5 py-0.5 text-[11px] font-bold text-[#333333]">
+                              {e.busho}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-0.5 text-xs text-[#909090]">
                           {fmt(cb)} → {fmt(ca)}
@@ -1243,6 +1355,7 @@ export default function DailyRecordForm({
                   <tr>
                     <th className={th}>時刻</th>
                     <th className={th}>袋</th>
+                    <th className={th}>職場</th>
                     <th className={th}>種類</th>
                     <th className={`${th} text-right`}>投入前</th>
                     <th className={`${th} text-right`}>投入後</th>
@@ -1265,9 +1378,10 @@ export default function DailyRecordForm({
                       <tr key={i}>
                         <td className={td}>{e.jikoku}</td>
                         <td className={td}>{(e.bagId && bagNoById.get(e.bagId)) || ""}</td>
+                        <td className={td}>{e.busho}</td>
                         <td className={td}>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
-                          {/* Excelから取り込んだ行は発生元（部署・機械・品種）を添える */}
+                          {/* Excelから取り込んだ行は発生元（機械・品種・工程）を添える */}
                           {entryOrigin(e) && (
                             <div className="mt-0.5 text-xs text-[#909090]">{entryOrigin(e)}</div>
                           )}

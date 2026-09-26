@@ -4,6 +4,7 @@ import {
   listFactoryMasters,
   listFactoryOptions,
   listScrapKinds,
+  listWorkplaceSuggestions,
   type BagStart,
   type FactoryMaster,
   type ScrapKind,
@@ -28,9 +29,11 @@ export default async function SettingsPage() {
   let kinds: ScrapKind[];
   let bagStarts: BagStart[];
   let factories: FactoryMaster[];
+  let suggestions: Record<string, { name: string; count: number }[]>;
   try {
     kinds = await listScrapKinds(session.companyId);
     factories = await listFactoryMasters(session.companyId);
+    suggestions = await listWorkplaceSuggestions(session.companyId);
     bagStarts = await listBagStarts(
       session.companyId,
       await listFactoryOptions(session.companyId)
@@ -51,7 +54,7 @@ export default async function SettingsPage() {
         title="設定"
         description="このアプリで使う工場・職場、スクラップの種類、袋単位の管理を始めた日を設定します"
       />
-      <FactoryMasterTable factories={factories} />
+      <FactoryMasterTable factories={factories} suggestions={suggestions} />
       <ScrapKindsTable kinds={kinds} />
       <BagStartTable starts={bagStarts} />
     </div>

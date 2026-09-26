@@ -1,14 +1,24 @@
 import { requireOperationsPage } from "@/lib/session";
-import { listBagStarts, listFactoryOptions, listScrapKinds, type BagStart, type ScrapKind } from "@/lib/db";
+import {
+  listBagStarts,
+  listFactoryMasters,
+  listFactoryOptions,
+  listScrapKinds,
+  type BagStart,
+  type FactoryMaster,
+  type ScrapKind,
+} from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import ScrapKindsTable from "@/components/ScrapKindsTable";
 import BagStartTable from "@/components/BagStartTable";
+import FactoryMasterTable from "@/components/FactoryMasterTable";
 
 export const dynamic = "force-dynamic";
 
 /**
  * 設定。
+ * - 工場・職場 … このアプリで使う工場・職場（ポータル配信分の使う/使わない、手動の追加・削除）
  * - スクラップ種類（上銅／銅ダライ／銅スクラップ…）… 重量計マスターの登録と日次記録の選択肢
  * - 袋単位の管理を始めた日（工場ごと）… この日を境に、袋単位と日単位を分けて扱う
  */
@@ -17,8 +27,10 @@ export default async function SettingsPage() {
 
   let kinds: ScrapKind[];
   let bagStarts: BagStart[];
+  let factories: FactoryMaster[];
   try {
     kinds = await listScrapKinds(session.companyId);
+    factories = await listFactoryMasters(session.companyId);
     bagStarts = await listBagStarts(
       session.companyId,
       await listFactoryOptions(session.companyId)
@@ -37,8 +49,9 @@ export default async function SettingsPage() {
     <div className="p-4 sm:p-6">
       <PageHeader
         title="設定"
-        description="スクラップの種類と、袋単位の管理を始めた日を設定します"
+        description="このアプリで使う工場・職場、スクラップの種類、袋単位の管理を始めた日を設定します"
       />
+      <FactoryMasterTable factories={factories} />
       <ScrapKindsTable kinds={kinds} />
       <BagStartTable starts={bagStarts} />
     </div>

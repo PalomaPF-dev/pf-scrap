@@ -33,7 +33,7 @@ let schemaReady: Promise<void> | null = null;
  * - scrap_first_articles  … 初品の実測完成品重量
  * - scrap_mcframe_qty     … McFrame取込の完成品数量（年月×品目CD×格納場所CD）
  * - scrap_monthly_inputs  … 月初在庫・購入重量・スクラップ売却数量（年月で1行）
- * - portal_factories / portal_workplaces … ポータル配信の工場・職場マスタ（入力候補）
+ * - portal_factories / portal_workplaces … 工場・職場マスタ（ポータル配信＋手動追加。使う/使わないを持つ）
  *
  * 認証テーブル（companies/users）も同時に用意する。
  * 同一プロセス内の同時呼び出しは1回の実行に集約（共有プロミス）。失敗時は次回再試行できるよう解除。
@@ -500,4 +500,14 @@ async function buildSchema(): Promise<void> {
       sort         INTEGER NOT NULL DEFAULT 0,
       UNIQUE (company_id, code)
     )`);
+
+  // 工場・職場を、このアプリで使うかどうか（2026-09）。
+  // ポータルは会社の全工場・全職場を配信してくるので、スクラップに関係の無い工場まで
+  // 候補に出ていた。配信分は消しても次の配信で戻るので「使わない（非表示）」にし、
+  // 手で追加したものだけ削除できるようにする。
+  //   source: portal … ポータル配信 / manual … 設定画面で追加 / data … 記録にだけ出てきた工場
+  await safeDdl(() => sql`ALTER TABLE portal_factories ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`);
+  await safeDdl(() => sql`ALTER TABLE portal_factories ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'portal'`);
+  await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`);
+  await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'portal'`);
 }

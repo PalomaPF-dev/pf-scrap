@@ -2187,7 +2187,10 @@ export interface PortalWorkplace {
   sort: number;
 }
 
-/** ポータルからの工場・職場マスタを upsert（配信は upsert のみ。自動削除はしない）。 */
+/**
+ * ポータルからの工場・職場マスタを upsert（配信は upsert のみ。自動削除はしない）。
+ * 使う/使わないはこのアプリ側の設定なので、配信では変えない。
+ */
 export async function syncPortalMasters(
   companyId: string,
   factories: PortalFactory[],
@@ -2198,9 +2201,20 @@ export async function syncPortalMasters(
   let f = 0;
   let w = 0;
   for (const x of factories) {
+    // 使う/使わない（active）は配信で上書きしない。設定画面で「使わない」にした工場が
+    // 次の配信で候補に戻ってきてしまうため。初めて届く工場は、同じ名前の工場が
+    // すでにあればその設定を引き継ぐ（手で追加した後に配信が始まった場合など）。
     await sql`
-      INSERT INTO portal_factories (company_id, code, name, sort)
-      VALUES (${companyId}, ${x.code}, ${x.name}, ${x.sort})
+      INSERT INTO portal_factories (company_id, code, name, sort, active, source)
+      VALUES (
+        ${companyId}, ${x.code}, ${x.name}, ${x.sort},
+        COALESCE(
+          (SELECT bool_and(active) FROM portal_factories
+            WHERE company_id = ${companyId} AND name = ${x.name}),
+          true
+        ),
+        'portal'
+      )
       ON CONFLICT (company_id, code) DO UPDATE SET name = EXCLUDED.name, sort = EXCLUDED.sort`;
     f++;
   }
@@ -2215,29 +2229,249 @@ export async function syncPortalMasters(
   return { factories: f, workplaces: w, skipped: 0 };
 }
 
-/** 工場の入力候補。ポータル配信のマスタ＋既存記録の工場名をマージして返す。 */
-export async function listFactoryOptions(companyId: string): Promise<string[]> {
-  await ensureSchema();
+/**
+ * 記録の中に工場名として出てくる名前（重複なし）。
+ * 工場名は各テーブルに文字列で入っているので、ここで拾い集める。
+ */
+async function listFactoryNamesInData(companyId: string): Promise<Map<string, number>> {
   const sql = getSql();
   const rows = await sql`
-    SELECT name, sort FROM portal_factories WHERE company_id = ${companyId}
-    ORDER BY sort ASC, name ASC`;
-  const names: string[] = rows.map((r: any) => String(r.name));
-  // ポータル未配信の工場でも、実データがあれば切替先に出す
-  // （過去データを取り込んだだけの工場や、重量計を登録しただけの工場が
-  //   選べなくなるのを防ぐ）。
-  const used = await sql`
-    SELECT DISTINCT factory FROM (
+    SELECT factory, COUNT(*)::int AS n FROM (
       SELECT factory FROM scrap_daily_records WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_monthly_inputs WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_procure_days WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_items WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_scales WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_bags WHERE company_id = ${companyId}
-    ) t WHERE factory <> '' ORDER BY factory`;
-  for (const u of used) {
-    const name = String(u.factory);
-    if (!names.includes(name)) names.push(name);
+      UNION ALL SELECT factory FROM scrap_bag_starts WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM scrap_inventory_adjustments WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM users WHERE company_id = ${companyId} AND factory IS NOT NULL
+    ) t WHERE factory <> '' GROUP BY factory ORDER BY factory`;
+  return new Map(rows.map((r: any) => [String(r.factory), Number(r.n) || 0]));
+}
+
+/**
+ * 工場の入力候補。
+ *   1. 工場マスタ（ポータル配信・手動追加）のうち「使う」になっているもの
+ *   2. マスタに無いが記録に出てくる工場名（過去データを取り込んだだけの工場など）
+ * マスタで「使わない」にした工場は、記録があっても候補に出さない。
+ */
+export async function listFactoryOptions(companyId: string): Promise<string[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT name, sort, active FROM portal_factories WHERE company_id = ${companyId}
+    ORDER BY sort ASC, name ASC`;
+  const known = new Set(rows.map((r: any) => String(r.name)));
+  const names: string[] = [];
+  for (const r of rows) {
+    const name = String(r.name);
+    if (r.active !== false && !names.includes(name)) names.push(name);
+  }
+  // ポータル未配信の工場でも、実データがあれば切替先に出す
+  // （過去データを取り込んだだけの工場や、重量計を登録しただけの工場が
+  //   選べなくなるのを防ぐ）。マスタにある（使わないにした）ものは出さない。
+  for (const name of (await listFactoryNamesInData(companyId)).keys()) {
+    if (!known.has(name) && !names.includes(name)) names.push(name);
   }
   return names;
+}
+
+// ===== 工場・職場マスタの管理（設定画面） =====
+
+export type MasterSource = "portal" | "manual" | "data";
+
+export interface WorkplaceMaster {
+  code: string;
+  name: string;
+  sort: number;
+  active: boolean;
+  source: MasterSource;
+}
+
+export interface FactoryMaster {
+  /** マスタ未登録（記録にだけ出てくる）工場は null */
+  code: string | null;
+  name: string;
+  sort: number;
+  active: boolean;
+  source: MasterSource;
+  /** この工場名を使っている記録の件数。1件でもあれば削除はできない */
+  usage: number;
+  workplaces: WorkplaceMaster[];
+}
+
+const asSource = (v: unknown): MasterSource =>
+  v === "manual" || v === "data" ? v : "portal";
+
+/** 設定画面用。マスタの全工場（使わないものも含む）＋記録にだけ出てくる工場。 */
+export async function listFactoryMasters(companyId: string): Promise<FactoryMaster[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const [factories, workplaces, usage] = await Promise.all([
+    sql`SELECT code, name, sort, active, source FROM portal_factories
+        WHERE company_id = ${companyId} ORDER BY sort ASC, name ASC`,
+    sql`SELECT code, name, factory_code, sort, active, source FROM portal_workplaces
+        WHERE company_id = ${companyId} ORDER BY sort ASC, name ASC`,
+    listFactoryNamesInData(companyId),
+  ]);
+  const byFactory = new Map<string, WorkplaceMaster[]>();
+  for (const w of workplaces) {
+    const list = byFactory.get(String(w.factory_code)) ?? [];
+    list.push({
+      code: String(w.code),
+      name: String(w.name),
+      sort: Number(w.sort) || 0,
+      active: w.active !== false,
+      source: asSource(w.source),
+    });
+    byFactory.set(String(w.factory_code), list);
+  }
+  const out: FactoryMaster[] = factories.map((f: any) => ({
+    code: String(f.code),
+    name: String(f.name),
+    sort: Number(f.sort) || 0,
+    active: f.active !== false,
+    source: asSource(f.source),
+    usage: usage.get(String(f.name)) ?? 0,
+    workplaces: byFactory.get(String(f.code)) ?? [],
+  }));
+  const known = new Set(out.map((f) => f.name));
+  for (const [name, n] of usage) {
+    if (known.has(name)) continue;
+    out.push({ code: null, name, sort: 9999, active: true, source: "data", usage: n, workplaces: [] });
+  }
+  return out;
+}
+
+/** 手動で追加するマスタのコード。ポータルのコードと重ならないよう接頭辞を付ける。 */
+function manualCode(): string {
+  return `m-${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+}
+
+/**
+ * 工場名からマスタの行を引く。記録にだけ出てくる工場は、ここで行を作る
+ * （使う/使わない・職場を持たせるには行が要る）。
+ */
+async function ensureFactoryRow(
+  companyId: string,
+  name: string
+): Promise<{ code: string; source: MasterSource; active: boolean }> {
+  const sql = getSql();
+  const rows = await sql`
+    SELECT code, source, active FROM portal_factories
+    WHERE company_id = ${companyId} AND name = ${name}
+    ORDER BY (source = 'portal') DESC LIMIT 1`;
+  if (rows[0]) {
+    return { code: String(rows[0].code), source: asSource(rows[0].source), active: rows[0].active !== false };
+  }
+  const code = manualCode();
+  await sql`
+    INSERT INTO portal_factories (company_id, code, name, sort, active, source)
+    VALUES (${companyId}, ${code}, ${name},
+            (SELECT COALESCE(MAX(sort), 0) + 1 FROM portal_factories WHERE company_id = ${companyId}),
+            true, 'data')`;
+  return { code, source: "data", active: true };
+}
+
+/** 工場を追加する。同じ名前が「使わない」で残っていれば、使うに戻す。 */
+export async function addFactory(companyId: string, name: string): Promise<"added" | "restored" | "exists"> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT code, active FROM portal_factories WHERE company_id = ${companyId} AND name = ${name}`;
+  if (rows.length > 0) {
+    if (rows.some((r: any) => r.active !== false)) return "exists";
+    await sql`UPDATE portal_factories SET active = true WHERE company_id = ${companyId} AND name = ${name}`;
+    return "restored";
+  }
+  await sql`
+    INSERT INTO portal_factories (company_id, code, name, sort, active, source)
+    VALUES (${companyId}, ${manualCode()}, ${name},
+            (SELECT COALESCE(MAX(sort), 0) + 1 FROM portal_factories WHERE company_id = ${companyId}),
+            true, 'manual')`;
+  return "added";
+}
+
+/** 工場を使う/使わないにする（名前で指定。記録にだけ出てくる工場もここで行を作る）。 */
+export async function setFactoryActive(companyId: string, name: string, active: boolean): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await ensureFactoryRow(companyId, name);
+  await sql`UPDATE portal_factories SET active = ${active} WHERE company_id = ${companyId} AND name = ${name}`;
+}
+
+/**
+ * 工場を削除する。消せるのは「手で追加した・記録で使われていない」工場だけ。
+ * ポータル配信の工場は消しても次の配信で戻るので、使わないにしてもらう。
+ */
+export async function deleteFactory(
+  companyId: string,
+  name: string
+): Promise<"deleted" | "portal" | "used" | "missing"> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT code, source FROM portal_factories WHERE company_id = ${companyId} AND name = ${name}`;
+  if (rows.length === 0) return "missing";
+  if (rows.some((r: any) => asSource(r.source) === "portal")) return "portal";
+  const usage = (await listFactoryNamesInData(companyId)).get(name) ?? 0;
+  if (usage > 0) return "used";
+  for (const r of rows) {
+    await sql`DELETE FROM portal_workplaces WHERE company_id = ${companyId} AND factory_code = ${r.code}`;
+  }
+  await sql`DELETE FROM portal_factories WHERE company_id = ${companyId} AND name = ${name}`;
+  return "deleted";
+}
+
+/** 職場を追加する（工場の下に置く）。同じ名前が「使わない」で残っていれば戻す。 */
+export async function addWorkplace(
+  companyId: string,
+  factoryName: string,
+  name: string
+): Promise<"added" | "restored" | "exists"> {
+  await ensureSchema();
+  const sql = getSql();
+  const f = await ensureFactoryRow(companyId, factoryName);
+  const rows = await sql`
+    SELECT code, active FROM portal_workplaces
+    WHERE company_id = ${companyId} AND factory_code = ${f.code} AND name = ${name}`;
+  if (rows.length > 0) {
+    if (rows.some((r: any) => r.active !== false)) return "exists";
+    await sql`
+      UPDATE portal_workplaces SET active = true
+      WHERE company_id = ${companyId} AND factory_code = ${f.code} AND name = ${name}`;
+    return "restored";
+  }
+  await sql`
+    INSERT INTO portal_workplaces (company_id, code, name, factory_code, sort, active, source)
+    VALUES (${companyId}, ${manualCode()}, ${name}, ${f.code},
+            (SELECT COALESCE(MAX(sort), 0) + 1 FROM portal_workplaces
+              WHERE company_id = ${companyId} AND factory_code = ${f.code}),
+            true, 'manual')`;
+  return "added";
+}
+
+export async function setWorkplaceActive(companyId: string, code: string, active: boolean): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE portal_workplaces SET active = ${active}
+    WHERE company_id = ${companyId} AND code = ${code} RETURNING code`;
+  return rows.length > 0;
+}
+
+/** 職場を削除する。ポータル配信の職場は次の配信で戻るので、使わないにしてもらう。 */
+export async function deleteWorkplace(
+  companyId: string,
+  code: string
+): Promise<"deleted" | "portal" | "missing"> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT source FROM portal_workplaces WHERE company_id = ${companyId} AND code = ${code}`;
+  if (rows.length === 0) return "missing";
+  if (asSource(rows[0].source) === "portal") return "portal";
+  await sql`DELETE FROM portal_workplaces WHERE company_id = ${companyId} AND code = ${code}`;
+  return "deleted";
 }

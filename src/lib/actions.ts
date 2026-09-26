@@ -10,7 +10,13 @@ import {
 } from "./session";
 import {
   addAdjustment,
+  addFactory,
+  addWorkplace,
   clearBagStart,
+  deleteFactory,
+  deleteWorkplace,
+  setFactoryActive,
+  setWorkplaceActive,
   closeBag,
   correctBagClose,
   deleteAdjustment,
@@ -983,6 +989,127 @@ export async function reopenBagAction(bagId: string): Promise<ActionResult> {
     };
   } catch (e) {
     return fail(bagErrorMessage(e));
+  }
+}
+
+// ===== 工場・職場マスタ（生産管理部・調達部のメンバーと管理者） =====
+
+/** 工場・職場の候補を使うすべての画面を取り直す。 */
+function revalidateFactoryPages() {
+  for (const p of ["/settings", "/daily", "/summary", "/bags", "/scales", "/first", "/items", "/procurement", "/"]) {
+    revalidatePath(p);
+  }
+}
+
+/** 工場を追加する（ポータルに無い工場や、ポータルの配信を待たずに使いたいとき）。 */
+export async function addFactoryAction(name: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const n = asStr(name, 50);
+    if (!n) return fail("工場名を入力してください。");
+    const r = await addFactory(s.companyId, n);
+    if (r === "exists") return fail(`「${n}」はすでにあります。`);
+    revalidateFactoryPages();
+    return {
+      ok: true,
+      message: r === "restored" ? `「${n}」を使うに戻しました。` : `「${n}」を追加しました。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 工場を使う/使わないにする。使わないにした工場は、日次記録・集計などの工場の
+ * 候補から外れる（記録そのものは消えない）。
+ */
+export async function setFactoryActiveAction(name: string, active: boolean): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const n = asStr(name, 50);
+    if (!n) return fail("工場が指定されていません。");
+    await setFactoryActive(s.companyId, n, Boolean(active));
+    revalidateFactoryPages();
+    return {
+      ok: true,
+      message: active
+        ? `「${n}」を使うにしました。工場の候補に出ます。`
+        : `「${n}」を使わないにしました。工場の候補から外れます（記録は消えません）。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 工場を削除する。手で追加した・記録で使われていない工場だけ消せる。 */
+export async function deleteFactoryAction(name: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const n = asStr(name, 50);
+    const r = await deleteFactory(s.companyId, n);
+    if (r === "portal") {
+      return fail(
+        `「${n}」はポータルから配信されている工場なので削除できません（消しても次の配信で戻ります）。「使わない」にすると候補から外れます。`
+      );
+    }
+    if (r === "used") {
+      return fail(`「${n}」は記録で使われているので削除できません。「使わない」にすると候補から外れます。`);
+    }
+    if (r === "missing") return fail("工場が見つかりません。画面を再読み込みしてください。");
+    revalidateFactoryPages();
+    return { ok: true, message: `「${n}」を削除しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 職場を追加する（工場の下に置く）。 */
+export async function addWorkplaceAction(factoryName: string, name: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const f = asStr(factoryName, 50);
+    const n = asStr(name, 50);
+    if (!f) return fail("工場が指定されていません。");
+    if (!n) return fail("職場名を入力してください。");
+    const r = await addWorkplace(s.companyId, f, n);
+    if (r === "exists") return fail(`${f} に「${n}」はすでにあります。`);
+    revalidateFactoryPages();
+    return {
+      ok: true,
+      message: r === "restored" ? `${f} の「${n}」を使うに戻しました。` : `${f} に「${n}」を追加しました。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+export async function setWorkplaceActiveAction(code: string, active: boolean): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const ok = await setWorkplaceActive(s.companyId, asStr(code, 60), Boolean(active));
+    if (!ok) return fail("職場が見つかりません。画面を再読み込みしてください。");
+    revalidateFactoryPages();
+    return { ok: true, message: active ? "職場を使うにしました。" : "職場を使わないにしました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 職場を削除する。手で追加した職場だけ消せる。 */
+export async function deleteWorkplaceAction(code: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const r = await deleteWorkplace(s.companyId, asStr(code, 60));
+    if (r === "portal") {
+      return fail(
+        "ポータルから配信されている職場なので削除できません（消しても次の配信で戻ります）。「使わない」にしてください。"
+      );
+    }
+    if (r === "missing") return fail("職場が見つかりません。画面を再読み込みしてください。");
+    revalidateFactoryPages();
+    return { ok: true, message: "職場を削除しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
   }
 }
 

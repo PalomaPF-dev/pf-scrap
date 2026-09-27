@@ -1,4 +1,4 @@
-import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
+import { requireOperationsPage, getFactoryView } from "@/lib/session";
 import {
   getMonthlyInput,
   listAdjustments,
@@ -35,7 +35,8 @@ export default async function ProcurementPage({
   let adjustments: InventoryAdjustment[];
   let anchor: MonthlyInput | null;
   try {
-    const restriction = await getFactoryRestriction(session);
+    // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定（「全工場」ならここで選べる）
+    const restriction = await getFactoryView(session);
     const factories = await listFactoryOptions(session.companyId);
     factoryLocked = restriction.restricted;
     factoryOptions = restriction.restricted ? [restriction.factory!] : factories;

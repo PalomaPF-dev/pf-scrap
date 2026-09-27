@@ -1,0 +1,221 @@
+import {
+  BarChart3,
+  BookOpen,
+  CalendarRange,
+  ClipboardList,
+  Download,
+  Home,
+  LayoutDashboard,
+  Package,
+  QrCode,
+  Scale,
+  Settings,
+  type LucideIcon,
+} from "lucide-react";
+
+/**
+ * アプリの機能の定義（名前・アイコン・説明）。
+ * ホーム・サイドバー・使い方で同じ定義を使い、呼び方がぶれないようにする。
+ * ops=true の機能は生産管理部・調達部のメンバーと管理者だけが使う
+ * （session.ts の canUseOperations。サイドバー・ホーム・使い方で同じ規則で出し分ける）。
+ */
+
+export type ModuleKey =
+  | "home"
+  | "daily"
+  | "first"
+  | "summary"
+  | "dashboard"
+  | "procurement"
+  | "mcframe"
+  | "items"
+  | "scales"
+  | "settings"
+  | "guide";
+
+export interface AppModule {
+  key: ModuleKey;
+  href: string;
+  /** 画面の名前（見出し・サイドバー） */
+  title: string;
+  icon: LucideIcon;
+  /** 一行の説明 */
+  lead: string;
+  /** できること */
+  points: string[];
+  cta: string;
+  /** 生産管理部・調達部のメンバーと管理者だけが使う */
+  ops?: boolean;
+}
+
+export const MODULES: Record<ModuleKey, AppModule> = {
+  home: {
+    key: "home",
+    href: "/",
+    title: "ホーム",
+    icon: Home,
+    lead: "使う順番と、いまの工場の状況",
+    points: [],
+    cta: "ホームへ",
+  },
+  daily: {
+    key: "daily",
+    href: "/daily",
+    title: "日次記録",
+    icon: ClipboardList,
+    lead: "スクラップ箱に投入するたびに、重量計を写真で読み取って記録します",
+    points: ["投入前・投入後を撮るだけで重量が出る", "読めないときは手入力（訂正理由つき）", "終礼で1日分を承認"],
+    cta: "記録する",
+  },
+  first: {
+    key: "first",
+    href: "/first",
+    title: "初品重量測定",
+    icon: Scale,
+    lead: "品目ごとに完成品1個あたりの重量を実測して登録します",
+    points: ["品名のQRか品目CDで呼び出す", "承認された実測値が完成重量の計算に使われる"],
+    cta: "測定を登録する",
+  },
+  summary: {
+    key: "summary",
+    href: "/summary",
+    title: "月間集計",
+    icon: BarChart3,
+    lead: "日次記録を月単位で、工場別・スクラップの種類別に集計します",
+    points: ["種類ごとの合計と日別の一覧", "絞り込んだままCSV出力"],
+    cta: "集計を見る",
+  },
+  dashboard: {
+    key: "dashboard",
+    href: "/dashboard",
+    title: "照合ダッシュボード",
+    icon: LayoutDashboard,
+    lead: "理論スクラップと、実際の売却量・日次記録を突き合わせます",
+    points: ["区分別の使用量・完成重量・理論スクラップ", "差異5%超をハイライト", "年間推移とCSV出力"],
+    cta: "照合する",
+  },
+  procurement: {
+    key: "procurement",
+    href: "/procurement",
+    title: "調達入力",
+    icon: CalendarRange,
+    lead: "区分別の購入重量・スクラップ売却数量と、月初在庫を入力します",
+    points: ["日ごとの購入・売却", "月初在庫（棚卸）から使用量を在庫法で計算"],
+    cta: "入力する",
+    ops: true,
+  },
+  mcframe: {
+    key: "mcframe",
+    href: "/mcframe",
+    title: "McFrame取込",
+    icon: Download,
+    lead: "McFrameの製造実績（日別の加工数）を取り込み、完成品重量と理論スクラップを出します",
+    points: ["製造実績のCSV/Excelをそのまま取込", "品目別の完成重量・使用量・理論スクラップ"],
+    cta: "取り込む",
+    ops: true,
+  },
+  items: {
+    key: "items",
+    href: "/items",
+    title: "品目マスター",
+    icon: Package,
+    lead: "McFrameの品目CD・格納場所CD・構成重量・完成重量を登録します",
+    points: ["CSV一括取込・出力", "品名QRの印刷"],
+    cta: "品目を開く",
+    ops: true,
+  },
+  scales: {
+    key: "scales",
+    href: "/scales",
+    title: "重量計マスター",
+    icon: QrCode,
+    lead: "スクラップ箱（重量計）ごとに種類・工場を登録し、QRラベルを発行します",
+    points: ["QRラベルの印刷", "表示の刻み（小数点）を重量計ごとに設定"],
+    cta: "重量計を開く",
+    ops: true,
+  },
+  settings: {
+    key: "settings",
+    href: "/settings",
+    title: "設定",
+    icon: Settings,
+    lead: "スクラップの種類（上銅・銅ダライなど）を増やせます",
+    points: [],
+    cta: "設定を開く",
+    ops: true,
+  },
+  guide: {
+    key: "guide",
+    href: "/guide",
+    title: "使い方",
+    icon: BookOpen,
+    lead: "日次記録の撮り方から照合まで、1画面ずつ説明します",
+    points: [],
+    cta: "使い方を見る",
+  },
+};
+
+/** 使える機能か（ops の機能は canOperate の人だけ） */
+export const usable = (m: AppModule, canOperate: boolean) => !m.ops || canOperate;
+
+/**
+ * 実際の業務の順番（ホームの①②③…と使い方の「はじめに」で共有する）。
+ * マスタを用意 → 現場で毎日記録 → 初品を実測 → 月次の在庫・購入・売却を入力
+ * → McFrameの加工数を取込 → 月間集計 → 照合、の順。
+ */
+export interface FlowStep {
+  /** 主に使う画面 */
+  module: ModuleKey;
+  /** 同じ手順で使うほかの画面 */
+  also?: ModuleKey[];
+  title: string;
+  /** 誰が・いつ */
+  when: string;
+  note: string;
+}
+
+export const FLOW: FlowStep[] = [
+  {
+    module: "scales",
+    also: ["items"],
+    title: "マスタを用意する",
+    when: "最初に1回（生産管理部・調達部）",
+    note: "重量計（スクラップ箱）を登録してQRラベルを貼り、品目マスターを取り込みます",
+  },
+  {
+    module: "daily",
+    title: "日次記録をつける",
+    when: "毎日・投入のたび（現場）",
+    note: "重量計を撮って投入前・投入後を読み取り、終礼で承認者が1日分を承認します",
+  },
+  {
+    module: "first",
+    title: "初品重量を測る",
+    when: "生産した日（現場）",
+    note: "完成品1個の重量を実測して登録します。承認された値が完成重量に使われます",
+  },
+  {
+    module: "procurement",
+    title: "購入・売却と月次在庫を入れる",
+    when: "日次〜月末（生産管理部・調達部）",
+    note: "区分別の購入重量・スクラップ売却数量と、月初在庫を入力します",
+  },
+  {
+    module: "mcframe",
+    title: "McFrameの加工数を取り込む",
+    when: "日次〜月末（生産管理部・調達部）",
+    note: "製造実績を取り込むと、完成品重量と理論スクラップが出ます",
+  },
+  {
+    module: "summary",
+    title: "月間集計で確かめる",
+    when: "月末",
+    note: "日次記録を工場別・種類別に集計し、記録漏れや承認待ちがないかを見ます",
+  },
+  {
+    module: "dashboard",
+    title: "照合する",
+    when: "月末",
+    note: "理論スクラップ × 売却量 × 日次記録を突き合わせ、5%超の差異を確認します",
+  },
+];

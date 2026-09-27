@@ -17,6 +17,7 @@ export function middleware() {
 export const config = {
   matcher: [
     "/",
+    "/dashboard",
     "/daily",
     "/summary",
     "/first",

@@ -1,5 +1,5 @@
 import { FileDown, ClipboardList } from "lucide-react";
-import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
+import { requireEntitledSession, getFactoryView } from "@/lib/session";
 import {
   DAILY_STATUS_LABEL,
   listDailyAgg,
@@ -53,8 +53,8 @@ export default async function SummaryPage({
   let agg: DailyAggRow[];
   let kinds: ScrapKind[];
   try {
-    const restriction = await getFactoryRestriction(session);
-    // 所属工場ユーザーは自工場に固定（URLで他工場を指定されてもサーバー側で無視）
+    const restriction = await getFactoryView(session);
+    // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定（URLで他工場を指定されてもサーバー側で無視）
     factoryLocked = restriction.restricted;
     factoryOptions = restriction.restricted
       ? [restriction.factory!]

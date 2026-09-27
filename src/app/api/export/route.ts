@@ -57,12 +57,13 @@ export async function GET(req: NextRequest) {
   const factoryParam = (req.nextUrl.searchParams.get("factory") ?? "").trim();
   const kindParam = (req.nextUrl.searchParams.get("kind") ?? "").trim();
   const yearParam = Number(req.nextUrl.searchParams.get("year"));
+  // 所属工場ユーザーは自工場分のみ（画面と同じ範囲。session.ts の getFactoryRestriction と同じ規則）。
+  // それ以外は ?factory= の絞り込みに従う（画面が上部で選んだ工場を ?factory= に載せて呼ぶ）。
+  const restrictedFactory = s.isDemo ? null : s.factory;
 
   try {
     if (type === "daily") {
       if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
-      // 所属工場ユーザーは自工場分のみ（画面と同じ範囲）。それ以外は ?factory= の絞り込みに従う。
-      const restrictedFactory = s.isDemo ? null : s.factory;
       const factory = restrictedFactory ?? (factoryParam || null);
       const [agg, kinds] = await Promise.all([
         listDailyAgg(s.companyId, ymParam, factory),
@@ -141,8 +142,7 @@ export async function GET(req: NextRequest) {
         Number.isInteger(yearParam) && yearParam >= 2000 && yearParam <= 2100
           ? yearParam
           : new Date().getFullYear();
-      const factoryParam = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
-      const years = await yearSummary(s.companyId, year, factoryParam);
+      const years = await yearSummary(s.companyId, year, restrictedFactory ?? (factoryParam || null));
       const rows: (string | number | null)[][] = [
         ["年月", "月初在庫", "購入重量", "使用量", "構成重量", "完成重量", "理論SCP", "SCP売量", "日次記録SCP", "売量vs理論", "売却vs日次記録"],
       ];
@@ -168,7 +168,7 @@ export async function GET(req: NextRequest) {
       // マスタの出力はマスタ編集と同じ権限
       if (!(await canOperate())) return denied;
       // 画面の絞り込み（工場・製造場所・検索語）をそのまま出力に反映する
-      const itemFactory = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
+      const itemFactory = restrictedFactory ?? (factoryParam || null);
       const itemWorkplace = (req.nextUrl.searchParams.get("workplace") ?? "").trim() || null;
       const itemQ = (req.nextUrl.searchParams.get("q") ?? "").trim();
       const { items } = await listItems(s.companyId, {
@@ -206,7 +206,7 @@ export async function GET(req: NextRequest) {
     if (type === "scales") {
       // テプラ（差し込み印刷）用。QR値の列をQRオブジェクトに割り当てて刷る。
       if (!(await canOperate())) return denied;
-      const scaleFactory = (req.nextUrl.searchParams.get("factory") ?? "").trim() || null;
+      const scaleFactory = restrictedFactory ?? (factoryParam || null);
       const scales = await listScales(s.companyId, { factory: scaleFactory });
       const rows: (string | number | null)[][] = [
         ["工場", "設備番号", "名称", "種類", "QR値", "状態"],

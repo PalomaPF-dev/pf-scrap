@@ -1,5 +1,5 @@
 import { QrCode } from "lucide-react";
-import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
+import { requireEntitledSession, getFactoryView } from "@/lib/session";
 import { listFactoryOptions, listFirstArticles, type FirstArticle } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -27,7 +27,8 @@ export default async function FirstPage({
   let history: FirstArticle[];
   let otherCount = 0;
   try {
-    const restriction = await getFactoryRestriction(session);
+    // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定（「全工場」ならここで選べる）
+    const restriction = await getFactoryView(session);
     const factories = await listFactoryOptions(session.companyId);
     factoryLocked = restriction.restricted;
     factoryOptions = restriction.restricted ? [restriction.factory!] : factories;

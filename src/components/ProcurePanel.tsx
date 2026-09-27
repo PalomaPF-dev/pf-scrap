@@ -12,7 +12,7 @@ import {
   saveProcureDaysAction,
 } from "@/lib/actions";
 import type { InventoryAdjustment, MonthlyInput, ProcureDay } from "@/lib/db";
-import { downloadCsv, parseCsv, readTextFile } from "@/lib/csv";
+import { downloadCsv, readSheetRows } from "@/lib/csv";
 import { fmt, toNum, todayStr } from "@/lib/format";
 import MonthNav from "@/components/MonthNav";
 
@@ -184,12 +184,18 @@ export default function ProcurePanel({
     downloadCsv(`調達入力_${factory}_${ym}.csv`, out);
   }
 
-  /** 月次データ（過去データ移行用）のCSV取込。列: 年月, 工場, 月初在庫_銅条…, 購入_銅条…, 売却数量 */
+  /** 月次データ（過去データ移行用）の取込（Excel/CSV）。列: 年月, 工場, 月初在庫_銅条…, 購入_銅条…, 売却数量 */
   async function onImportMonthlyFile(file: File) {
     setMessage(null);
-    const parsed = parseCsv(await readTextFile(file));
+    let parsed: string[][];
+    try {
+      parsed = await readSheetRows(file);
+    } catch (e) {
+      setMessage({ ok: false, text: (e as Error).message || "ファイルを読み取れませんでした。" });
+      return;
+    }
     if (parsed.length === 0) {
-      setMessage({ ok: false, text: "CSVが空です。" });
+      setMessage({ ok: false, text: "ファイルが空です。" });
       return;
     }
     const header = parsed[0].map((v) => String(v).trim());
@@ -228,9 +234,15 @@ export default function ProcurePanel({
 
   async function onImportFile(file: File) {
     setMessage(null);
-    const parsed = parseCsv(await readTextFile(file));
+    let parsed: string[][];
+    try {
+      parsed = await readSheetRows(file);
+    } catch (e) {
+      setMessage({ ok: false, text: (e as Error).message || "ファイルを読み取れませんでした。" });
+      return;
+    }
     if (parsed.length === 0) {
-      setMessage({ ok: false, text: "CSVが空です。" });
+      setMessage({ ok: false, text: "ファイルが空です。" });
       return;
     }
     const header = parsed[0].map((v) => String(v).trim());
@@ -307,7 +319,7 @@ export default function ProcurePanel({
           <input
             ref={fileRef}
             type="file"
-            accept=".csv"
+            accept=".xlsx,.xlsm,.csv,.txt"
             hidden
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -324,12 +336,12 @@ export default function ProcurePanel({
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] px-3 py-2 text-sm text-[#555555] hover:bg-[#f7f7f5] disabled:opacity-50"
               >
                 <Upload className="h-4 w-4" />
-                月次CSV取込
+                月次取込
               </button>
               <input
                 ref={monthlyFileRef}
                 type="file"
-                accept=".csv"
+                accept=".xlsx,.xlsm,.csv,.txt"
                 hidden
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -347,7 +359,7 @@ export default function ProcurePanel({
             CSV出力
           </button>
           <span className="text-xs text-[#909090]">
-            入力者: {userName}（自動記録） ／ 取込CSV列: 日付, 工場, 購入_銅条, 購入_銅管, 購入_その他, 売却数量, 備考
+            入力者: {userName}（自動記録） ／ 取込の列（Excel/CSVどちらでも可）: 日付, 工場, 購入_銅条, 購入_銅管, 購入_その他, 売却数量, 備考
           </span>
         </div>
         {message && (

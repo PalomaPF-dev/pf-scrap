@@ -40,6 +40,14 @@ function readCookie(): string | null {
   return m ? m[1] : null;
 }
 
+function safeDecode(v: string): string {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
 function writeCookie(factory: string | null) {
   const v = factory == null ? ALL_FACTORIES : encodeURIComponent(factory);
   document.cookie = `${FACTORY_COOKIE}=${v}; path=/; max-age=${60 * 60 * 24 * 365}; samesite=lax`;
@@ -71,7 +79,11 @@ export function FactoryProvider({
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((j: ScopeInfo) => {
         setInfo(j);
-        if (j.all && readCookie() == null) setPicking(true);
+        // 未選択、または選んでいた工場が候補から外れた（設定で「使わない」にした等）ときは選び直す
+        const c = readCookie();
+        const stale =
+          c != null && c !== ALL_FACTORIES && j.factories.length > 0 && !j.factories.includes(safeDecode(c));
+        if (j.all && (c == null || stale)) setPicking(true);
       })
       .catch(() => setFailed(true));
   }, [enabled]);

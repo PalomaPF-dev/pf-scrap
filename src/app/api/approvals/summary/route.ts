@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { getSql } from "@/lib/neon";
 import { ensureAuthSchema } from "@/lib/authDb";
-import { countPendingDaily, countPendingFirstArticles } from "@/lib/db";
+import { countPendingBags, countPendingDaily, countPendingFirstArticles } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,8 +11,8 @@ export const dynamic = "force-dynamic";
  * ポータルのアプリ横断「承認待ち」集計API（PFシリーズ共通の契約）。
  * POST { key, loginId } → { pending }
  * 「その人がいま承認の番」の件数だけを返す:
- *   このアプリでは、管理者に対して申請中（pending）の日次記録の件数。
- *   所属工場が設定された管理者は自工場分のみ。一般ユーザーは 0。
+ *   このアプリでは、管理者が承認する 日次記録 + 締めた袋 + 初品測定 の件数。
+ *   所属工場が設定された管理者は自工場分のみ（3種とも同じ絞り方）。一般ユーザーは 0。
  */
 
 function safeKeyEqual(a: string, b: string): boolean {
@@ -44,11 +44,17 @@ export async function POST(req: Request) {
     if (!u || u.disabled === true || (u.role ?? "member") !== "admin") {
       return NextResponse.json({ pending: 0 });
     }
-    const [daily, fa] = await Promise.all([
-      countPendingDaily(u.company_id as string, (u.factory ?? null) as string | null),
-      countPendingFirstArticles(u.company_id as string),
+    const companyId = u.company_id as string;
+    const factory = ((u.factory ?? "") as string).trim() || null;
+    const [daily, bags, fa] = await Promise.all([
+      countPendingDaily(companyId, factory),
+      countPendingBags(companyId, factory),
+      countPendingFirstArticles(companyId, factory),
     ]);
-    return NextResponse.json({ pending: daily + fa }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(
+      { pending: daily + bags + fa },
+      { headers: { "Cache-Control": "no-store" } }
+    );
   } catch (e) {
     console.error("[approvals/summary]", e);
     return NextResponse.json({ pending: 0 });

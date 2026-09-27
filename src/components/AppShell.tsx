@@ -10,7 +10,7 @@ import { FactoryProvider } from "./FactoryScope";
 
 /**
  * サイドバーの並び。名前・アイコンはホーム・使い方と同じ定義（Modules.ts）から作る。
- * 表示順は ホーム → 照合 → 日次記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類 → 使い方。
+ * 表示順は ホーム → 照合 → 日次記録 → 袋の記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類 → 使い方。
  * 生産管理部・調達部のメンバーと管理者だけが使う機能（ops）は、権限が無い人にはタブごと出さない
  * （サーバー側でも requireOperations* で必ず防ぐ）。
  */
@@ -18,6 +18,7 @@ const NAV_ORDER: ModuleKey[] = [
   "home",
   "dashboard",
   "daily",
+  "bags",
   "summary",
   "procurement",
   "first",

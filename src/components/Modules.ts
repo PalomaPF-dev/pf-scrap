@@ -5,8 +5,10 @@ import {
   ClipboardList,
   Download,
   Home,
+  FileSpreadsheet,
   LayoutDashboard,
   Package,
+  PackageCheck,
   QrCode,
   Scale,
   Settings,
@@ -23,6 +25,8 @@ import {
 export type ModuleKey =
   | "home"
   | "daily"
+  | "dailyImport"
+  | "bags"
   | "first"
   | "summary"
   | "dashboard"
@@ -64,8 +68,27 @@ export const MODULES: Record<ModuleKey, AppModule> = {
     title: "日次記録",
     icon: ClipboardList,
     lead: "スクラップ箱に投入するたびに、重量計を写真で読み取って記録します",
-    points: ["投入前・投入後を撮るだけで重量が出る", "読めないときは手入力（訂正理由つき）", "終礼で1日分を承認"],
+    points: ["袋を開始し、投入前・投入後を撮るだけで重量が出る", "袋の交換（締め）もここで", "終礼で1日分を承認"],
     cta: "記録する",
+  },
+  dailyImport: {
+    key: "dailyImport",
+    href: "/daily/import",
+    title: "日次記録のExcel取込",
+    icon: FileSpreadsheet,
+    lead: "現場のExcelの「スクラップ日次記録票」を、アプリの日次記録に取り込みます",
+    points: ["取り込む前に内容を画面で確認", "既にアプリに記録がある日は既定で飛ばす"],
+    cta: "取り込む",
+    ops: true,
+  },
+  bags: {
+    key: "bags",
+    href: "/bags",
+    title: "袋の記録",
+    icon: PackageCheck,
+    lead: "袋を交換するたびに締めた「この袋は◯◯kgでした」を、月ごとに一覧・承認します",
+    points: ["締めの重量と記録した投入の合計の差", "袋ごとの承認", "袋の一覧・明細のCSV"],
+    cta: "袋の記録を見る",
   },
   first: {
     key: "first",
@@ -139,8 +162,8 @@ export const MODULES: Record<ModuleKey, AppModule> = {
     href: "/settings",
     title: "設定",
     icon: Settings,
-    lead: "スクラップの種類（上銅・銅ダライなど）を増やせます",
-    points: [],
+    lead: "スクラップの種類と、このアプリで使う工場・職場を設定します",
+    points: ["スクラップの種類（上銅・銅ダライなど）を増やす", "使わない工場・職場を候補から外す"],
     cta: "設定を開く",
     ops: true,
   },
@@ -160,13 +183,13 @@ export const usable = (m: AppModule, canOperate: boolean) => !m.ops || canOperat
 
 /**
  * 実際の業務の順番（ホームの①②③…と使い方の「はじめに」で共有する）。
- * マスタを用意 → 現場で毎日記録 → 初品を実測 → 月次の在庫・購入・売却を入力
+ * マスタを用意 → 現場で毎日記録 → 袋を締めて承認 → 初品を実測 → 月次の在庫・購入・売却を入力
  * → McFrameの加工数を取込 → 月間集計 → 照合、の順。
  */
 export interface FlowStep {
   /** 主に使う画面 */
   module: ModuleKey;
-  /** 同じ手順で使うほかの画面 */
+  /** 同じ手順で使うほかの画面（使えない人には出さない） */
   also?: ModuleKey[];
   title: string;
   /** 誰が・いつ */
@@ -184,9 +207,16 @@ export const FLOW: FlowStep[] = [
   },
   {
     module: "daily",
+    also: ["dailyImport"],
     title: "日次記録をつける",
     when: "毎日・投入のたび（現場）",
-    note: "重量計を撮って投入前・投入後を読み取り、終礼で承認者が1日分を承認します",
+    note: "袋を開始し、重量計を撮って投入前・投入後を読み取ります。終礼で承認者が1日分を承認します",
+  },
+  {
+    module: "bags",
+    title: "袋を締めて確かめる",
+    when: "袋の交換のたび（現場）・承認は管理者",
+    note: "袋を交換するときに締めた重量と、記録した投入の合計の差を袋ごとに確かめて承認します",
   },
   {
     module: "first",

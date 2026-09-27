@@ -19,6 +19,8 @@ export const config = {
     "/",
     "/dashboard",
     "/daily",
+    "/daily/import",
+    "/bags",
     "/summary",
     "/first",
     "/guide",

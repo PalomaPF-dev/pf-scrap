@@ -485,6 +485,7 @@ export default function FirstArticlePanel({
                   <div className="mt-0.5 text-xs text-[#909090]">
                     測定者 {h.sokuteisha} ／ 理論 {fmt(h.kanseiJuryo, 6)}
                   </div>
+                  {h.note && <div className="mt-0.5 text-xs text-[#a15c00]">{h.note}</div>}
                 </div>
                 <span className="shrink-0 text-right text-lg font-bold tabular-nums">
                   {fmt(h.weight, 6)}
@@ -511,6 +512,7 @@ export default function FirstArticlePanel({
                     </button>
                   </>
                 )}
+                {isAdmin && (
                 <button
                   onClick={() => remove(h)}
                   className="inline-flex h-9 items-center gap-1 rounded-lg border border-[#e5e5e5] px-3 text-xs text-[#dc000c]"
@@ -518,6 +520,7 @@ export default function FirstArticlePanel({
                   <Trash2 className="h-3.5 w-3.5" />
                   削除
                 </button>
+                )}
               </div>
             </li>
           ))}
@@ -564,7 +567,10 @@ export default function FirstArticlePanel({
                     >
                       {fmt(diff, 6)}
                     </td>
-                    <td className={td}>{h.sokuteisha}</td>
+                    <td className={td}>
+                      {h.sokuteisha}
+                      {h.note && <div className="text-xs text-[#a15c00]">{h.note}</div>}
+                    </td>
                     <td className={td}>
                       <StatusTag h={h} />
                       {h.status === "approved" && h.approvedBy && (
@@ -593,6 +599,7 @@ export default function FirstArticlePanel({
                             </button>
                           </>
                         )}
+                        {isAdmin && (
                         <button
                           onClick={() => remove(h)}
                           className="rounded p-1 text-[#dc000c] hover:bg-[#fdecea]"
@@ -600,6 +607,7 @@ export default function FirstArticlePanel({
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
+                        )}
                       </div>
                     </td>
                   </tr>

@@ -1,16 +1,21 @@
-import { BarChart3 } from "lucide-react";
-import { requireEntitledSession, getFactoryView } from "@/lib/session";
-import { getUserAffiliation } from "@/lib/authDb";
+import { BarChart3, FileSpreadsheet } from "lucide-react";
+import { requireEntitledSession, getFactoryView, canUseOperations } from "@/lib/session";
+import { getUserAffiliation, getUserRoleFactory } from "@/lib/authDb";
 import {
   KUBUN_LIST,
   getDailyRecord,
+  getBagStart,
+  listBagsForDate,
   listFactoryOptions,
+  listOpenBags,
+  listWorkplaceOptions,
   listScaleReads,
   listScales,
   listScrapKinds,
   type DailyRecord,
   type Scale,
   type ScaleRead,
+  type ScrapBag,
   type ScrapKind,
 } from "@/lib/db";
 import { dailyBomTotals, type DailyBom } from "@/lib/calc";
@@ -40,6 +45,11 @@ export default async function DailyPage({
   let scales: Scale[];
   let kinds: ScrapKind[];
   let reads: ScaleRead[];
+  let openBags: ScrapBag[];
+  let dayBags: ScrapBag[];
+  let bagStartOn: string;
+  let workplaces: string[];
+  let myWorkplace: string;
   let affiliation: string | null;
   let bom: DailyBom;
   try {
@@ -52,7 +62,15 @@ export default async function DailyPage({
       ? restriction.factory!
       : (sp.factory ?? "").trim() || factoryOptions[0] || "大口";
     affiliation = await getUserAffiliation(session.userId);
-    [record, scales, kinds, reads, bom] = await Promise.all([
+    // どの職場のスクラップかを選ぶ候補（設定で「使う」にした、この工場の職場）。
+    // 所属職場が候補にあれば最初から選んでおく。
+    workplaces = await listWorkplaceOptions(session.companyId, factory);
+    myWorkplace = (await getUserRoleFactory(session.companyId, session.userId)).workplace ?? "";
+    // 袋運用の開始日。これより前の日は従来どおり日単位の記録として扱う。
+    // 設定が無ければ「最初に袋を開いた日」、袋がまだ無ければ今日から。
+    const bagStart = await getBagStart(session.companyId, factory);
+    bagStartOn = bagStart.startOn ?? todayStr();
+    [record, scales, kinds, reads, openBags, dayBags, bom] = await Promise.all([
       getDailyRecord(session.companyId, date, factory),
       listScales(session.companyId, {
         factory: restriction.restricted ? restriction.factory : factory,
@@ -62,6 +80,10 @@ export default async function DailyPage({
       listScrapKinds(session.companyId),
       // AI読取の履歴（改ざん確認用）。記録を消しても読取の事実は残る
       listScaleReads(session.companyId, date, factory),
+      // 記録中の袋（重量計ごとに最大1つ）。投入はこの袋に入る
+      listOpenBags(session.companyId, factory),
+      // その日に関わった袋（記録中・締め済み・承認済み）。袋は日をまたぐ
+      listBagsForDate(session.companyId, factory, date),
       // McFrameの日別加工数 × 単品完成重量（初品実測を優先）＝ その日の完成品重量
       dailyBomTotals(session.companyId, date, factory),
     ]);
@@ -76,6 +98,8 @@ export default async function DailyPage({
   }
 
   const isAdmin = session.role === "admin";
+  // Excel取込は、マスタ・取込と同じ範囲（生産管理部・調達部のメンバーと管理者）だけに出す
+  const canOperate = await canUseOperations(session);
   // 記録者は「所属（部署／工場 職場）＋氏名」。保存時にサーバーでも同じ規則で組み立てる。
   const recorder = [affiliation, session.userName].filter(Boolean).join(" ");
   // 当日の記録スクラップ合計（理論値との突合に使う）
@@ -96,6 +120,12 @@ export default async function DailyPage({
         factoryLocked={factoryLocked}
         initial={record}
         scales={scales}
+        openBags={openBags}
+        dayBags={dayBags}
+        bagEra={date >= bagStartOn}
+        bagStartOn={bagStartOn}
+        workplaces={workplaces}
+        myWorkplace={myWorkplace}
         kinds={kinds}
         userName={recorder}
         isAdmin={isAdmin}
@@ -155,7 +185,16 @@ export default async function DailyPage({
       </section>
 
       {/* 月間集計は別タブ（工場・種類で絞り込める） */}
-      <div className="mt-4 flex justify-end">
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        {canOperate && (
+          <a
+            href="/daily/import"
+            className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
+          >
+            <FileSpreadsheet className="h-4 w-4" />
+            Excel取込
+          </a>
+        )}
         <a
           href={`/summary?ym=${ym}${factoryLocked ? "" : `&factory=${encodeURIComponent(factory)}`}`}
           className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"

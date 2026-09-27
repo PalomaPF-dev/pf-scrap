@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { canUseOperations, getSessionWithRole } from "@/lib/session";
 import {
+  BAG_STATUS_LABEL,
   DAILY_STATUS_LABEL,
+  bagGap,
+  bagWeight,
+  getBagStart,
+  listBagEntriesByMonth,
+  listBagsByMonth,
+  listWorkplaceAgg,
   listDailyAgg,
   listItems,
   listScales,
@@ -9,7 +16,7 @@ import {
 } from "@/lib/db";
 import { monthlyItemRows, yearSummary } from "@/lib/calc";
 import { toCsv } from "@/lib/csv";
-import { isYmStr } from "@/lib/format";
+import { isYmStr, todayStr } from "@/lib/format";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +24,9 @@ export const dynamic = "force-dynamic";
 /**
  * CSV出力（記録保管・報告用）。
  *   GET /api/export?type=daily&ym=YYYY-MM     … 日次記録の月間集計
+ *   GET /api/export?type=bags&ym=YYYY-MM      … 袋の一覧（締めた月）
+ *   GET /api/export?type=bag-entries&ym=YYYY-MM … 袋別の投入明細
+ *   GET /api/export?type=workplaces&ym=YYYY-MM  … 職場別の月間集計
  *   GET /api/export?type=mcframe&ym=YYYY-MM   … 品目別の理論スクラップ計算結果
  *   GET /api/export?type=recon&year=YYYY      … 年間照合一覧
  *   GET /api/export?type=items                … 品目マスター（管理者のみ）
@@ -59,7 +69,7 @@ export async function GET(req: NextRequest) {
   const yearParam = Number(req.nextUrl.searchParams.get("year"));
   // 所属工場ユーザーは自工場分のみ（画面と同じ範囲。session.ts の getFactoryRestriction と同じ規則）。
   // それ以外は ?factory= の絞り込みに従う（画面が上部で選んだ工場を ?factory= に載せて呼ぶ）。
-  const restrictedFactory = s.isDemo ? null : s.factory;
+  const restrictedFactory = s.isDemo ? null : s.factory || null;
 
   try {
     if (type === "daily") {
@@ -80,10 +90,18 @@ export async function GET(req: NextRequest) {
       const kind = kindNames.includes(kindParam) ? kindParam : "";
       const kindCols = kind ? [kind] : kindNames;
       const days = kind ? agg.filter((r) => (r.byKind[kind] ?? 0) !== 0) : agg;
+      // 袋単位の管理を始めた日は工場ごと。CSVでも「袋単位／袋管理前」を分けて出す。
+      const bagStart: Record<string, string> = {};
+      for (const f of new Set(days.map((r) => r.factory))) {
+        const st = await getBagStart(s.companyId, f);
+        bagStart[f] = st.startOn ?? todayStr();
+      }
+      const eraOf = (r: (typeof days)[number]) =>
+        r.recordDate >= (bagStart[r.factory] ?? todayStr()) ? "袋単位" : "袋管理前";
       const rows: (string | number | null)[][] = [
         kind
-          ? ["日付", "工場", "責任者", `${kind}(kg)`, "状態", "承認者"]
-          : ["日付", "工場", "責任者", ...kindCols.map((n) => `${n}(kg)`), "合計(kg)", "回収箱測定値", "差異率", "状態", "承認者", "異常件数"],
+          ? ["日付", "工場", "責任者", "管理", `${kind}(kg)`, "状態", "承認者"]
+          : ["日付", "工場", "責任者", "管理", "袋数", "袋なしの投入", ...kindCols.map((n) => `${n}(kg)`), "合計(kg)", "回収箱測定値", "差異率", "状態", "承認者", "異常件数"],
       ];
       for (const r of days) {
         const sai =
@@ -92,11 +110,14 @@ export async function GET(req: NextRequest) {
             : null;
         rows.push(
           kind
-            ? [r.recordDate, r.factory, r.sekininsha, r.byKind[kind] ?? 0, DAILY_STATUS_LABEL[r.status], r.approvedBy]
+            ? [r.recordDate, r.factory, r.sekininsha, eraOf(r), r.byKind[kind] ?? 0, DAILY_STATUS_LABEL[r.status], r.approvedBy]
             : [
                 r.recordDate,
                 r.factory,
                 r.sekininsha,
+                eraOf(r),
+                eraOf(r) === "袋単位" ? r.bagCount : "",
+                eraOf(r) === "袋単位" && r.noBagCount > 0 ? r.noBagCount : "",
                 ...kindCols.map((n) => r.byKind[n] ?? 0),
                 r.total,
                 r.kaishuSokuteichi ?? "",
@@ -110,6 +131,82 @@ export async function GET(req: NextRequest) {
       // ファイル名で絞り込み条件が分かるようにする（複数の条件で出しても取り違えない）
       const suffix = [factory, kind].filter(Boolean).join("_");
       return csvResponse(`日次記録集計_${ymParam}${suffix ? `_${suffix}` : ""}.csv`, rows);
+    }
+
+    if (type === "bags") {
+      if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
+      const factory = restrictedFactory ?? (factoryParam || null);
+      const bags = await listBagsByMonth(s.companyId, ymParam, factory);
+      const rows: (string | number | null)[][] = [
+        [
+          "袋No", "工場", "重量計", "種類", "開始日", "締め日",
+          "開始の表示値(kg)", "締めの表示値(kg)", "袋の重量(kg)",
+          "記録した投入の合計(kg)", "差(kg)", "投入件数", "状態", "承認者",
+          "記録者(開始)", "記録者(締め)", "訂正理由", "備考",
+        ],
+      ];
+      for (const b of bags) {
+        rows.push([
+          b.bagNo, b.factory, b.scaleName, b.kind, b.openedOn, b.closedOn ?? "",
+          b.startCum, b.closeCum ?? "", bagWeight(b) ?? "",
+          b.totalWeight ?? b.runningTotal, bagGap(b) ?? "", b.entryCount,
+          BAG_STATUS_LABEL[b.status], b.approvedBy,
+          b.openedBy, b.closedBy, b.closeCumReason, b.note,
+        ]);
+      }
+      const suffix = factory ? `_${factory}` : "";
+      return csvResponse(`袋の記録_${ymParam}${suffix}.csv`, rows);
+    }
+
+    if (type === "bag-entries") {
+      if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
+      const factory = restrictedFactory ?? (factoryParam || null);
+      const entries = await listBagEntriesByMonth(s.companyId, ymParam, factory);
+      const rows: (string | number | null)[][] = [
+        ["袋No", "袋の状態", "工場", "重量計", "日付", "時刻", "職場", "種類", "投入前(kg)", "投入後(kg)", "スクラップ重量(kg)", "記録者", "異常"],
+      ];
+      for (const e of entries) {
+        rows.push([
+          e.bagNo, BAG_STATUS_LABEL[e.bagStatus], e.factory, e.scaleName,
+          e.recordDate, e.jikoku, e.workplace, e.hinshu,
+          e.cumBefore ?? "", e.cumAfter ?? "", e.weight, e.kirokusha, e.ijo,
+        ]);
+      }
+      const suffix = factory ? `_${factory}` : "";
+      return csvResponse(`袋別の投入明細_${ymParam}${suffix}.csv`, rows);
+    }
+
+    if (type === "workplaces") {
+      // 職場別の月間集計（どの職場からスクラップが出たか）。月間集計画面の職場別と同じ数字。
+      if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
+      const factory = restrictedFactory ?? (factoryParam || null);
+      const [agg, kinds] = await Promise.all([
+        listWorkplaceAgg(s.companyId, ymParam, factory),
+        listScrapKinds(s.companyId),
+      ]);
+      const kindNames = [
+        ...kinds.map((k) => k.name),
+        ...[...new Set(agg.flatMap((r) => Object.keys(r.byKind)))]
+          .filter((n) => !kinds.some((k) => k.name === n))
+          .sort(),
+      ];
+      const kind = kindNames.includes(kindParam) ? kindParam : "";
+      const kindCols = kind ? [kind] : kindNames;
+      const rows: (string | number | null)[][] = [
+        ["工場", "職場", "件数", ...kindCols.map((n) => `${n}(kg)`), ...(kind ? [] : ["合計(kg)"])],
+      ];
+      for (const r of agg) {
+        if (kind && !(r.byKind[kind] ?? 0)) continue;
+        rows.push([
+          r.factory,
+          r.workplace || "（職場の入力なし）",
+          r.count,
+          ...kindCols.map((n) => r.byKind[n] ?? 0),
+          ...(kind ? [] : [r.total]),
+        ]);
+      }
+      const suffix = [factory, kind].filter(Boolean).join("_");
+      return csvResponse(`職場別集計_${ymParam}${suffix ? `_${suffix}` : ""}.csv`, rows);
     }
 
     if (type === "mcframe") {

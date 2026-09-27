@@ -1,6 +1,7 @@
 import { FileDown } from "lucide-react";
 import { requireOperationsPage } from "@/lib/session";
 import { mcframeDayTotals, monthlyItemRows, type McframeDayTotal } from "@/lib/calc";
+import { mcframeSources } from "@/lib/db";
 import { fmt, isYmStr, thisMonthStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -26,10 +27,12 @@ export default async function McframePage({
 
   let rows: Awaited<ReturnType<typeof monthlyItemRows>>;
   let dayTotals: McframeDayTotal[];
+  let sources: Awaited<ReturnType<typeof mcframeSources>>;
   try {
-    [rows, dayTotals] = await Promise.all([
+    [rows, dayTotals, sources] = await Promise.all([
       monthlyItemRows(session.companyId, ym),
       mcframeDayTotals(session.companyId, ym),
+      mcframeSources(session.companyId, ym),
     ]);
   } catch (e) {
     console.error("[mcframe]", e);
@@ -48,7 +51,7 @@ export default async function McframePage({
       <div className="p-4 sm:p-6">
         <PageHeader
           title="McFrame取込"
-          description="品目マスターの「品目CD × 格納場所CD」単位で完成品数量（加工数）を日別に取り込みます。McFrameの製造実績をそのまま出力したCSV/Excelのほか、品目CD,格納場所CD,日付,加工数 の4列でも取り込めます（日付は 2026/8/5・2026-08-05 いずれも可）。同じ品目が同じ日に複数行あっても合計されます。月次の集計値は日別の合計で出るため、月次CSVの取込は日別データが無い過去期間の移行にだけ使います。"
+          description="品目マスターの「品目CD × 格納場所CD」単位で完成品数量（加工数）を日別に取り込みます。McFrameの製造実績をそのまま出力したファイル（.xlsx のまま／CSVどちらでも可。1行目が英語・2行目が日本語の2段見出しもそのまま）のほか、品目CD,格納場所CD,日付,加工数 の4列でも取り込めます（日付は 2026/8/5・2026-08-05 いずれも可）。工場ごとに分かれたファイルは1つずつ取り込んでください（格納場所CDで区別するため上書きされません）。同じ品目が同じ日に複数行あっても合計されます。品目マスターに無い品目は、実績の品名・場所から自動登録します（McFrameが正。ただし実績に重量は無いので、構成重量・完成重量は「重量未設定」のまま＝完成重量0です。品目マスターで重量を入れてください）。月次の集計値は日別の合計で出るため、月次取込は日別データが無い過去期間の移行にだけ使います。"
           action={
             <>
               <McframeImportButton />
@@ -68,14 +71,14 @@ export default async function McframePage({
         <section className="mb-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
           <h2 className="mb-1 text-sm font-bold text-[#333333]">{ym} 日別の完成品重量</h2>
           <p className="mb-3 text-xs text-[#909090]">
-            完成品重量 = その日の加工数 × 単品完成重量（初品実測を優先）。日付つきで取り込んだ月だけ表示されます。
+            完成品重量 = その日の加工数 × その日に有効だった単品完成重量（初品実測を優先）。日付つきで取り込んだ月だけ表示されます。
           </p>
           {dayTotals.length === 0 ? (
             <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
               この月は日別の加工数がありません。
               {rows.length > 0
                 ? "下の品目別集計は、過去データ移行で取り込んだ月次値を使っています。"
-                : "「CSV取込（日別）」から McFrameの製造実績、または 品目CD, 格納場所CD, 日付, 加工数 のCSVを取り込んでください。"}
+                : "「Excel/CSV取込（日別）」から McFrameの製造実績（.xlsx のままで可）、または 品目CD, 格納場所CD, 日付, 加工数 のファイルを取り込んでください。"}
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -125,8 +128,14 @@ export default async function McframePage({
           <h2 className="mb-1 text-sm font-bold text-[#333333]">
             {ym} 品目別 完成重量・使用量・理論スクラップ
           </h2>
+          {sources.days > 0 && sources.months > 0 && (
+            <p className="mb-2 rounded-lg bg-[#f7f7f5] px-3 py-2 text-xs text-[#707070]">
+              この月は日別の加工数（{sources.days}件）を使っています。過去データ移行で入れた月次の取込値（
+              {sources.months}件）は二重計上を避けるため未使用です。月次の値を使いたい月は、その月の日別データを消してください。
+            </p>
+          )}
           <p className="mb-3 text-xs text-[#909090]">
-            完成重量 = 加工数 × 単品完成重量（初品実測を優先、なければ理論値） / 使用量 = 加工数 × 構成重量 / 理論スクラップ = 使用量 − 完成重量
+            完成重量 = Σ(その日の加工数 × その日に有効だった単品完成重量)（初品実測を優先、なければ理論値） / 使用量 = 加工数 × 構成重量 / 理論スクラップ = 使用量 − 完成重量。「単品完成重量」の列は、月の途中で測り直した品目では加工数で加重平均した値になります。
           </p>
           <div className="overflow-x-auto">
             <table className="print-table w-full border-collapse text-sm">
@@ -148,7 +157,7 @@ export default async function McframePage({
                 {rows.length === 0 && (
                   <tr>
                     <td className={td} colSpan={10}>
-                      対象月の加工数データがありません。「CSV取込」から取り込んでください。
+                      対象月の加工数データがありません。「Excel/CSV取込（日別）」から取り込んでください。
                     </td>
                   </tr>
                 )}

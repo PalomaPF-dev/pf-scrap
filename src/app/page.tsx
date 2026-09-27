@@ -14,9 +14,9 @@ const CIRCLED = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨"];
 
 /** 機能を目的ごとにまとめたもの。ops の機能は権限のある人にだけ出す（サイドバーと同じ規則）。 */
 const GROUPS: { title: string; note: string; keys: ModuleKey[] }[] = [
-  { title: "現場の記録", note: "毎日の投入と初品の実測", keys: ["daily", "first"] },
+  { title: "現場の記録", note: "毎日の投入・袋の締めと初品の実測", keys: ["daily", "bags", "first"] },
   { title: "集計・照合", note: "月末にズレがないかを確かめる", keys: ["summary", "dashboard"] },
-  { title: "月次の入力・取込", note: "生産管理部・調達部", keys: ["procurement", "mcframe"] },
+  { title: "月次の入力・取込", note: "生産管理部・調達部", keys: ["procurement", "mcframe", "dailyImport"] },
   { title: "マスタ・設定", note: "生産管理部・調達部", keys: ["scales", "items", "settings"] },
 ];
 
@@ -33,7 +33,7 @@ function statusClass(status: DailyAggRow["status"]): string {
 
 /**
  * ホーム。画面が機能ごとに並んでいるだけでは「何から・どの順で使うか」が分からないため、
- * 実際の業務の順番（マスタ → 日次記録 → 初品測定 → 調達入力(月次在庫) → McFrame取込 → 月間集計 → 照合）
+ * 実際の業務の順番（マスタ → 日次記録 → 袋の記録 → 初品測定 → 調達入力(月次在庫) → McFrame取込 → 月間集計 → 照合）
  * を①②③…で見せ、各手順から該当画面へ進めるようにする。
  * いまの工場（上部で選んだ工場／所属工場）の今月の状況も少し出す。
  * 旧ホームの照合ダッシュボードは /dashboard へ移した。
@@ -105,7 +105,7 @@ export default async function HomePage({
           {FLOW.map((step, i) => {
             const m = MODULES[step.module];
             const Icon = m.icon;
-            const others = (step.also ?? []).map((k) => MODULES[k]);
+            const others = (step.also ?? []).map((k) => MODULES[k]).filter((o) => usable(o, canOperate));
             const can = usable(m, canOperate);
             return (
               <li

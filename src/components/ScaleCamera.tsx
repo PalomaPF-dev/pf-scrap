@@ -201,7 +201,12 @@ export default function ScaleCamera({
         type="button"
         onClick={openCamera}
         disabled={disabled || busy}
-        className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#b4632c] text-base font-semibold text-white hover:bg-[#96521f] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-5 sm:text-sm"
+        /*
+          読み取り（機械を撮る）操作は青。日次記録では「読み取る（青）→ 記録する（オレンジ）
+          → 保存（枠線）」と色と形を変えて、同じ見た目のボタンが並ばないようにしている。
+          現場から「同じ色のボタンが3つあって押し間違える」と報告があったため。
+        */
+        className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#0b5ca8] text-base font-semibold text-white hover:bg-[#094a86] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-5 sm:text-sm"
       >
         {busy ? <Loader2 className="h-5 w-5 animate-spin" /> : <Camera className="h-5 w-5" />}
         {busy ? "読み取り中…" : label}

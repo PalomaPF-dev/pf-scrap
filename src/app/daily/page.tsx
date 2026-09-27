@@ -1,5 +1,5 @@
 import { BarChart3, FileSpreadsheet } from "lucide-react";
-import { requireEntitledSession, getFactoryRestriction, canUseOperations } from "@/lib/session";
+import { requireEntitledSession, getFactoryView, canUseOperations } from "@/lib/session";
 import { getUserAffiliation, getUserRoleFactory } from "@/lib/authDb";
 import {
   KUBUN_LIST,
@@ -53,9 +53,9 @@ export default async function DailyPage({
   let affiliation: string | null;
   let bom: DailyBom;
   try {
-    const restriction = await getFactoryRestriction(session);
+    const restriction = await getFactoryView(session);
     const factories = await listFactoryOptions(session.companyId);
-    // 所属工場ユーザーは自工場に固定（URLで他工場を指定されてもサーバー側で無視）
+    // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定（URLで他工場を指定されてもサーバー側で無視）
     factoryLocked = restriction.restricted;
     factoryOptions = restriction.restricted ? [restriction.factory!] : factories;
     factory = restriction.restricted

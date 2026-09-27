@@ -583,6 +583,7 @@ export async function saveDailyRecordAction(input: {
     const revoked = await syncClosedBagTotals(s.companyId, [...bags.keys()]);
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     const total = entries.reduce((t, e) => t + e.weight, 0);
     const revokedMsg = revoked.length
       ? `（袋 ${revoked.map((b) => b.bagNo).join("・")} は中身が変わったため承認を外しました。再度承認してください）`
@@ -875,6 +876,7 @@ export async function closeBagAction(input: {
     }
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message };
   } catch (e) {
     return fail(bagErrorMessage(e));
@@ -932,6 +934,7 @@ export async function correctBagCloseAction(input: {
     const weight = Math.round((closeCum - bag.startCum) * 1000) / 1000;
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return {
       ok: true,
       message:
@@ -981,6 +984,7 @@ export async function reopenBagAction(bagId: string): Promise<ActionResult> {
     if (!ok) return fail("締めを取り消せませんでした。画面を再読み込みしてください。");
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return {
       ok: true,
       message:
@@ -1166,6 +1170,7 @@ export async function deleteDailyRecordAction(
     await deleteDailyRecord(s.companyId, recordDate, asStr(factory, 50));
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "削除しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1262,6 +1267,7 @@ export async function saveFirstArticleAction(input: {
     });
     revalidatePath("/first");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return {
       ok: true,
       message: `登録し、管理者へ申請しました（${measuredOn} / ${weight} kg）。承認後に計算へ反映されます。`,
@@ -1299,6 +1305,7 @@ export async function deleteFirstArticleAction(
     revalidatePath("/first");
     revalidatePath("/mcframe");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "削除しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1320,6 +1327,7 @@ export async function approveFirstArticleAction(
     });
     revalidatePath("/first");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "承認しました。計算に反映されます。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1343,6 +1351,7 @@ export async function rejectFirstArticleAction(
     });
     revalidatePath("/first");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "差し戻しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1524,6 +1533,7 @@ export async function importFirstArticlesAction(input: {
     revalidatePath("/first");
     revalidatePath("/mcframe");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     const lines = [`取込完了: ${count}件を承認済みで登録しました。`];
     if (fixedCount) {
       lines.push(`桁補正 ${fixedCount}件（他の日の水準に合わせました）: ${fixed.join(" / ")}${fixedCount > fixed.length ? " ほか" : ""}`);
@@ -1635,6 +1645,7 @@ export async function importMcframeAction(
     revalidatePath("/mcframe");
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     const parts = [
       dayCount ? `日別 ${dayCount}件` : "",
       monthCount ? `月次 ${monthCount}件` : "",
@@ -1697,6 +1708,7 @@ export async function saveProcureDaysAction(input: {
     const count = await upsertProcureDays(s.companyId, rows, s.userName || s.loginId || "");
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: `${count}日分を保存しました。` };
   } catch (e) {
     return fail((e as Error).message);
@@ -1741,6 +1753,7 @@ export async function importProcureCsvAction(
     const count = await upsertProcureDays(s.companyId, clean, s.userName || s.loginId || "");
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: `取込完了: ${count}日分（読取不可・対象外: ${bad}行）` };
   } catch (e) {
     return fail((e as Error).message);
@@ -1778,6 +1791,7 @@ export async function addAdjustmentAction(input: {
     });
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "在庫補正を登録しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1790,6 +1804,7 @@ export async function deleteAdjustmentAction(id: string): Promise<ActionResult> 
     await deleteAdjustment(s.companyId, asStr(id, 50));
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "削除しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1826,6 +1841,7 @@ export async function saveMonthlyAnchorAction(input: {
     });
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "月初在庫（棚卸アンカー）を保存しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1868,6 +1884,7 @@ export async function importMonthlyCsvAction(
     }
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行）` };
   } catch (e) {
     return fail((e as Error).message);
@@ -2069,6 +2086,7 @@ export async function importDailyExcelAction(input: {
     revalidatePath("/daily");
     revalidatePath("/summary");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     const parts = [`取込 ${imported.length}日`];
     if (skipped.length) parts.push(`既存のため飛ばし ${skipped.length}日`);
     if (failed.length) parts.push(`エラー ${failed.length}日`);

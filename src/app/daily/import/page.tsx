@@ -1,5 +1,5 @@
 import { ClipboardList } from "lucide-react";
-import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
+import { requireOperationsPage, getFactoryView } from "@/lib/session";
 import { listFactoryOptions, listScrapKinds, type ScrapKind } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -21,7 +21,9 @@ export default async function DailyImportPage() {
   let factory: string;
   let kinds: ScrapKind[];
   try {
-    const restriction = await getFactoryRestriction(session);
+    // 取込先の工場の既定値。所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定
+    // （書き込みの可否は取込の Server Action 側で所属から判定する）
+    const restriction = await getFactoryView(session);
     const factories = await listFactoryOptions(session.companyId);
     factoryLocked = restriction.restricted;
     factoryOptions = restriction.restricted ? [restriction.factory!] : factories;

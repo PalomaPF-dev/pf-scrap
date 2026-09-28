@@ -12,7 +12,9 @@ import {
   addAdjustment,
   deleteAdjustment,
   deleteDailyRecord,
+  bulkImportFirstArticles,
   deleteFirstArticle,
+  findItemsByZuban,
   deleteItem,
   deleteScale,
   getDailyRecord,
@@ -773,6 +775,124 @@ export async function rejectFirstArticleAction(
     revalidatePath("/first");
     revalidatePath("/");
     return { ok: true, message: "差し戻しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+// ===== ③' 品質チェックシート（PDF）取込（管理者のみ） =====
+
+/** チェックシートの図番に当たる品目の候補。 */
+export interface CheckSheetItemCandidate {
+  hinmokuCD: string;
+  kakunoCD: string;
+  kakunoMei: string;
+  hinmei: string;
+  kanseiJuryo: number;
+}
+
+/**
+ * チェックシートの図番 → 品目（品目CD×格納場所CD）の候補。
+ * 品目CDで一致しなければ子図番で探す。所属工場のあるユーザーは自工場の品目だけ。
+ */
+export async function resolveCheckSheetItemsAction(
+  zubans: string[],
+  factory?: string | null
+): Promise<Record<string, CheckSheetItemCandidate[]>> {
+  const s = await requireAdminSession();
+  const restriction = await getFactoryRestriction(s);
+  const f = restriction.restricted ? restriction.factory : asStr(factory ?? "", 50) || null;
+  const list = [...new Set((Array.isArray(zubans) ? zubans : []).map((z) => asStr(z, 50)).filter(Boolean))].slice(0, 2000);
+  const items = await findItemsByZuban(s.companyId, list, f);
+  const out: Record<string, CheckSheetItemCandidate[]> = {};
+  for (const z of list) {
+    const byCode = items.filter((it) => it.kanriZuban === z);
+    const hits = byCode.length ? byCode : items.filter((it) => it.koZuban === z);
+    const uniq = new Map<string, CheckSheetItemCandidate>();
+    for (const it of hits) {
+      const k = `${it.kanriZuban}\t${it.kakunoCD}`;
+      if (!uniq.has(k)) {
+        uniq.set(k, {
+          hinmokuCD: it.kanriZuban,
+          kakunoCD: it.kakunoCD,
+          kakunoMei: it.kakunoMei,
+          hinmei: it.hinmei,
+          kanseiJuryo: it.kanseiJuryo,
+        });
+      }
+    }
+    out[z] = [...uniq.values()];
+  }
+  return out;
+}
+
+/**
+ * 品質チェックシートから読み取った初品重量の一括登録（管理者のみ）。
+ * シートはG長確認済みのため、取り込んだ管理者の承認として登録し、そのまま計算に反映する。
+ * 同じ加工日×品目が複数あれば平均する（同じ日の再測定・工程違いのシート）。
+ */
+export async function importCheckSheetsAction(
+  rows: {
+    date?: unknown;
+    hinmokuCD?: unknown;
+    kakunoCD?: unknown;
+    weight?: unknown;
+    inspector?: unknown;
+  }[]
+): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    if (!Array.isArray(rows) || rows.length === 0) return fail("登録するデータがありません。");
+    if (rows.length > 5000) return fail("一度に登録できるのは5,000件までです。");
+    const restriction = await getFactoryRestriction(s);
+    const refs = [...new Set(rows.map((r) => asStr(r.hinmokuCD, 50)).filter(Boolean))];
+    const known = await findItemsByZuban(
+      s.companyId,
+      refs,
+      restriction.restricted ? restriction.factory : null
+    );
+    const knownRefs = new Set(known.map((it) => `${it.kanriZuban}\t${it.kakunoCD}`));
+    const merged = new Map<
+      string,
+      { measuredOn: string; hinmokuCD: string; kakunoCD: string; sum: number; n: number; names: Set<string> }
+    >();
+    let bad = 0;
+    for (const r of rows) {
+      const measuredOn = normDateStr(r.date);
+      const hinmokuCD = asStr(r.hinmokuCD, 50);
+      const kakunoCD = asStr(r.kakunoCD, 50);
+      const weight = toNum(r.weight);
+      if (!measuredOn || !knownRefs.has(`${hinmokuCD}\t${kakunoCD}`) || !(weight > 0) || weight > 10000) {
+        bad++;
+        continue;
+      }
+      const k = `${measuredOn}\t${hinmokuCD}\t${kakunoCD}`;
+      const m = merged.get(k) ?? { measuredOn, hinmokuCD, kakunoCD, sum: 0, n: 0, names: new Set<string>() };
+      m.sum += weight;
+      m.n++;
+      const name = asStr(r.inspector, 50);
+      if (name) m.names.add(name);
+      merged.set(k, m);
+    }
+    if (merged.size === 0) return fail("登録できる行がありませんでした。");
+    const approver = s.userName || s.loginId || "";
+    const count = await bulkImportFirstArticles(
+      s.companyId,
+      [...merged.values()].map((m) => ({
+        measuredOn: m.measuredOn,
+        hinmokuCD: m.hinmokuCD,
+        kakunoCD: m.kakunoCD,
+        weight: Math.round((m.sum / m.n) * 1e6) / 1e6,
+        sokuteisha: [...m.names].join("・") || "チェックシート取込",
+      })),
+      `${approver}（チェックシート取込）`
+    );
+    revalidatePath("/first");
+    revalidatePath("/");
+    return {
+      ok: true,
+      message: `${count}件を登録しました（承認済みとして計算に反映）${bad ? ` / 対象外 ${bad}件` : ""}`,
+    };
   } catch (e) {
     return fail((e as Error).message);
   }

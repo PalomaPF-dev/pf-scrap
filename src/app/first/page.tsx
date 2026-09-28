@@ -4,6 +4,7 @@ import { listFactoryOptions, listFirstArticles, type FirstArticle } from "@/lib/
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import FirstArticlePanel from "@/components/FirstArticlePanel";
+import CheckSheetImport from "@/components/CheckSheetImport";
 
 export const dynamic = "force-dynamic";
 
@@ -77,6 +78,7 @@ export default async function FirstPage({
         userName={session.userName}
         isAdmin={session.role === "admin"}
       />
+      {session.role === "admin" && <CheckSheetImport key={`cs-${factory}`} factory={factory} />}
     </div>
   );
 }

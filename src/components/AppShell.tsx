@@ -1,53 +1,42 @@
 "use client";
 
 import { useSession, signOut } from "next-auth/react";
-import {
-  LayoutDashboard,
-  ClipboardList,
-  Scale,
-  Package,
-  Download,
-  CalendarRange,
-  BarChart3,
-  BookOpen,
-  QrCode,
-  Settings,
-  LogOut,
-  Mail,
-} from "lucide-react";
+import { usePathname } from "next/navigation";
+import { LogOut, Mail } from "lucide-react";
 import { AppShell as BaseAppShell, UserIdentity, type NavItem } from "@paloma-pf/ui";
 import type { SidebarUser } from "@/lib/sidebarUser";
-
-/** 全員が使うナビ（日次記録・月間集計・初品測定・照合の閲覧と、使い方ガイド）。 */
-const NAV_COMMON: NavItem[] = [
-  { href: "/", label: "照合ダッシュボード", icon: LayoutDashboard },
-  { href: "/daily", label: "日次記録", icon: ClipboardList },
-  { href: "/summary", label: "月間集計", icon: BarChart3 },
-  { href: "/first", label: "初品重量測定", icon: Scale },
-];
-
-/** 使い方ガイド。誰でも見られるよう、いちばん下に固定で置く。 */
-const NAV_GUIDE: NavItem = { href: "/guide", label: "使い方", icon: BookOpen };
+import { MODULES, usable, type ModuleKey } from "./Modules";
+import { FactoryProvider } from "./FactoryScope";
 
 /**
- * 生産管理部・調達部のメンバーと管理者だけが使うナビ。
- * 権限が無い人にはタブごと出さない（サーバー側でも requireOperations* で必ず防ぐ）。
+ * サイドバーの並び。名前・アイコンはホーム・使い方と同じ定義（Modules.ts）から作る。
+ * 表示順は ホーム → 照合 → 日次記録 → 袋の記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類 → 使い方。
+ * 生産管理部・調達部のメンバーと管理者だけが使う機能（ops）は、権限が無い人にはタブごと出さない
+ * （サーバー側でも requireOperations* で必ず防ぐ）。
  */
-const NAV_OPERATIONS: NavItem[] = [
-  { href: "/procurement", label: "調達入力", icon: CalendarRange },
-  { href: "/items", label: "品目マスター", icon: Package },
-  { href: "/scales", label: "重量計マスター", icon: QrCode },
-  { href: "/mcframe", label: "McFrame取込", icon: Download },
-  { href: "/settings", label: "設定", icon: Settings },
+const NAV_ORDER: ModuleKey[] = [
+  "home",
+  "dashboard",
+  "daily",
+  "bags",
+  "summary",
+  "procurement",
+  "first",
+  "items",
+  "scales",
+  "mcframe",
+  "settings",
+  "guide",
 ];
 
-/** 表示順は 照合 → 日次記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類 → 使い方。 */
 function navFor(canOperate: boolean): NavItem[] {
-  if (!canOperate) return [...NAV_COMMON, NAV_GUIDE];
-  const [dashboard, daily, summary, first] = NAV_COMMON;
-  const [procurement, ...masters] = NAV_OPERATIONS;
-  return [dashboard, daily, summary, procurement, first, ...masters, NAV_GUIDE];
+  return NAV_ORDER.map((k) => MODULES[k])
+    .filter((m) => usable(m, canOperate))
+    .map((m) => ({ href: m.href, label: m.title, icon: m.icon }));
 }
+
+/** 工場の選択を出さない画面（@paloma-pf/ui の AppShell がシェルを出さない画面と同じ）。 */
+const BARE_ROUTES = ["/login", "/register", "/password-reset", "/password-reset/confirm"];
 
 /** スクラップアプリのテーマ（銅色、アクティブは角丸＋丸バー）。 */
 const ACCENT = "#b4632c";
@@ -116,8 +105,11 @@ export default function AppShell({
    */
   canOperate: boolean;
 }) {
-  const { data: session } = useSession();
+  const { data: session, status } = useSession();
+  const pathname = usePathname();
   const isAdmin = session?.user?.role === "admin";
+  // ログインしている通常の画面だけ、まず工場を選ばせる（ログイン・パスワード再設定では出さない）
+  const factoryEnabled = status === "authenticated" && !BARE_ROUTES.includes(pathname);
   return (
     <BaseAppShell
       nav={navFor(canOperate)}
@@ -132,7 +124,7 @@ export default function AppShell({
       viewModeSwitch={false}
       sidebarFooter={<UserFooter user={user} />}
     >
-      {children}
+      <FactoryProvider enabled={factoryEnabled}>{children}</FactoryProvider>
     </BaseAppShell>
   );
 }

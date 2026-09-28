@@ -31,12 +31,12 @@ export async function loadSidebarUser(): Promise<SidebarUser> {
     const affiliation = await getUserAffiliation(s.userId);
     // 表示制限の規則は session.ts の getFactoryRestriction と同じ。
     // 工場に所属していれば自工場の記録だけ（**管理者も同じ**）。
-    // 工場未所属（ポータル管理・本部スタッフ）は全工場を見られる。
+    // 工場未所属（ポータル管理・本部スタッフ）は全工場を見られる（表示する工場は画面上部で選ぶ）。
     const factory = s.isDemo ? null : s.factory;
     return {
       affiliation,
       role: s.role,
-      scope: factory ? `${factory}のデータのみ` : "全工場のデータ",
+      scope: factory ? `${factory}のデータのみ` : "全工場のデータ（上部で工場を切替）",
       scopeWarning: false,
     };
   } catch {

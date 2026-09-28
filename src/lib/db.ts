@@ -9,6 +9,12 @@ export {
   SCALE_KIND_LIST,
   DAILY_STATUS_LABEL,
   FA_STATUS_LABEL,
+  BAG_STATUS_LABEL,
+  BAG_TARGET_KG,
+  bagGap,
+  bagWeight,
+  type BagStatus,
+  type ScrapBag,
   type FaStatus,
   type FirstArticle,
   type Kubun,
@@ -21,18 +27,24 @@ export {
   type Scale,
 } from "./scrapTypes";
 import {
+  type ScrapBag as _ScrapBag,
+  type BagStatus as _BagStatus,
   type FirstArticle as _FirstArticle,
   type FaStatus as _FaStatus,
   type ScrapItem as _ScrapItem,
   type ScrapKind as _ScrapKind,
+  type DailyEntry as _DailyEntry,
   type DailyRecord as _DailyRecord,
   type DailyStatus as _DailyStatus,
   type Scale as _Scale,
 } from "./scrapTypes";
+type ScrapBag = _ScrapBag;
+type BagStatus = _BagStatus;
 type ScrapItem = _ScrapItem;
 type ScrapKind = _ScrapKind;
 type FirstArticle = _FirstArticle;
 type FaStatus = _FaStatus;
+type DailyEntry = _DailyEntry;
 type DailyRecord = _DailyRecord;
 type DailyStatus = _DailyStatus;
 type Scale = _Scale;
@@ -167,8 +179,10 @@ export async function upsertItem(
       seizo_basho_mei = EXCLUDED.seizo_basho_mei,
       kakuno_mei = EXCLUDED.kakuno_mei,
       factory = EXCLUDED.factory,
+      auto_added = false,
       updated_at = NOW()
     RETURNING id`;
+  await dropAutoAddedDuplicates(companyId);
   return rows[0].id as string;
 }
 
@@ -223,10 +237,94 @@ export async function bulkUpsertItems(
         seizo_basho_mei = EXCLUDED.seizo_basho_mei,
         kakuno_mei = EXCLUDED.kakuno_mei,
         factory = EXCLUDED.factory,
+        auto_added = false,
         updated_at = NOW()`;
     count += c.length;
   }
+  await dropAutoAddedDuplicates(companyId);
   return count;
+}
+
+/**
+ * 本物の品目マスター行が入った品目について、McFrame実績から自動登録した仮行を消す。
+ * 仮行（重量0）が残ると、完成重量(理論)を子図番順の先頭から取る集計で 0 を拾ってしまう。
+ */
+async function dropAutoAddedDuplicates(companyId: string): Promise<void> {
+  const sql = getSql();
+  await sql`
+    DELETE FROM scrap_items a
+    WHERE a.company_id = ${companyId} AND a.auto_added = true
+      AND EXISTS (
+        SELECT 1 FROM scrap_items b
+        WHERE b.company_id = a.company_id AND b.auto_added = false
+          AND b.kanri_zuban = a.kanri_zuban AND b.kakuno_cd = a.kakuno_cd)`;
+}
+
+/**
+ * McFrameの製造実績に出てくる品目のうち、品目マスターに無いものを登録する。
+ * McFrameが正なので取り込むが、実績出力には構成重量・完成重量(理論)が無いので重量は0のまま。
+ * 既にある品目（本物・仮を問わず）は触らない。登録した品目CDの一覧を返す。
+ */
+export async function addMissingItemsFromMcframe(
+  companyId: string,
+  items: {
+    hinmokuCD: string;
+    kakunoCD: string;
+    hinmei: string;
+    kakunoMei: string;
+    seizoBashoCD: string;
+    seizoBashoMei: string;
+  }[],
+  factoryOptions: string[]
+): Promise<{ hinmokuCD: string; kakunoCD: string; hinmei: string }[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const uniq = new Map<string, (typeof items)[number]>();
+  for (const it of items) {
+    if (!it.hinmokuCD || !it.kakunoCD) continue;
+    uniq.set(`${it.hinmokuCD}\t${it.kakunoCD}`, it);
+  }
+  if (uniq.size === 0) return [];
+  const list = [...uniq.values()];
+  const known = await sql`
+    SELECT DISTINCT kanri_zuban, kakuno_cd FROM scrap_items
+    WHERE company_id = ${companyId}
+      AND kanri_zuban = ANY(${list.map((x) => x.hinmokuCD)}::text[])`;
+  const have = new Set(known.map((r: any) => `${r.kanri_zuban}\t${r.kakuno_cd}`));
+  const missing = list.filter((x) => !have.has(`${x.hinmokuCD}\t${x.kakunoCD}`));
+  if (missing.length === 0) return [];
+  // 工場は場所名から推定する（「直方内胴組立」→「直方」）。分からなければ空（全工場から見える）
+  const guessFactory = (it: (typeof items)[number]) => {
+    const hay = `${it.kakunoMei} ${it.seizoBashoMei}`;
+    // 「直方工場」のように工場名に接尾辞が付いていても拾えるようにする
+    const hit = factoryOptions
+      .filter((f) => f && (hay.includes(f) || hay.includes(f.replace(/(工場|製造所)$/, ""))))
+      .sort((a, b) => b.length - a.length);
+    return hit[0] ?? "";
+  };
+  const chunkSize = 200;
+  for (let i = 0; i < missing.length; i += chunkSize) {
+    const c = missing.slice(i, i + chunkSize);
+    await sql`
+      INSERT INTO scrap_items (
+        company_id, kanri_zuban, hinmei, kubun, ko_zuban, tani,
+        kosei_juryo, kansei_juryo, seizo_basho_cd, seizo_basho_mei,
+        kakuno_cd, kakuno_mei, factory, auto_added
+      )
+      SELECT ${companyId}, t.z, t.n, 'その他', '', 'K', 0, 0, t.sc, t.sm, t.kc, t.km, t.f, true
+      FROM unnest(
+        ${c.map((x) => x.hinmokuCD)}::text[], ${c.map((x) => x.hinmei)}::text[],
+        ${c.map((x) => x.seizoBashoCD)}::text[], ${c.map((x) => x.seizoBashoMei)}::text[],
+        ${c.map((x) => x.kakunoCD)}::text[], ${c.map((x) => x.kakunoMei)}::text[],
+        ${c.map((x) => guessFactory(x))}::text[]
+      ) AS t(z, n, sc, sm, kc, km, f)
+      ON CONFLICT (company_id, kanri_zuban, kakuno_cd, ko_zuban) DO NOTHING`;
+  }
+  return missing.map((x) => ({
+    hinmokuCD: x.hinmokuCD,
+    kakunoCD: x.kakunoCD,
+    hinmei: x.hinmei,
+  }));
 }
 
 export async function deleteItem(companyId: string, id: string): Promise<void> {
@@ -346,6 +444,7 @@ function mapScale(r: any): Scale {
     active: Boolean(r.active),
     capacity: numOrNull(r.capacity),
     division: numOrNull(r.division),
+    bagTargetKg: numOrNull(r.bag_target_kg),
   };
 }
 
@@ -397,22 +496,25 @@ export async function upsertScale(
       UPDATE scrap_scales SET
         qr_code = ${s.qrCode}, equip_no = ${s.equipNo}, name = ${s.name}, kind = ${s.kind},
         factory = ${s.factory}, sort = ${s.sort}, active = ${s.active},
-        capacity = ${s.capacity}, division = ${s.division}
+        capacity = ${s.capacity}, division = ${s.division},
+        bag_target_kg = ${s.bagTargetKg}
       WHERE company_id = ${companyId} AND id = ${s.id}`;
     return s.id;
   }
   const rows = await sql`
     INSERT INTO scrap_scales (
-      company_id, qr_code, equip_no, name, kind, factory, sort, active, capacity, division
+      company_id, qr_code, equip_no, name, kind, factory, sort, active, capacity, division,
+      bag_target_kg
     )
     VALUES (
       ${companyId}, ${s.qrCode}, ${s.equipNo}, ${s.name}, ${s.kind}, ${s.factory},
-      ${s.sort}, ${s.active}, ${s.capacity}, ${s.division}
+      ${s.sort}, ${s.active}, ${s.capacity}, ${s.division}, ${s.bagTargetKg}
     )
     ON CONFLICT (company_id, qr_code) DO UPDATE SET
       equip_no = EXCLUDED.equip_no, name = EXCLUDED.name, kind = EXCLUDED.kind,
       factory = EXCLUDED.factory, sort = EXCLUDED.sort, active = EXCLUDED.active,
-      capacity = EXCLUDED.capacity, division = EXCLUDED.division
+      capacity = EXCLUDED.capacity, division = EXCLUDED.division,
+      bag_target_kg = EXCLUDED.bag_target_kg
     RETURNING id`;
   return rows[0].id as string;
 }
@@ -459,8 +561,13 @@ function mapDailyRecord(r: any, entries: any[]): DailyRecord {
       cumAfterReason: e.cum_after_reason ?? "",
       cumBeforeReadId: e.cum_before_read_id ?? null,
       cumAfterReadId: e.cum_after_read_id ?? null,
+      bagId: e.bag_id ?? null,
       kirokusha: e.kirokusha,
       ijo: e.ijo,
+      busho: e.busho ?? "",
+      kikai: e.kikai ?? "",
+      zairyo: e.zairyo ?? "",
+      kotei: e.kotei ?? "",
     })),
   };
 }
@@ -500,7 +607,8 @@ export async function getDailyRecord(
   const entries = await sql`
     SELECT jikoku, hinshu, scale_id, scale_name, gross_weight, tare_weight,
            weight, cum_before, cum_after, cum_before_reason, cum_after_reason,
-           cum_before_read_id, cum_after_read_id, kirokusha, ijo
+           cum_before_read_id, cum_after_read_id, bag_id, kirokusha, ijo,
+           busho, kikai, zairyo, kotei
     FROM scrap_daily_entries WHERE record_id = ${r.id} ORDER BY sort ASC`;
   return mapDailyRecord(r, entries);
 }
@@ -538,24 +646,597 @@ export async function saveDailyRecord(
       updated_at = NOW()
     RETURNING id`;
   const recordId = rows[0].id as string;
-  await sql`DELETE FROM scrap_daily_entries WHERE record_id = ${recordId}`;
-  for (let i = 0; i < rec.entries.length; i++) {
-    const e = rec.entries[i];
-    await sql`
+  await replaceDailyEntries(companyId, recordId, rec.entries);
+}
+
+/**
+ * 明細を全置換する（記録票の保存・取込で共通）。
+ * 削除と挿入を1つのトランザクションにまとめる（途中で失敗して明細が消えたままにならない。
+ * Excel取込では1日に100件超の明細があるので、1本ずつ往復するより速い）。
+ */
+async function replaceDailyEntries(
+  companyId: string,
+  recordId: string,
+  entries: DailyEntry[]
+): Promise<void> {
+  const sql = getSql();
+  const queries = [sql`DELETE FROM scrap_daily_entries WHERE record_id = ${recordId}`];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    queries.push(sql`
       INSERT INTO scrap_daily_entries (
         company_id, record_id, jikoku, hinshu, scale_id, scale_name,
         gross_weight, tare_weight, weight, cum_before, cum_after,
         cum_before_reason, cum_after_reason, cum_before_read_id, cum_after_read_id,
-        kirokusha, ijo, sort
+        bag_id, kirokusha, ijo, busho, kikai, zairyo, kotei, sort
       )
       VALUES (
         ${companyId}, ${recordId}, ${e.jikoku}, ${e.hinshu}, ${e.scaleId}, ${e.scaleName},
         ${e.grossWeight}, ${e.tareWeight}, ${e.weight}, ${e.cumBefore}, ${e.cumAfter},
         ${e.cumBeforeReason ?? ""}, ${e.cumAfterReason ?? ""},
         ${e.cumBeforeReadId ?? null}, ${e.cumAfterReadId ?? null},
-        ${e.kirokusha}, ${e.ijo}, ${i}
-      )`;
+        ${e.bagId ?? null}, ${e.kirokusha}, ${e.ijo},
+        ${e.busho ?? ""}, ${e.kikai ?? ""}, ${e.zairyo ?? ""}, ${e.kotei ?? ""}, ${i}
+      )`);
   }
+  await sql.transaction(queries);
+}
+
+/**
+ * Excel（紙様式）の日次記録票を取り込む。日付×工場で upsert し、明細は全置換。
+ * 通常の保存（saveDailyRecord）と違い、承認状態も一緒に入れる:
+ * Excelに責任者のサインがある日は、その時点で承認された記録なので approved にし、
+ * 承認者にサインの名前を残す（誰の承認かを後から追えるようにする）。
+ */
+export async function importDailyRecord(
+  companyId: string,
+  rec: Omit<
+    DailyRecord,
+    "id" | "status" | "appliedBy" | "appliedAt" | "approvedBy" | "approvedAt" | "rejectComment"
+  >,
+  approval: { status: DailyStatus; approvedBy: string }
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  const approvedAt = approval.status === "approved" ? new Date().toISOString() : null;
+  const rows = await sql`
+    INSERT INTO scrap_daily_records (
+      company_id, record_date, factory, sekininsha, zenjitsu_ok, hako_zanryo,
+      kaishi_cum, kaishu_sokuteichi, tonyu_kanryo, shonin, biko, updated_by,
+      status, approved_by, approved_at
+    ) VALUES (
+      ${companyId}, ${rec.recordDate}, ${rec.factory}, ${rec.sekininsha}, ${rec.zenjitsuOk},
+      ${rec.hakoZanryo}, ${JSON.stringify(rec.kaishiCum ?? {})}::jsonb,
+      ${rec.kaishuSokuteichi}, ${rec.tonyuKanryo}, ${rec.shonin},
+      ${rec.biko}, ${rec.updatedBy},
+      ${approval.status}, ${approval.approvedBy}, ${approvedAt}
+    )
+    ON CONFLICT (company_id, record_date, factory) DO UPDATE SET
+      sekininsha = EXCLUDED.sekininsha,
+      zenjitsu_ok = EXCLUDED.zenjitsu_ok,
+      hako_zanryo = EXCLUDED.hako_zanryo,
+      kaishi_cum = EXCLUDED.kaishi_cum,
+      kaishu_sokuteichi = EXCLUDED.kaishu_sokuteichi,
+      tonyu_kanryo = EXCLUDED.tonyu_kanryo,
+      shonin = EXCLUDED.shonin,
+      biko = EXCLUDED.biko,
+      updated_by = EXCLUDED.updated_by,
+      status = EXCLUDED.status,
+      approved_by = EXCLUDED.approved_by,
+      approved_at = EXCLUDED.approved_at,
+      updated_at = NOW()
+    RETURNING id`;
+  await replaceDailyEntries(companyId, rows[0].id as string, rec.entries);
+}
+
+// ===== スクラップ袋 =====
+
+function mapBag(r: any): ScrapBag {
+  return {
+    id: String(r.id),
+    factory: r.factory ?? "",
+    scaleId: r.scale_id ?? null,
+    scaleName: r.scale_name ?? "",
+    kind: r.kind ?? "",
+    bagNo: r.bag_no ?? "",
+    seq: Number(r.seq) || 1,
+    openedOn: dateStr(r.opened_on),
+    openedAt: r.opened_at ? new Date(r.opened_at).toISOString() : null,
+    openedBy: r.opened_by ?? "",
+    startCum: num(r.start_cum),
+    closedOn: r.closed_on ? dateStr(r.closed_on) : null,
+    closedAt: r.closed_at ? new Date(r.closed_at).toISOString() : null,
+    closedBy: r.closed_by ?? "",
+    closeCum: numOrNull(r.close_cum),
+    closeCumReason: r.close_cum_reason ?? "",
+    closeCumReadId: r.close_cum_read_id ?? null,
+    totalWeight: numOrNull(r.total_weight),
+    status: (r.status ?? "open") as BagStatus,
+    approvedBy: r.approved_by ?? "",
+    approvedAt: r.approved_at ? new Date(r.approved_at).toISOString() : null,
+    note: r.note ?? "",
+    runningTotal: num(r.running_total),
+    entryCount: Number(r.entry_count) || 0,
+    lastCum: numOrNull(r.last_cum),
+  };
+}
+
+/**
+ * 「記録中」の袋。重量計ごとに最大1つ（部分ユニーク索引で保証）。
+ * 明細の合計・件数・最後の投入後の表示値も一緒に返す。最後の投入後は
+ * 日をまたいで引き継ぐため、日付ではなく袋で辿る。
+ */
+export async function listOpenBags(companyId: string, factory: string): Promise<ScrapBag[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT b.*,
+           COALESCE(a.total, 0) AS running_total,
+           COALESCE(a.cnt, 0)   AS entry_count,
+           a.last_cum
+    FROM scrap_bags b
+    LEFT JOIN LATERAL (
+      SELECT SUM(e.weight) AS total, COUNT(*) AS cnt,
+             (SELECT e2.cum_after
+                FROM scrap_daily_entries e2
+                JOIN scrap_daily_records r2 ON r2.id = e2.record_id
+               WHERE e2.bag_id = b.id AND e2.cum_after IS NOT NULL
+               ORDER BY r2.record_date DESC, e2.sort DESC
+               LIMIT 1) AS last_cum
+        FROM scrap_daily_entries e
+       WHERE e.bag_id = b.id
+    ) a ON TRUE
+    WHERE b.company_id = ${companyId} AND b.factory = ${factory} AND b.status = 'open'
+    ORDER BY b.opened_at ASC`;
+  return rows.map(mapBag);
+}
+
+/**
+ * その日の画面に出す袋。記録中のものと、その日に投入・締めがあったものを返す。
+ * 袋は日をまたぐので「その日に開いた袋」だけでは足りない。
+ */
+export async function listBagsForDate(
+  companyId: string,
+  factory: string,
+  date: string
+): Promise<ScrapBag[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT b.*,
+           COALESCE(a.total, 0) AS running_total,
+           COALESCE(a.cnt, 0)   AS entry_count,
+           a.last_cum
+    FROM scrap_bags b
+    LEFT JOIN LATERAL (
+      SELECT SUM(e.weight) AS total, COUNT(*) AS cnt,
+             (SELECT e2.cum_after
+                FROM scrap_daily_entries e2
+                JOIN scrap_daily_records r2 ON r2.id = e2.record_id
+               WHERE e2.bag_id = b.id AND e2.cum_after IS NOT NULL
+               ORDER BY r2.record_date DESC, e2.sort DESC
+               LIMIT 1) AS last_cum
+        FROM scrap_daily_entries e
+       WHERE e.bag_id = b.id
+    ) a ON TRUE
+    WHERE b.company_id = ${companyId} AND b.factory = ${factory}
+      AND (
+        -- 記録中の袋は、その日にはまだ開いていなかったものを除く
+        (b.status = 'open' AND b.opened_on <= ${date})
+        OR b.closed_on = ${date}
+        OR b.opened_on = ${date}
+        OR EXISTS (
+          SELECT 1 FROM scrap_daily_entries e3
+          JOIN scrap_daily_records r3 ON r3.id = e3.record_id
+          WHERE e3.bag_id = b.id AND r3.record_date = ${date}
+        )
+      )
+    ORDER BY b.opened_at ASC`;
+  return rows.map(mapBag);
+}
+
+export async function getBagById(companyId: string, id: string): Promise<ScrapBag | null> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT b.*,
+           COALESCE(a.total, 0) AS running_total,
+           COALESCE(a.cnt, 0)   AS entry_count,
+           a.last_cum
+    FROM scrap_bags b
+    LEFT JOIN LATERAL (
+      SELECT SUM(e.weight) AS total, COUNT(*) AS cnt,
+             (SELECT e2.cum_after
+                FROM scrap_daily_entries e2
+                JOIN scrap_daily_records r2 ON r2.id = e2.record_id
+               WHERE e2.bag_id = b.id AND e2.cum_after IS NOT NULL
+               ORDER BY r2.record_date DESC, e2.sort DESC
+               LIMIT 1) AS last_cum
+        FROM scrap_daily_entries e
+       WHERE e.bag_id = b.id
+    ) a ON TRUE
+    WHERE b.company_id = ${companyId} AND b.id = ${id}
+    LIMIT 1`;
+  return rows[0] ? mapBag(rows[0]) : null;
+}
+
+/**
+ * 袋を開く。袋Noは現場の記入用紙と同じ「開始日 + その日の順番」で採番する
+ * （重量が入るのは締めたとき）。同じ重量計で既に開いていれば部分ユニーク索引が
+ * 弾くので、二重に開くことはない。
+ */
+export async function openBag(
+  companyId: string,
+  b: {
+    factory: string;
+    scaleId: string;
+    scaleName: string;
+    kind: string;
+    openedOn: string;
+    openedBy: string;
+    startCum: number;
+    note: string;
+  }
+): Promise<ScrapBag> {
+  await ensureSchema();
+  const sql = getSql();
+  const seqRows = await sql`
+    SELECT COALESCE(MAX(seq), 0) + 1 AS next
+    FROM scrap_bags
+    WHERE company_id = ${companyId} AND scale_id = ${b.scaleId} AND opened_on = ${b.openedOn}`;
+  const seq = Number(seqRows[0]?.next) || 1;
+  const bagNo = `${b.openedOn.replace(/-/g, "")}-${seq}`;
+  const rows = await sql`
+    INSERT INTO scrap_bags (
+      company_id, factory, scale_id, scale_name, kind, bag_no, seq,
+      opened_on, opened_by, start_cum, note
+    ) VALUES (
+      ${companyId}, ${b.factory}, ${b.scaleId}, ${b.scaleName}, ${b.kind}, ${bagNo}, ${seq},
+      ${b.openedOn}, ${b.openedBy}, ${b.startCum}, ${b.note}
+    )
+    RETURNING *`;
+  return mapBag({ ...rows[0], running_total: 0, entry_count: 0, last_cum: null });
+}
+
+/**
+ * 袋を締める（＝交換する）。締めの表示値と、その時点の明細合計を確定させる。
+ * status は closed（承認待ち）。記録中の袋にしか効かない。
+ */
+export async function closeBag(
+  companyId: string,
+  id: string,
+  c: {
+    closedOn: string;
+    closedBy: string;
+    closeCum: number;
+    closeCumReadId: string | null;
+    closeCumReason: string;
+    totalWeight: number;
+    note: string;
+  }
+): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE scrap_bags SET
+      status = 'closed',
+      closed_on = ${c.closedOn},
+      closed_at = NOW(),
+      closed_by = ${c.closedBy},
+      close_cum = ${c.closeCum},
+      close_cum_read_id = ${c.closeCumReadId},
+      close_cum_reason = ${c.closeCumReason},
+      total_weight = ${c.totalWeight},
+      note = ${c.note},
+      updated_at = NOW()
+    WHERE company_id = ${companyId} AND id = ${id} AND status = 'open'
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+/** 袋の承認・承認取消（管理者のみ。取消は締め済みへ戻す）。 */
+export async function setBagApproval(
+  companyId: string,
+  id: string,
+  v: { status: BagStatus; approvedBy: string; note?: string }
+): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE scrap_bags SET
+      status = ${v.status},
+      approved_by = ${v.status === "approved" ? v.approvedBy : ""},
+      approved_at = ${v.status === "approved" ? new Date().toISOString() : null},
+      note = COALESCE(${v.note ?? null}, note),
+      updated_at = NOW()
+    WHERE company_id = ${companyId} AND id = ${id}
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+/**
+ * 締めの表示値を直す（管理者のみ）。袋は締めたままで数字だけ入れ直す。
+ * 交換のときに次の袋が開いているのが普通なので、記録中に戻さずに直せる経路が要る。
+ * 承認済みだった袋は承認待ちへ戻す（確認した数字と違うものを承認済みにしない）。
+ * AI読取のIDはそのまま残すので、「AIはこう読んだが、人がこう直した」は後から追える。
+ */
+export async function correctBagClose(
+  companyId: string,
+  id: string,
+  c: { closeCum: number; reason: string }
+): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE scrap_bags SET
+      close_cum = ${c.closeCum},
+      close_cum_reason = ${c.reason},
+      status = 'closed',
+      approved_by = '',
+      approved_at = NULL,
+      updated_at = NOW()
+    WHERE company_id = ${companyId} AND id = ${id} AND status <> 'open'
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+/**
+ * 投入が1件も無い袋を消す。交換のときに自動で開いた次の袋を、締め取消で
+ * 巻き戻すために使う（1台の重量計に記録中の袋は1つしか置けないため）。
+ * 投入が入っている袋は消さない。
+ */
+export async function deleteEmptyBag(companyId: string, id: string): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    DELETE FROM scrap_bags
+    WHERE company_id = ${companyId} AND id = ${id} AND status = 'open'
+      AND NOT EXISTS (SELECT 1 FROM scrap_daily_entries e WHERE e.bag_id = scrap_bags.id)
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+/** 締め済みの袋を記録中へ戻す（締め値の入れ直し。管理者のみ）。 */
+export async function reopenBag(companyId: string, id: string): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE scrap_bags SET
+      status = 'open',
+      closed_on = NULL, closed_at = NULL, closed_by = '',
+      close_cum = NULL, close_cum_read_id = NULL, close_cum_reason = '',
+      total_weight = NULL,
+      approved_by = '', approved_at = NULL,
+      updated_at = NOW()
+    WHERE company_id = ${companyId} AND id = ${id} AND status <> 'open'
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+/**
+ * 袋運用の開始日。この日から「袋単位」で管理し、それより前は従来どおり日単位。
+ *   setting  … 設定画面で決めた日
+ *   firstBag … 設定が無いので、その工場で最初に袋を開いた日から袋運用とみなす
+ *   none     … 設定も袋も無い（＝まだ袋運用を始めていない）
+ * none のときは呼び出し側が「今日から」として扱う（過去日に袋を作らせないため）。
+ */
+export interface BagStart {
+  factory: string;
+  startOn: string | null;
+  source: "setting" | "firstBag" | "none";
+  updatedBy: string;
+}
+
+export async function getBagStart(companyId: string, factory: string): Promise<BagStart> {
+  await ensureSchema();
+  const sql = getSql();
+  const setting = await sql`
+    SELECT start_on, updated_by FROM scrap_bag_starts
+    WHERE company_id = ${companyId} AND factory = ${factory} LIMIT 1`;
+  if (setting[0]) {
+    return {
+      factory,
+      startOn: dateStr(setting[0].start_on),
+      source: "setting",
+      updatedBy: setting[0].updated_by ?? "",
+    };
+  }
+  const first = await sql`
+    SELECT MIN(opened_on) AS d FROM scrap_bags
+    WHERE company_id = ${companyId} AND factory = ${factory}`;
+  const d = first[0]?.d;
+  return d
+    ? { factory, startOn: dateStr(d), source: "firstBag", updatedBy: "" }
+    : { factory, startOn: null, source: "none", updatedBy: "" };
+}
+
+/** 工場ごとの袋運用の開始日（設定画面用）。設定が無い工場は推定値を返す。 */
+export async function listBagStarts(companyId: string, factories: string[]): Promise<BagStart[]> {
+  const out: BagStart[] = [];
+  for (const f of factories) out.push(await getBagStart(companyId, f));
+  return out;
+}
+
+export async function setBagStart(
+  companyId: string,
+  factory: string,
+  startOn: string,
+  updatedBy: string
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`
+    INSERT INTO scrap_bag_starts (company_id, factory, start_on, updated_by)
+    VALUES (${companyId}, ${factory}, ${startOn}, ${updatedBy})
+    ON CONFLICT (company_id, factory) DO UPDATE SET
+      start_on = EXCLUDED.start_on, updated_by = EXCLUDED.updated_by, updated_at = NOW()`;
+}
+
+/** 袋運用の開始日の設定を消す（推定値に戻す）。 */
+export async function clearBagStart(companyId: string, factory: string): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`DELETE FROM scrap_bag_starts WHERE company_id = ${companyId} AND factory = ${factory}`;
+}
+
+/**
+ * 月ごとの袋の一覧。締めた月（締める前は開いた月）で拾う。
+ * 紙の記入用紙・Excelの1枚に対応する単位なので、これが袋運用の台帳になる。
+ */
+export async function listBagsByMonth(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<ScrapBag[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT b.*,
+           COALESCE(a.total, 0) AS running_total,
+           COALESCE(a.cnt, 0)   AS entry_count,
+           a.last_cum
+    FROM scrap_bags b
+    LEFT JOIN LATERAL (
+      SELECT SUM(e.weight) AS total, COUNT(*) AS cnt,
+             (SELECT e2.cum_after
+                FROM scrap_daily_entries e2
+                JOIN scrap_daily_records r2 ON r2.id = e2.record_id
+               WHERE e2.bag_id = b.id AND e2.cum_after IS NOT NULL
+               ORDER BY r2.record_date DESC, e2.sort DESC
+               LIMIT 1) AS last_cum
+        FROM scrap_daily_entries e
+       WHERE e.bag_id = b.id
+    ) a ON TRUE
+    WHERE b.company_id = ${companyId}
+      AND to_char(COALESCE(b.closed_on, b.opened_on), 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR b.factory = ${factory})
+    ORDER BY COALESCE(b.closed_on, b.opened_on), b.opened_at`;
+  return rows.map(mapBag);
+}
+
+/** 袋に入った投入の明細（袋別CSV用）。袋Noを各行に付けて出す。 */
+export interface BagEntryRow {
+  bagNo: string;
+  bagStatus: BagStatus;
+  factory: string;
+  scaleName: string;
+  recordDate: string;
+  jikoku: string;
+  hinshu: string;
+  cumBefore: number | null;
+  cumAfter: number | null;
+  weight: number;
+  kirokusha: string;
+  ijo: string;
+  /** どの職場のスクラップか */
+  workplace: string;
+}
+
+export async function listBagEntriesByMonth(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<BagEntryRow[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT b.bag_no, b.status, b.factory, b.scale_name,
+           r.record_date, e.jikoku, e.hinshu, e.cum_before, e.cum_after, e.weight,
+           e.kirokusha, e.ijo, e.busho
+    FROM scrap_bags b
+    JOIN scrap_daily_entries e ON e.bag_id = b.id
+    JOIN scrap_daily_records r ON r.id = e.record_id
+    WHERE b.company_id = ${companyId}
+      AND to_char(COALESCE(b.closed_on, b.opened_on), 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR b.factory = ${factory})
+    ORDER BY COALESCE(b.closed_on, b.opened_on), b.opened_at, r.record_date, e.sort`;
+  return rows.map((r: any) => ({
+    bagNo: r.bag_no ?? "",
+    bagStatus: (r.status ?? "open") as BagStatus,
+    factory: r.factory ?? "",
+    scaleName: r.scale_name ?? "",
+    recordDate: dateStr(r.record_date),
+    jikoku: r.jikoku ?? "",
+    hinshu: r.hinshu ?? "",
+    cumBefore: numOrNull(r.cum_before),
+    cumAfter: numOrNull(r.cum_after),
+    weight: num(r.weight),
+    kirokusha: r.kirokusha ?? "",
+    ijo: r.ijo ?? "",
+    workplace: r.busho ?? "",
+  }));
+}
+
+/**
+ * 袋の「次に入るはずの投入前の表示値」。いま編集している記録票を除いた
+ * 最後の投入後を返す（日をまたいだ袋は前日の最後がこれに当たる）。
+ * 記録票の明細は保存のたびに全置換されるので、自分自身は必ず除く。
+ */
+export async function getBagChainSeeds(
+  companyId: string,
+  bagIds: string[],
+  excludeRecordId: string | null
+): Promise<Map<string, number>> {
+  await ensureSchema();
+  const sql = getSql();
+  const out = new Map<string, number>();
+  for (const bagId of [...new Set(bagIds)]) {
+    if (!bagId) continue;
+    const rows = excludeRecordId
+      ? await sql`
+          SELECT e.cum_after
+          FROM scrap_daily_entries e
+          JOIN scrap_daily_records r ON r.id = e.record_id
+          WHERE e.company_id = ${companyId} AND e.bag_id = ${bagId}
+            AND e.record_id <> ${excludeRecordId} AND e.cum_after IS NOT NULL
+          ORDER BY r.record_date DESC, e.sort DESC
+          LIMIT 1`
+      : await sql`
+          SELECT e.cum_after
+          FROM scrap_daily_entries e
+          JOIN scrap_daily_records r ON r.id = e.record_id
+          WHERE e.company_id = ${companyId} AND e.bag_id = ${bagId}
+            AND e.cum_after IS NOT NULL
+          ORDER BY r.record_date DESC, e.sort DESC
+          LIMIT 1`;
+    const v = numOrNull(rows[0]?.cum_after);
+    if (v !== null) out.set(bagId, v);
+  }
+  return out;
+}
+
+/**
+ * 締め済みの袋の明細合計を、いまの明細から取り直す。
+ * 承認済みの袋の中身が変わったときは承認を外す（確認した数字と違うものを
+ * 承認済みのままにしない）。承認が外れた袋を返す。
+ */
+export async function syncClosedBagTotals(
+  companyId: string,
+  bagIds: string[]
+): Promise<ScrapBag[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const revoked: ScrapBag[] = [];
+  for (const bagId of [...new Set(bagIds)]) {
+    if (!bagId) continue;
+    const bag = await getBagById(companyId, bagId);
+    if (!bag || bag.status === "open") continue;
+    const total = Math.round(bag.runningTotal * 1000) / 1000;
+    if (bag.totalWeight !== null && Math.abs(bag.totalWeight - total) < 0.0005) continue;
+    if (bag.status === "approved") {
+      await sql`
+        UPDATE scrap_bags SET
+          total_weight = ${total}, status = 'closed', approved_by = '', approved_at = NULL,
+          updated_at = NOW()
+        WHERE company_id = ${companyId} AND id = ${bagId}`;
+      revoked.push(bag);
+    } else {
+      await sql`
+        UPDATE scrap_bags SET total_weight = ${total}, updated_at = NOW()
+        WHERE company_id = ${companyId} AND id = ${bagId}`;
+    }
+  }
+  return revoked;
 }
 
 // ===== AI読取のログ（追記のみ） =====
@@ -761,6 +1442,10 @@ export interface DailyAggRow {
   /** 種類名 → 合計kg。種類は設定で増やせるので固定の列は持たない */
   byKind: Record<string, number>;
   ijoCount: number;
+  /** その日に投入が入った袋の数 */
+  bagCount: number;
+  /** 袋に紐づいていない投入の数（袋運用の期間なら開き忘れ） */
+  noBagCount: number;
 }
 
 /** JSONB の {種類名: 重量} を Record<string, number> に正規化。 */
@@ -808,7 +1493,11 @@ export async function listDailyAgg(
         (SELECT jsonb_object_agg(p.hinshu, p.w) FROM per_kind p WHERE p.rid = r.id),
         '{}'::jsonb
       ) AS by_kind,
-      COUNT(*) FILTER (WHERE e.ijo <> '') AS ijo_count
+      COUNT(*) FILTER (WHERE e.ijo <> '') AS ijo_count,
+      -- その日に投入が入った袋の数と、袋に紐づいていない投入の数。
+      -- 袋運用の期間なのに「袋なし」があれば、袋を開き忘れて記録している。
+      COUNT(DISTINCT e.bag_id) AS bag_count,
+      COUNT(e.id) FILTER (WHERE e.bag_id IS NULL) AS no_bag_count
     FROM scrap_daily_records r
     LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
     WHERE r.company_id = ${companyId}
@@ -828,6 +1517,8 @@ export async function listDailyAgg(
     total: num(r.total),
     byKind: mapByKind(r.by_kind),
     ijoCount: Number(r.ijo_count) || 0,
+    bagCount: Number(r.bag_count) || 0,
+    noBagCount: Number(r.no_bag_count) || 0,
   }));
 }
 
@@ -874,7 +1565,7 @@ export async function listFirstArticles(
   const sql = getSql();
   const rows = await sql`
     SELECT f.measured_on, f.hinmoku_cd, f.kakuno_cd, f.weight, f.sokuteisha,
-      f.status, f.approved_by, f.reject_comment,
+      f.status, f.approved_by, f.reject_comment, f.note,
       (SELECT hinmei FROM scrap_items i
         WHERE i.company_id = f.company_id
           AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
@@ -901,6 +1592,7 @@ export async function listFirstArticles(
     status: (r.status ?? "approved") as FaStatus,
     approvedBy: r.approved_by ?? "",
     rejectComment: r.reject_comment ?? "",
+    note: r.note ?? "",
     hinmei: r.hinmei ?? null,
     kanseiJuryo: numOrNull(r.kansei_juryo),
   }));
@@ -927,6 +1619,94 @@ export async function upsertFirstArticle(
     ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
       weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
       status = 'pending', approved_by = '', approved_at = NULL, reject_comment = ''`;
+}
+
+/**
+ * 品目CDから品目マスターの候補を引く（Excel取込で格納場所CDを決めるため）。
+ * 1つの品目CDに複数の子図番があるので、品目CD×格納場所CD単位に畳む。
+ * 構成重量は子図番の合計、完成重量(理論)は子図番順の先頭（calc.ts と同じ扱い）。
+ */
+export async function listItemRefs(
+  companyId: string,
+  codes: string[]
+): Promise<
+  {
+    hinmokuCD: string;
+    kakunoCD: string;
+    seizoBashoCD: string;
+    factory: string;
+    kanseiJuryo: number;
+    koseiJuryo: number;
+  }[]
+> {
+  await ensureSchema();
+  const sql = getSql();
+  if (codes.length === 0) return [];
+  const rows = await sql`
+    SELECT kanri_zuban, kakuno_cd,
+      (ARRAY_AGG(seizo_basho_cd ORDER BY ko_zuban)) [1] AS seizo_basho_cd,
+      (ARRAY_AGG(factory ORDER BY ko_zuban)) [1] AS factory,
+      (ARRAY_AGG(kansei_juryo ORDER BY ko_zuban)) [1] AS kansei_juryo,
+      SUM(kosei_juryo) AS kosei_juryo
+    FROM scrap_items
+    WHERE company_id = ${companyId} AND kanri_zuban = ANY(${codes}::text[])
+    GROUP BY kanri_zuban, kakuno_cd`;
+  return rows.map((r: any) => ({
+    hinmokuCD: r.kanri_zuban,
+    kakunoCD: r.kakuno_cd,
+    seizoBashoCD: r.seizo_basho_cd ?? "",
+    factory: r.factory ?? "",
+    kanseiJuryo: num(r.kansei_juryo),
+    koseiJuryo: num(r.kosei_juryo),
+  }));
+}
+
+/**
+ * 初品測定の一括取込（過去分の移行用。承認済みで入れる）。
+ * 同じ 測定日×品目CD×格納場所CD は上書き。取込件数を返す。
+ */
+export async function bulkUpsertFirstArticles(
+  companyId: string,
+  rows: {
+    measuredOn: string;
+    hinmokuCD: string;
+    kakunoCD: string;
+    weight: number;
+    sokuteisha: string;
+    note: string;
+  }[],
+  approvedBy: string,
+  chunkSize = 500
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  // 同一チャンクに同じ一意キーが2行あると ON CONFLICT DO UPDATE が失敗するため畳む（後勝ち）
+  const uniq = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) uniq.set(`${r.measuredOn}\t${r.hinmokuCD}\t${r.kakunoCD}`, r);
+  const list = [...uniq.values()];
+  let count = 0;
+  for (let i = 0; i < list.length; i += chunkSize) {
+    const c = list.slice(i, i + chunkSize);
+    await sql`
+      INSERT INTO scrap_first_articles
+        (company_id, measured_on, hinmoku_cd, kakuno_cd, weight, sokuteisha,
+         status, approved_by, approved_at, note)
+      SELECT ${companyId}, t.d, t.h, t.k, t.w, t.s, 'approved', ${approvedBy}, NOW(), t.n
+      FROM unnest(
+        ${c.map((x) => x.measuredOn)}::date[],
+        ${c.map((x) => x.hinmokuCD)}::text[],
+        ${c.map((x) => x.kakunoCD)}::text[],
+        ${c.map((x) => x.weight)}::numeric[],
+        ${c.map((x) => x.sokuteisha)}::text[],
+        ${c.map((x) => x.note)}::text[]
+      ) AS t(d, h, k, w, s, n)
+      ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
+        weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
+        status = 'approved', approved_by = EXCLUDED.approved_by,
+        approved_at = NOW(), reject_comment = '', note = EXCLUDED.note`;
+    count += c.length;
+  }
+  return count;
 }
 
 /**
@@ -1012,13 +1792,38 @@ export async function updateFirstArticleStatus(
   }
 }
 
-/** 申請中（pending）の初品測定の件数。ポータルの承認待ちバッジ用。 */
-export async function countPendingFirstArticles(companyId: string): Promise<number> {
+/**
+ * 申請中（pending）の初品測定の件数。ポータルの承認待ちバッジ用。
+ * factory 指定でその工場の品目のみ（品目マスターの工場で判定。一覧の絞り込みと同じ扱い）。
+ */
+export async function countPendingFirstArticles(
+  companyId: string,
+  factory: string | null = null
+): Promise<number> {
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
-    SELECT COUNT(*)::int AS n FROM scrap_first_articles
-    WHERE company_id = ${companyId} AND status = 'pending'`;
+    SELECT COUNT(*)::int AS n FROM scrap_first_articles f
+    WHERE f.company_id = ${companyId} AND f.status = 'pending'
+      AND (${factory}::text IS NULL OR EXISTS (
+        SELECT 1 FROM scrap_items i
+        WHERE i.company_id = f.company_id
+          AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
+          AND (i.factory = ${factory} OR i.factory = '')))`;
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** 締め済みで未承認（status='closed'）の袋の件数。ポータルの承認待ちバッジ用。 */
+export async function countPendingBags(
+  companyId: string,
+  factory: string | null = null
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT COUNT(*)::int AS n FROM scrap_bags
+    WHERE company_id = ${companyId} AND status = 'closed'
+      AND (${factory}::text IS NULL OR factory = ${factory})`;
   return Number(rows[0]?.n ?? 0);
 }
 
@@ -1113,6 +1918,25 @@ export async function upsertMcframeDays(
 }
 
 /** 対象月に日別の加工数が入っているか（月次集計で日別を優先するかの判定）。 */
+/**
+ * 対象月の加工数が「日別」「月次取込（過去データ移行）」のどちらで入っているか。
+ * 併存する月は日別だけを使う（二重計上を避けるため）ので、画面でその旨を出すのに使う。
+ */
+export async function mcframeSources(
+  companyId: string,
+  ym: string
+): Promise<{ days: number; months: number }> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT
+      (SELECT COUNT(*)::int FROM scrap_mcframe_days
+        WHERE company_id = ${companyId} AND to_char(qdate, 'YYYY-MM') = ${ym}) AS days,
+      (SELECT COUNT(*)::int FROM scrap_mcframe_qty
+        WHERE company_id = ${companyId} AND ym = ${ym}) AS months`;
+  return { days: Number(rows[0]?.days ?? 0), months: Number(rows[0]?.months ?? 0) };
+}
+
 export async function hasMcframeDays(companyId: string, ym: string): Promise<boolean> {
   await ensureSchema();
   const sql = getSql();
@@ -1421,7 +2245,10 @@ export interface PortalWorkplace {
   sort: number;
 }
 
-/** ポータルからの工場・職場マスタを upsert（配信は upsert のみ。自動削除はしない）。 */
+/**
+ * ポータルからの工場・職場マスタを upsert（配信は upsert のみ。自動削除はしない）。
+ * 使う/使わないはこのアプリ側の設定なので、配信では変えない。
+ */
 export async function syncPortalMasters(
   companyId: string,
   factories: PortalFactory[],
@@ -1432,9 +2259,20 @@ export async function syncPortalMasters(
   let f = 0;
   let w = 0;
   for (const x of factories) {
+    // 使う/使わない（active）は配信で上書きしない。設定画面で「使わない」にした工場が
+    // 次の配信で候補に戻ってきてしまうため。初めて届く工場は、同じ名前の工場が
+    // すでにあればその設定を引き継ぐ（手で追加した後に配信が始まった場合など）。
     await sql`
-      INSERT INTO portal_factories (company_id, code, name, sort)
-      VALUES (${companyId}, ${x.code}, ${x.name}, ${x.sort})
+      INSERT INTO portal_factories (company_id, code, name, sort, active, source)
+      VALUES (
+        ${companyId}, ${x.code}, ${x.name}, ${x.sort},
+        COALESCE(
+          (SELECT bool_and(active) FROM portal_factories
+            WHERE company_id = ${companyId} AND name = ${x.name}),
+          true
+        ),
+        'portal'
+      )
       ON CONFLICT (company_id, code) DO UPDATE SET name = EXCLUDED.name, sort = EXCLUDED.sort`;
     f++;
   }
@@ -1449,26 +2287,346 @@ export async function syncPortalMasters(
   return { factories: f, workplaces: w, skipped: 0 };
 }
 
-/** 工場の入力候補。ポータル配信のマスタ＋既存記録の工場名をマージして返す。 */
-export async function listFactoryOptions(companyId: string): Promise<string[]> {
-  await ensureSchema();
+/**
+ * 記録の中に工場名として出てくる名前（重複なし）。
+ * 工場名は各テーブルに文字列で入っているので、ここで拾い集める。
+ */
+async function listFactoryNamesInData(companyId: string): Promise<Map<string, number>> {
   const sql = getSql();
   const rows = await sql`
-    SELECT name, sort FROM portal_factories WHERE company_id = ${companyId}
-    ORDER BY sort ASC, name ASC`;
-  const names: string[] = rows.map((r: any) => String(r.name));
-  // ポータル未配信の工場でも、実データがあれば切替先に出す
-  // （過去データを取り込んだだけの工場が選べなくなるのを防ぐ）。
-  const used = await sql`
-    SELECT DISTINCT factory FROM (
+    SELECT factory, COUNT(*)::int AS n FROM (
       SELECT factory FROM scrap_daily_records WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_monthly_inputs WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_procure_days WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_items WHERE company_id = ${companyId}
-    ) t WHERE factory <> '' ORDER BY factory`;
-  for (const u of used) {
-    const name = String(u.factory);
-    if (!names.includes(name)) names.push(name);
+      UNION ALL SELECT factory FROM scrap_scales WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM scrap_bags WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM scrap_bag_starts WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM scrap_inventory_adjustments WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM users WHERE company_id = ${companyId} AND factory IS NOT NULL
+    ) t WHERE factory <> '' GROUP BY factory ORDER BY factory`;
+  return new Map(rows.map((r: any) => [String(r.factory), Number(r.n) || 0]));
+}
+
+/**
+ * 工場の入力候補。
+ *   1. 工場マスタ（ポータル配信・手動追加）のうち「使う」になっているもの
+ *   2. マスタに無いが記録に出てくる工場名（過去データを取り込んだだけの工場など）
+ * マスタで「使わない」にした工場は、記録があっても候補に出さない。
+ */
+export async function listFactoryOptions(companyId: string): Promise<string[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT name, sort, active FROM portal_factories WHERE company_id = ${companyId}
+    ORDER BY sort ASC, name ASC`;
+  const known = new Set(rows.map((r: any) => String(r.name)));
+  const names: string[] = [];
+  for (const r of rows) {
+    const name = String(r.name);
+    if (r.active !== false && !names.includes(name)) names.push(name);
+  }
+  // ポータル未配信の工場でも、実データがあれば切替先に出す
+  // （過去データを取り込んだだけの工場や、重量計を登録しただけの工場が
+  //   選べなくなるのを防ぐ）。マスタにある（使わないにした）ものは出さない。
+  for (const name of (await listFactoryNamesInData(companyId)).keys()) {
+    if (!known.has(name) && !names.includes(name)) names.push(name);
   }
   return names;
+}
+
+// ===== 工場・職場マスタの管理（設定画面） =====
+
+export type MasterSource = "portal" | "manual" | "data";
+
+export interface WorkplaceMaster {
+  code: string;
+  name: string;
+  sort: number;
+  active: boolean;
+  source: MasterSource;
+}
+
+export interface FactoryMaster {
+  /** マスタ未登録（記録にだけ出てくる）工場は null */
+  code: string | null;
+  name: string;
+  sort: number;
+  active: boolean;
+  source: MasterSource;
+  /** この工場名を使っている記録の件数。1件でもあれば削除はできない */
+  usage: number;
+  workplaces: WorkplaceMaster[];
+}
+
+const asSource = (v: unknown): MasterSource =>
+  v === "manual" || v === "data" ? v : "portal";
+
+/** 設定画面用。マスタの全工場（使わないものも含む）＋記録にだけ出てくる工場。 */
+export async function listFactoryMasters(companyId: string): Promise<FactoryMaster[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const [factories, workplaces, usage] = await Promise.all([
+    sql`SELECT code, name, sort, active, source FROM portal_factories
+        WHERE company_id = ${companyId} ORDER BY sort ASC, name ASC`,
+    sql`SELECT code, name, factory_code, sort, active, source FROM portal_workplaces
+        WHERE company_id = ${companyId} ORDER BY sort ASC, name ASC`,
+    listFactoryNamesInData(companyId),
+  ]);
+  const byFactory = new Map<string, WorkplaceMaster[]>();
+  for (const w of workplaces) {
+    const list = byFactory.get(String(w.factory_code)) ?? [];
+    list.push({
+      code: String(w.code),
+      name: String(w.name),
+      sort: Number(w.sort) || 0,
+      active: w.active !== false,
+      source: asSource(w.source),
+    });
+    byFactory.set(String(w.factory_code), list);
+  }
+  const out: FactoryMaster[] = factories.map((f: any) => ({
+    code: String(f.code),
+    name: String(f.name),
+    sort: Number(f.sort) || 0,
+    active: f.active !== false,
+    source: asSource(f.source),
+    usage: usage.get(String(f.name)) ?? 0,
+    workplaces: byFactory.get(String(f.code)) ?? [],
+  }));
+  const known = new Set(out.map((f) => f.name));
+  for (const [name, n] of usage) {
+    if (known.has(name)) continue;
+    out.push({ code: null, name, sort: 9999, active: true, source: "data", usage: n, workplaces: [] });
+  }
+  return out;
+}
+
+/**
+ * 日次記録で選べる職場（その工場の「使う」職場）。
+ * 投入の記録には職場名を文字列で残す（明細の busho 列）。
+ */
+export async function listWorkplaceOptions(companyId: string, factory: string): Promise<string[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT w.name, w.sort FROM portal_workplaces w
+    JOIN portal_factories f ON f.company_id = w.company_id AND f.code = w.factory_code
+    WHERE w.company_id = ${companyId} AND f.name = ${factory} AND w.active = true
+    ORDER BY w.sort ASC, w.name ASC`;
+  const out: string[] = [];
+  for (const r of rows) {
+    const n = String(r.name);
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+/**
+ * 記録に出てくる職場（部署）で、まだ職場マスタに無いもの。工場ごとに件数つきで返す。
+ * 紙の記録票（Excel）から取り込んだ行は「部署」欄に職場が入っているので、
+ * 設定画面で「そのまま職場として登録」できるようにするために使う。
+ */
+export async function listWorkplaceSuggestions(
+  companyId: string
+): Promise<Record<string, { name: string; count: number }[]>> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT r.factory, e.busho AS name, COUNT(*)::int AS n
+    FROM scrap_daily_entries e
+    JOIN scrap_daily_records r ON r.id = e.record_id
+    WHERE r.company_id = ${companyId} AND e.busho <> ''
+      AND NOT EXISTS (
+        SELECT 1 FROM portal_workplaces w
+        JOIN portal_factories f ON f.company_id = w.company_id AND f.code = w.factory_code
+        WHERE w.company_id = r.company_id AND f.name = r.factory AND w.name = e.busho
+      )
+    GROUP BY r.factory, e.busho
+    ORDER BY r.factory, n DESC, e.busho`;
+  const out: Record<string, { name: string; count: number }[]> = {};
+  for (const r of rows) {
+    const f = String(r.factory);
+    (out[f] ??= []).push({ name: String(r.name), count: Number(r.n) || 0 });
+  }
+  return out;
+}
+
+/** 月間の職場別集計（職場＝明細の busho。未入力は空文字）。 */
+export interface WorkplaceAggRow {
+  factory: string;
+  workplace: string;
+  /** 種類名 → 合計kg */
+  byKind: Record<string, number>;
+  total: number;
+  count: number;
+}
+
+export async function listWorkplaceAgg(
+  companyId: string,
+  ym: string,
+  factory: string | null
+): Promise<WorkplaceAggRow[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT r.factory, e.busho AS workplace, e.hinshu, SUM(e.weight) AS w, COUNT(*)::int AS n
+    FROM scrap_daily_entries e
+    JOIN scrap_daily_records r ON r.id = e.record_id
+    WHERE r.company_id = ${companyId}
+      AND to_char(r.record_date, 'YYYY-MM') = ${ym}
+      AND (${factory}::text IS NULL OR r.factory = ${factory})
+    GROUP BY r.factory, e.busho, e.hinshu
+    ORDER BY r.factory, e.busho`;
+  const map = new Map<string, WorkplaceAggRow>();
+  for (const r of rows) {
+    const key = `${r.factory}\u0000${r.workplace}`;
+    const row =
+      map.get(key) ??
+      { factory: String(r.factory), workplace: String(r.workplace ?? ""), byKind: {}, total: 0, count: 0 };
+    const w = num(r.w);
+    row.byKind[String(r.hinshu)] = (row.byKind[String(r.hinshu)] ?? 0) + w;
+    row.total += w;
+    row.count += Number(r.n) || 0;
+    map.set(key, row);
+  }
+  // 職場が入っているものを先に、未入力（空）は各工場の最後に並べる
+  return [...map.values()].sort(
+    (a, b) =>
+      a.factory.localeCompare(b.factory) ||
+      Number(a.workplace === "") - Number(b.workplace === "") ||
+      a.workplace.localeCompare(b.workplace)
+  );
+}
+
+/** 手動で追加するマスタのコード。ポータルのコードと重ならないよう接頭辞を付ける。 */
+function manualCode(): string {
+  return `m-${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+}
+
+/**
+ * 工場名からマスタの行を引く。記録にだけ出てくる工場は、ここで行を作る
+ * （使う/使わない・職場を持たせるには行が要る）。
+ */
+async function ensureFactoryRow(
+  companyId: string,
+  name: string
+): Promise<{ code: string; source: MasterSource; active: boolean }> {
+  const sql = getSql();
+  const rows = await sql`
+    SELECT code, source, active FROM portal_factories
+    WHERE company_id = ${companyId} AND name = ${name}
+    ORDER BY (source = 'portal') DESC LIMIT 1`;
+  if (rows[0]) {
+    return { code: String(rows[0].code), source: asSource(rows[0].source), active: rows[0].active !== false };
+  }
+  const code = manualCode();
+  await sql`
+    INSERT INTO portal_factories (company_id, code, name, sort, active, source)
+    VALUES (${companyId}, ${code}, ${name},
+            (SELECT COALESCE(MAX(sort), 0) + 1 FROM portal_factories WHERE company_id = ${companyId}),
+            true, 'data')`;
+  return { code, source: "data", active: true };
+}
+
+/** 工場を追加する。同じ名前が「使わない」で残っていれば、使うに戻す。 */
+export async function addFactory(companyId: string, name: string): Promise<"added" | "restored" | "exists"> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT code, active FROM portal_factories WHERE company_id = ${companyId} AND name = ${name}`;
+  if (rows.length > 0) {
+    if (rows.some((r: any) => r.active !== false)) return "exists";
+    await sql`UPDATE portal_factories SET active = true WHERE company_id = ${companyId} AND name = ${name}`;
+    return "restored";
+  }
+  await sql`
+    INSERT INTO portal_factories (company_id, code, name, sort, active, source)
+    VALUES (${companyId}, ${manualCode()}, ${name},
+            (SELECT COALESCE(MAX(sort), 0) + 1 FROM portal_factories WHERE company_id = ${companyId}),
+            true, 'manual')`;
+  return "added";
+}
+
+/** 工場を使う/使わないにする（名前で指定。記録にだけ出てくる工場もここで行を作る）。 */
+export async function setFactoryActive(companyId: string, name: string, active: boolean): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await ensureFactoryRow(companyId, name);
+  await sql`UPDATE portal_factories SET active = ${active} WHERE company_id = ${companyId} AND name = ${name}`;
+}
+
+/**
+ * 工場を削除する。消せるのは「手で追加した・記録で使われていない」工場だけ。
+ * ポータル配信の工場は消しても次の配信で戻るので、使わないにしてもらう。
+ */
+export async function deleteFactory(
+  companyId: string,
+  name: string
+): Promise<"deleted" | "portal" | "used" | "missing"> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT code, source FROM portal_factories WHERE company_id = ${companyId} AND name = ${name}`;
+  if (rows.length === 0) return "missing";
+  if (rows.some((r: any) => asSource(r.source) === "portal")) return "portal";
+  const usage = (await listFactoryNamesInData(companyId)).get(name) ?? 0;
+  if (usage > 0) return "used";
+  for (const r of rows) {
+    await sql`DELETE FROM portal_workplaces WHERE company_id = ${companyId} AND factory_code = ${r.code}`;
+  }
+  await sql`DELETE FROM portal_factories WHERE company_id = ${companyId} AND name = ${name}`;
+  return "deleted";
+}
+
+/** 職場を追加する（工場の下に置く）。同じ名前が「使わない」で残っていれば戻す。 */
+export async function addWorkplace(
+  companyId: string,
+  factoryName: string,
+  name: string
+): Promise<"added" | "restored" | "exists"> {
+  await ensureSchema();
+  const sql = getSql();
+  const f = await ensureFactoryRow(companyId, factoryName);
+  const rows = await sql`
+    SELECT code, active FROM portal_workplaces
+    WHERE company_id = ${companyId} AND factory_code = ${f.code} AND name = ${name}`;
+  if (rows.length > 0) {
+    if (rows.some((r: any) => r.active !== false)) return "exists";
+    await sql`
+      UPDATE portal_workplaces SET active = true
+      WHERE company_id = ${companyId} AND factory_code = ${f.code} AND name = ${name}`;
+    return "restored";
+  }
+  await sql`
+    INSERT INTO portal_workplaces (company_id, code, name, factory_code, sort, active, source)
+    VALUES (${companyId}, ${manualCode()}, ${name}, ${f.code},
+            (SELECT COALESCE(MAX(sort), 0) + 1 FROM portal_workplaces
+              WHERE company_id = ${companyId} AND factory_code = ${f.code}),
+            true, 'manual')`;
+  return "added";
+}
+
+export async function setWorkplaceActive(companyId: string, code: string, active: boolean): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE portal_workplaces SET active = ${active}
+    WHERE company_id = ${companyId} AND code = ${code} RETURNING code`;
+  return rows.length > 0;
+}
+
+/** 職場を削除する。ポータル配信の職場は次の配信で戻るので、使わないにしてもらう。 */
+export async function deleteWorkplace(
+  companyId: string,
+  code: string
+): Promise<"deleted" | "portal" | "missing"> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT source FROM portal_workplaces WHERE company_id = ${companyId} AND code = ${code}`;
+  if (rows.length === 0) return "missing";
+  if (asSource(rows[0].source) === "portal") return "portal";
+  await sql`DELETE FROM portal_workplaces WHERE company_id = ${companyId} AND code = ${code}`;
+  return "deleted";
 }

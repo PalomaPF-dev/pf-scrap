@@ -1,5 +1,5 @@
 import { FileDown, Tag } from "lucide-react";
-import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
+import { requireOperationsPage, getFactoryView } from "@/lib/session";
 import { listFactoryOptions, listScales, listScrapKinds, type Scale, type ScrapKind } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -20,8 +20,8 @@ export default async function ScalesPage({
 }) {
   const session = await requireOperationsPage();
   const sp = await searchParams;
-  // 所属工場が設定されている人は自工場が自動で選ばれる（他工場は選べない）
-  const restriction = await getFactoryRestriction(session);
+  // 所属工場が設定されている人は自工場（他工場は選べない）、上部で工場を選んだ人はその工場に固定
+  const restriction = await getFactoryView(session);
   const factoryLocked = restriction.restricted;
   const factory = factoryLocked ? restriction.factory! : (sp.factory ?? "").trim();
 

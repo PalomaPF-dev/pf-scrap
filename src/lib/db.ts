@@ -1709,6 +1709,61 @@ export async function bulkUpsertFirstArticles(
   return count;
 }
 
+/**
+ * 品質チェックシート取込の一括登録。シートはG長確認済みの記録なので、取り込んだ管理者の
+ * 承認として登録する（status='approved'）。同じ測定日×品目があれば上書き。登録件数を返す。
+ */
+export async function bulkImportFirstArticles(
+  companyId: string,
+  rows: {
+    measuredOn: string;
+    hinmokuCD: string;
+    kakunoCD: string;
+    weight: number;
+    sokuteisha: string;
+  }[],
+  approvedBy: string
+): Promise<number> {
+  await ensureSchema();
+  const sql = getSql();
+  let n = 0;
+  for (const r of rows) {
+    await sql`
+      INSERT INTO scrap_first_articles
+        (company_id, measured_on, hinmoku_cd, kakuno_cd, weight, sokuteisha,
+         status, approved_by, approved_at)
+      VALUES (${companyId}, ${r.measuredOn}, ${r.hinmokuCD}, ${r.kakunoCD},
+              ${r.weight}, ${r.sokuteisha}, 'approved', ${approvedBy}, NOW())
+      ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
+        weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
+        status = 'approved', approved_by = EXCLUDED.approved_by,
+        approved_at = NOW(), reject_comment = ''`;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * 図番（品目CD、無ければ子図番）から品目を引く。品質チェックシート取込用。
+ * 工場を指定すればその工場（と工場未設定）の品目だけ。品目CD×格納場所CDで1件に畳む。
+ */
+export async function findItemsByZuban(
+  companyId: string,
+  zubans: string[],
+  factory: string | null
+): Promise<ScrapItem[]> {
+  await ensureSchema();
+  const sql = getSql();
+  if (zubans.length === 0) return [];
+  const rows = await sql`
+    SELECT DISTINCT ON (kanri_zuban, kakuno_cd, ko_zuban) * FROM scrap_items
+    WHERE company_id = ${companyId}
+      AND (kanri_zuban = ANY(${zubans}::text[]) OR ko_zuban = ANY(${zubans}::text[]))
+      AND (${factory}::text IS NULL OR factory = ${factory} OR factory = '')
+    ORDER BY kanri_zuban, kakuno_cd, ko_zuban`;
+  return rows.map(mapItem);
+}
+
 /** 初品測定の承認/差し戻し（管理者のみが呼ぶ）。 */
 export async function updateFirstArticleStatus(
   companyId: string,

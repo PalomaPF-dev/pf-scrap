@@ -285,6 +285,8 @@ export interface FirstArticle {
   rejectComment: string;
   /** 取込の由来メモ（Excel取込・桁補正の記録）。手入力は空 */
   note: string;
+  /** 登録したときに選んでいた工場。取込分・2026-09以前の記録は空 */
+  factory: string;
   /** 品目マスターの表示用（品名・理論値）。未登録は null */
   hinmei: string | null;
   kanseiJuryo: number | null;

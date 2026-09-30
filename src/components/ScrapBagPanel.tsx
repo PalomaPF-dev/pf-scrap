@@ -369,11 +369,15 @@ export default function ScrapBagPanel({
             onResult={(r) => {
               if (r.value === null) {
                 setCloseFix(true);
+                // 理由（note）に手入力の案内まで入っているときは、二重に付けない
+                const note = r.note?.trim();
                 onMessage({
                   ok: false,
+                  title: "表示値を読み取れませんでした",
                   text:
-                    (r.note ? `表示値を読み取れませんでした（${r.note}）。` : "表示値を読み取れませんでした。") +
-                    "もう一度撮るか、手入力してください。",
+                    note && note.includes("手入力")
+                      ? note
+                      : [note, "もう一度撮るか、手入力してください。"].filter(Boolean).join(" "),
                 });
                 return;
               }

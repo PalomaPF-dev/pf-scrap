@@ -153,16 +153,30 @@ export default function ScaleCamera({
         }),
       });
       const data = await res.json().catch(() => ({}));
+      // 成功でも失敗でもカメラは閉じる。開いたままだと結果のメッセージが
+      // カメラ画面の裏に隠れ、読めたのかどうか分からなくなる（現場から報告あり）。
+      close();
       if (!res.ok) {
-        // 読取が使えなくても運用は止めない。QRだけ返して手入力に落とす。
-        onError(data?.message ?? "読み取りに失敗しました。手入力してください。");
-        if (qr) onResult({ readId: "", value: null, digits: "", confidence: "low", note: "", qr });
+        // 読取が使えなくても運用は止めない。値なし（手入力へ）の結果として返し、
+        // 失敗の理由は note で渡す。onError と別々に出すと、呼び出し側の
+        // 「読み取れませんでした」で理由が上書きされて見えなくなるため。
+        onResult({
+          readId: "",
+          value: null,
+          digits: "",
+          confidence: "low",
+          note: data?.message ?? "読み取りに失敗しました。表示の数値を手入力してください。",
+          qr,
+        });
         return;
       }
       onResult({ ...data, qr });
-      close();
     } catch (e) {
-      onError("読み取りに失敗しました: " + (e as Error).message);
+      close();
+      onError(
+        "読み取りに失敗しました（通信エラー）。電波の良い場所で撮り直すか、表示の数値を手入力してください。" +
+          ((e as Error).message ? `（${(e as Error).message}）` : "")
+      );
     } finally {
       setBusy(false);
     }

@@ -7,6 +7,7 @@ import {
   requireAdminSession,
   requireOperationsSession,
   getFactoryRestriction,
+  getFactoryView,
 } from "./session";
 import {
   addAdjustment,
@@ -1251,9 +1252,14 @@ export async function saveFirstArticleAction(input: {
   hinmokuCD: string;
   kakunoCD: string;
   weight: unknown;
+  /** 画面で選んでいた工場。測定履歴はこの工場に出す */
+  factory?: string;
 }): Promise<ActionResult> {
   try {
     const s = await requireEntitledSession();
+    // 工場が固定されている人（所属工場・上部で選んだ工場）は、その工場として残す
+    const view = await getFactoryView(s);
+    const factory = view.restricted && view.factory ? view.factory : asStr(input.factory ?? "", 50);
     const hinmokuCD = asStr(input.hinmokuCD, 50);
     const kakunoCD = asStr(input.kakunoCD, 50);
     if (!hinmokuCD || !kakunoCD) return fail("品目を選択してください。");
@@ -1266,6 +1272,7 @@ export async function saveFirstArticleAction(input: {
       kakunoCD,
       weight,
       sokuteisha: s.userName || s.loginId || "",
+      factory,
     });
     revalidatePath("/first");
     revalidatePath("/");

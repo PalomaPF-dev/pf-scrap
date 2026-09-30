@@ -420,6 +420,10 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_mcframe_days_ref_uidx ON scrap_mcframe_days(company_id, qdate, hinmoku_cd, kakuno_cd)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_hinmoku_idx ON scrap_items(company_id, kanri_zuban, kakuno_cd)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_first_articles_ref_idx ON scrap_first_articles(company_id, hinmoku_cd, kakuno_cd, measured_on)`);
+  // 登録したときに画面で選んでいた工場（2026-09）。測定履歴はこれまで品目マスターの工場だけで
+  // 絞っていたため、マスター側の工場名が違う・マスターから消えた品目の記録が、どの工場の
+  // 履歴にも出ず承認できなくなっていた。既存の記録は空（＝品目マスターの工場で判定）。
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS factory TEXT NOT NULL DEFAULT ''`);
 
   // ⑤ 月次入力（年月×工場で1行）。区分別の月初在庫・購入重量と、スクラップ売却数量。
   // 工場別シート（大口/直方）の運用に合わせて工場単位で持ち、照合は全社合算/工場別を切り替える。

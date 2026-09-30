@@ -1558,14 +1558,17 @@ export async function dailyMonthTotals(
 export async function listFirstArticles(
   companyId: string,
   limit = 200,
-  /** 指定すると、その工場の品目の測定記録だけを返す（品目マスターの工場で判定） */
+  /**
+   * 指定すると、その工場の測定記録だけを返す。登録時に選んでいた工場か、品目マスターの工場で判定。
+   * 承認待ち（pending）は件数の上限に関係なく先頭に並べる（古い記録に押し出されて承認できなくならないように）。
+   */
   factory: string | null = null
 ): Promise<FirstArticle[]> {
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
     SELECT f.measured_on, f.hinmoku_cd, f.kakuno_cd, f.weight, f.sokuteisha,
-      f.status, f.approved_by, f.reject_comment, f.note,
+      f.status, f.approved_by, f.reject_comment, f.note, f.factory,
       (SELECT hinmei FROM scrap_items i
         WHERE i.company_id = f.company_id
           AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
@@ -1576,12 +1579,21 @@ export async function listFirstArticles(
         ORDER BY i.ko_zuban LIMIT 1) AS kansei_juryo
     FROM scrap_first_articles f
     WHERE f.company_id = ${companyId}
-      AND (${factory}::text IS NULL OR EXISTS (
-        SELECT 1 FROM scrap_items i
-        WHERE i.company_id = f.company_id
-          AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
-          AND (i.factory = ${factory} OR i.factory = '')))
-    ORDER BY f.measured_on DESC, f.hinmoku_cd, f.kakuno_cd
+      AND (${factory}::text IS NULL
+        -- 登録時に選んでいた工場。品目マスターの工場名と違っても、登録した工場の履歴には必ず出す
+        OR f.factory = ${factory}
+        -- 品目マスターの工場（工場未設定の品目はどの工場にも出す）
+        OR EXISTS (
+          SELECT 1 FROM scrap_items i
+          WHERE i.company_id = f.company_id
+            AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
+            AND (i.factory = ${factory} OR i.factory = ''))
+        -- 登録工場が分からず品目マスターにも無い記録は、どの工場でも見せる（どこにも出ないと承認できない）
+        OR (f.factory = '' AND NOT EXISTS (
+          SELECT 1 FROM scrap_items i
+          WHERE i.company_id = f.company_id
+            AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd)))
+    ORDER BY (f.status = 'pending') DESC, f.measured_on DESC, f.hinmoku_cd, f.kakuno_cd
     LIMIT ${limit}`;
   return rows.map((r: any) => ({
     measuredOn: dateStr(r.measured_on),
@@ -1593,9 +1605,38 @@ export async function listFirstArticles(
     approvedBy: r.approved_by ?? "",
     rejectComment: r.reject_comment ?? "",
     note: r.note ?? "",
+    factory: r.factory ?? "",
     hinmei: r.hinmei ?? null,
     kanseiJuryo: numOrNull(r.kansei_juryo),
   }));
+}
+
+/**
+ * 選択中の工場の測定履歴に出ない記録の件数（全体・うち承認待ち）。
+ * 一覧は件数に上限があるので、一覧どうしの引き算ではなくここで数える。
+ */
+export async function countOtherFirstArticles(
+  companyId: string,
+  factory: string
+): Promise<{ total: number; pending: number }> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE f.status = 'pending')::int AS pending
+    FROM scrap_first_articles f
+    WHERE f.company_id = ${companyId}
+      AND NOT (f.factory = ${factory}
+        OR EXISTS (
+          SELECT 1 FROM scrap_items i
+          WHERE i.company_id = f.company_id
+            AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
+            AND (i.factory = ${factory} OR i.factory = ''))
+        OR (f.factory = '' AND NOT EXISTS (
+          SELECT 1 FROM scrap_items i
+          WHERE i.company_id = f.company_id
+            AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd)))`;
+  return { total: Number(rows[0]?.total ?? 0), pending: Number(rows[0]?.pending ?? 0) };
 }
 
 /** 登録＝管理者への申請（status='pending'）。再登録は再申請扱い。 */
@@ -1607,18 +1648,21 @@ export async function upsertFirstArticle(
     kakunoCD: string;
     weight: number;
     sokuteisha: string;
+    /** 登録したときに画面で選んでいた工場（測定履歴の表示先） */
+    factory: string;
   }
 ): Promise<void> {
   await ensureSchema();
   const sql = getSql();
   await sql`
     INSERT INTO scrap_first_articles
-      (company_id, measured_on, hinmoku_cd, kakuno_cd, weight, sokuteisha, status)
+      (company_id, measured_on, hinmoku_cd, kakuno_cd, weight, sokuteisha, status, factory)
     VALUES (${companyId}, ${fa.measuredOn}, ${fa.hinmokuCD}, ${fa.kakunoCD},
-            ${fa.weight}, ${fa.sokuteisha}, 'pending')
+            ${fa.weight}, ${fa.sokuteisha}, 'pending', ${fa.factory})
     ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
       weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
-      status = 'pending', approved_by = '', approved_at = NULL, reject_comment = ''`;
+      status = 'pending', approved_by = '', approved_at = NULL, reject_comment = '',
+      factory = CASE WHEN EXCLUDED.factory <> '' THEN EXCLUDED.factory ELSE scrap_first_articles.factory END`;
 }
 
 /**
@@ -1794,7 +1838,7 @@ export async function updateFirstArticleStatus(
 
 /**
  * 申請中（pending）の初品測定の件数。ポータルの承認待ちバッジ用。
- * factory 指定でその工場の品目のみ（品目マスターの工場で判定。一覧の絞り込みと同じ扱い）。
+ * factory 指定でその工場の分のみ（登録時の工場か品目マスターの工場で判定。一覧の絞り込みと同じ扱い）。
  */
 export async function countPendingFirstArticles(
   companyId: string,
@@ -1805,11 +1849,20 @@ export async function countPendingFirstArticles(
   const rows = await sql`
     SELECT COUNT(*)::int AS n FROM scrap_first_articles f
     WHERE f.company_id = ${companyId} AND f.status = 'pending'
-      AND (${factory}::text IS NULL OR EXISTS (
-        SELECT 1 FROM scrap_items i
-        WHERE i.company_id = f.company_id
-          AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
-          AND (i.factory = ${factory} OR i.factory = '')))`;
+      AND (${factory}::text IS NULL
+        -- 登録時に選んでいた工場。品目マスターの工場名と違っても、登録した工場の履歴には必ず出す
+        OR f.factory = ${factory}
+        -- 品目マスターの工場（工場未設定の品目はどの工場にも出す）
+        OR EXISTS (
+          SELECT 1 FROM scrap_items i
+          WHERE i.company_id = f.company_id
+            AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
+            AND (i.factory = ${factory} OR i.factory = ''))
+        -- 登録工場が分からず品目マスターにも無い記録は、どの工場でも見せる（どこにも出ないと承認できない）
+        OR (f.factory = '' AND NOT EXISTS (
+          SELECT 1 FROM scrap_items i
+          WHERE i.company_id = f.company_id
+            AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd)))`;
   return Number(rows[0]?.n ?? 0);
 }
 

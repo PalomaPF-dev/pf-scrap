@@ -78,6 +78,7 @@ export default function FirstArticlePanel({
   factoryLocked,
   history,
   otherCount,
+  otherPending,
   userName,
   isAdmin,
 }: {
@@ -87,6 +88,8 @@ export default function FirstArticlePanel({
   history: FirstArticle[];
   /** 選択中の工場に該当しない測定記録の件数（見落としを防ぐため件数だけ知らせる） */
   otherCount: number;
+  /** otherCount のうち承認待ちの件数 */
+  otherPending: number;
   userName: string;
   isAdmin: boolean;
 }) {
@@ -209,6 +212,7 @@ export default function FirstArticlePanel({
         hinmokuCD: selected.kanriZuban,
         kakunoCD: selected.kakunoCD,
         weight,
+        factory,
       });
       setMessage({ ok: res.ok, text: res.message ?? "" });
       if (res.ok) {
@@ -453,9 +457,9 @@ export default function FirstArticlePanel({
           測定履歴{factory ? `（${factory}）` : ""}
         </h2>
         <p className="mb-3 text-xs text-[#909090]">
-          {otherCount > 0
-            ? `他の工場（または工場未設定）の品目の測定記録が ${otherCount} 件あります。工場を切り替えると表示されます。`
-            : "選択中の工場の品目の測定記録を表示しています。"}
+          選択中の工場で登録した記録と、この工場の品目の記録を表示しています。承認待ちは上に並びます。
+          {otherCount > 0 &&
+            ` 他の工場の測定記録が ${otherCount} 件あります${otherPending > 0 ? `（うち承認待ち ${otherPending} 件）` : ""}。工場を切り替えると表示されます。`}
         </p>
 
         {/* モバイル: カード */}

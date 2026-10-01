@@ -23,6 +23,7 @@ export const config = {
     "/bags",
     "/summary",
     "/first",
+    "/quality",
     "/guide",
     "/items",
     "/scales",

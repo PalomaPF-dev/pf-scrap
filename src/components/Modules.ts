@@ -4,6 +4,7 @@ import {
   CalendarRange,
   ClipboardList,
   Download,
+  FileCheck,
   Home,
   FileSpreadsheet,
   LayoutDashboard,
@@ -28,6 +29,7 @@ export type ModuleKey =
   | "dailyImport"
   | "bags"
   | "first"
+  | "quality"
   | "summary"
   | "dashboard"
   | "procurement"
@@ -98,6 +100,15 @@ export const MODULES: Record<ModuleKey, AppModule> = {
     lead: "品目ごとに完成品1個あたりの重量を実測して登録します",
     points: ["品名のQRか品目CDで呼び出す", "承認された実測値が完成重量の計算に使われる"],
     cta: "測定を登録する",
+  },
+  quality: {
+    key: "quality",
+    href: "/quality",
+    title: "品質チェックシート",
+    icon: FileCheck,
+    lead: "品質チェックシート（PDF）を月ごとに保管します。複数のPDFをまとめてドラッグ＆ドロップで取り込めます",
+    points: ["フォルダごと落としても中のPDFだけを取り込む", "同じ内容のPDFは二重に入らない", "一覧からその場で開く・ダウンロード"],
+    cta: "PDFを取り込む",
   },
   summary: {
     key: "summary",
@@ -220,6 +231,7 @@ export const FLOW: FlowStep[] = [
   },
   {
     module: "first",
+    also: ["quality"],
     title: "初品重量を測る",
     when: "生産した日（現場）",
     note: "完成品1個の重量を実測して登録します。承認された値が完成重量に使われます",

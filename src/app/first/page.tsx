@@ -69,7 +69,7 @@ export default async function FirstPage({
         action={
           <>
             <Link
-              href={`/first/list${factory ? `?factory=${encodeURIComponent(factory)}` : ""}`}
+              href={`/first-list${factory ? `?factory=${encodeURIComponent(factory)}` : ""}`}
               className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
             >
               <Table2 className="h-4 w-4" />

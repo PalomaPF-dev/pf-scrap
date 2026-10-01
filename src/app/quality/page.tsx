@@ -50,7 +50,7 @@ export default async function QualityPage({
         description="内胴ベンダーなどの品質チェックシート（PDF）をまとめてドラッグ＆ドロップすると、備考欄に書かれた完成品重量を読み取り、加工日×図番の初品測定として登録します。ファイル自体は保存しません。"
         action={
           <Link
-            href="/first/list"
+            href="/first-list"
             className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
           >
             <Table2 className="h-4 w-4" />

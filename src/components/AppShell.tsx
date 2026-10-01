@@ -3,38 +3,26 @@
 import { useSession, signOut } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import { LogOut, Mail } from "lucide-react";
-import { AppShell as BaseAppShell, UserIdentity, type NavItem } from "@paloma-pf/ui";
+import { AppShell as BaseAppShell, UserIdentity, type NavGroup, type NavItem } from "@paloma-pf/ui";
 import type { SidebarUser } from "@/lib/sidebarUser";
-import { MODULES, usable, type ModuleKey } from "./Modules";
+import { MODULES, MODULE_GROUPS, usable, type AppModule } from "./Modules";
 import { FactoryProvider } from "./FactoryScope";
 
 /**
- * サイドバーの並び。名前・アイコンはホーム・使い方と同じ定義（Modules.ts）から作る。
- * 表示順は ホーム → 照合 → 日次記録 → 袋の記録 → 月間集計 → 調達入力 → 初品測定 → 初品測定一覧 → 品質チェックシート取込 → マスタ類 → 使い方。
- * 生産管理部・調達部のメンバーと管理者だけが使う機能（ops）は、権限が無い人にはタブごと出さない
- * （サーバー側でも requireOperations* で必ず防ぐ）。
+ * サイドバー。ホーム → 用途別のグループ（現場の記録 / 集計・照合 / 入力・取込 / マスタ・設定）→ 使い方。
+ * 名前・アイコン・分け方はホームと同じ定義（Modules.ts）から作る。
+ * 権限の無い機能（ops / admin）はタブごと出さず、空になったグループも出さない
+ * （サーバー側でも requireOperations* / requireAdmin* で必ず防ぐ）。
  */
-const NAV_ORDER: ModuleKey[] = [
-  "home",
-  "dashboard",
-  "daily",
-  "bags",
-  "summary",
-  "procurement",
-  "first",
-  "firstList",
-  "quality",
-  "items",
-  "scales",
-  "mcframe",
-  "settings",
-  "guide",
-];
-
-function navFor(canOperate: boolean, isAdmin: boolean): NavItem[] {
-  return NAV_ORDER.map((k) => MODULES[k])
-    .filter((m) => usable(m, canOperate, isAdmin))
-    .map((m) => ({ href: m.href, label: m.title, icon: m.icon }));
+function navFor(canOperate: boolean, isAdmin: boolean): NavGroup[] {
+  const item = (m: AppModule): NavItem => ({ href: m.href, label: m.title, icon: m.icon });
+  const groups: NavGroup[] = [{ items: [item(MODULES.home)] }];
+  for (const g of MODULE_GROUPS) {
+    const items = g.keys.map((k) => MODULES[k]).filter((m) => usable(m, canOperate, isAdmin));
+    if (items.length > 0) groups.push({ title: g.title, items: items.map(item) });
+  }
+  groups.push({ items: [item(MODULES.guide)] });
+  return groups;
 }
 
 /** 工場の選択を出さない画面（@paloma-pf/ui の AppShell がシェルを出さない画面と同じ）。 */

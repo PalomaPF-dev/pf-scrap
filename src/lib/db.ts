@@ -1762,9 +1762,14 @@ export async function bulkImportFirstArticles(
   rows: {
     measuredOn: string;
     hinmokuCD: string;
+    /** 品目マスターに無い図番は ''（格納場所が分からないまま登録する） */
     kakunoCD: string;
     weight: number;
     sokuteisha: string;
+    /** 取り込んだときに選んでいた工場（一覧の工場列・所属工場の絞り込みに使う） */
+    factory: string;
+    /** 由来メモ（マスター未登録の品名など）。空なら従来どおり */
+    note: string;
   }[],
   approvedBy: string
 ): Promise<number> {
@@ -1775,16 +1780,50 @@ export async function bulkImportFirstArticles(
     await sql`
       INSERT INTO scrap_first_articles
         (company_id, measured_on, hinmoku_cd, kakuno_cd, weight, sokuteisha,
-         status, approved_by, approved_at)
+         status, approved_by, approved_at, factory, note)
       VALUES (${companyId}, ${r.measuredOn}, ${r.hinmokuCD}, ${r.kakunoCD},
-              ${r.weight}, ${r.sokuteisha}, 'approved', ${approvedBy}, NOW())
+              ${r.weight}, ${r.sokuteisha}, 'approved', ${approvedBy}, NOW(), ${r.factory}, ${r.note})
       ON CONFLICT (company_id, measured_on, hinmoku_cd, kakuno_cd) DO UPDATE SET
         weight = EXCLUDED.weight, sokuteisha = EXCLUDED.sokuteisha,
         status = 'approved', approved_by = EXCLUDED.approved_by,
-        approved_at = NOW(), reject_comment = ''`;
+        approved_at = NOW(), reject_comment = '',
+        factory = CASE WHEN EXCLUDED.factory <> '' THEN EXCLUDED.factory ELSE scrap_first_articles.factory END,
+        note = EXCLUDED.note`;
     n++;
   }
   return n;
+}
+
+/**
+ * 初品測定をまとめて削除する（一覧画面の削除。管理者のみが呼ぶ）。
+ * factory を渡すと、その工場のもの（登録時の工場、または品目マスターの工場が一致）だけ消す。
+ * 工場が分からない記録は所属工場の人には消させない（取り違え防止）。消した件数を返す。
+ */
+export async function deleteFirstArticles(
+  companyId: string,
+  keys: { measuredOn: string; hinmokuCD: string; kakunoCD: string }[],
+  factory: string | null
+): Promise<number> {
+  if (keys.length === 0) return 0;
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    DELETE FROM scrap_first_articles f
+    WHERE f.company_id = ${companyId}
+      AND (f.measured_on, f.hinmoku_cd, f.kakuno_cd) IN (
+        SELECT d, h, k FROM unnest(
+          ${keys.map((x) => x.measuredOn)}::date[],
+          ${keys.map((x) => x.hinmokuCD)}::text[],
+          ${keys.map((x) => x.kakunoCD)}::text[]) AS t(d, h, k))
+      AND (${factory}::text IS NULL
+        OR f.factory = ${factory}
+        OR EXISTS (
+          SELECT 1 FROM scrap_items i
+          WHERE i.company_id = f.company_id
+            AND i.kanri_zuban = f.hinmoku_cd AND i.kakuno_cd = f.kakuno_cd
+            AND i.factory = ${factory}))
+    RETURNING 1`;
+  return rows.length;
 }
 
 /**

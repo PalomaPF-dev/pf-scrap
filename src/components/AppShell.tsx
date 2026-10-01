@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   ClipboardList,
   Scale,
+  FileCheck,
   Package,
   Download,
   CalendarRange,
@@ -18,12 +19,13 @@ import {
 import { AppShell as BaseAppShell, UserIdentity, type NavItem } from "@paloma-pf/ui";
 import type { SidebarUser } from "@/lib/sidebarUser";
 
-/** 全員が使うナビ（日次記録・月間集計・初品測定・照合の閲覧と、使い方ガイド）。 */
+/** 全員が使うナビ（日次記録・月間集計・初品測定・品質チェックシート・照合の閲覧と、使い方ガイド）。 */
 const NAV_COMMON: NavItem[] = [
   { href: "/", label: "照合ダッシュボード", icon: LayoutDashboard },
   { href: "/daily", label: "日次記録", icon: ClipboardList },
   { href: "/summary", label: "月間集計", icon: BarChart3 },
   { href: "/first", label: "初品重量測定", icon: Scale },
+  { href: "/quality", label: "品質チェックシート", icon: FileCheck },
 ];
 
 /** 使い方ガイド。誰でも見られるよう、いちばん下に固定で置く。 */
@@ -41,12 +43,12 @@ const NAV_OPERATIONS: NavItem[] = [
   { href: "/settings", label: "設定", icon: Settings },
 ];
 
-/** 表示順は 照合 → 日次記録 → 月間集計 → 調達入力 → 初品測定 → マスタ類 → 使い方。 */
+/** 表示順は 照合 → 日次記録 → 月間集計 → 調達入力 → 初品測定 → 品質チェックシート → マスタ類 → 使い方。 */
 function navFor(canOperate: boolean): NavItem[] {
   if (!canOperate) return [...NAV_COMMON, NAV_GUIDE];
-  const [dashboard, daily, summary, first] = NAV_COMMON;
+  const [dashboard, daily, summary, first, quality] = NAV_COMMON;
   const [procurement, ...masters] = NAV_OPERATIONS;
-  return [dashboard, daily, summary, procurement, first, ...masters, NAV_GUIDE];
+  return [dashboard, daily, summary, procurement, first, quality, ...masters, NAV_GUIDE];
 }
 
 /** スクラップアプリのテーマ（銅色、アクティブは角丸＋丸バー）。 */

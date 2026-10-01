@@ -19,6 +19,8 @@ export {
   type DailyEntry,
   type DailyRecord,
   type Scale,
+  type QualitySheet,
+  QUALITY_SHEET_MAX_BYTES,
 } from "./scrapTypes";
 import {
   type FirstArticle as _FirstArticle,
@@ -28,8 +30,11 @@ import {
   type DailyRecord as _DailyRecord,
   type DailyStatus as _DailyStatus,
   type Scale as _Scale,
+  type QualitySheet as _QualitySheet,
+  QUALITY_SHEET_MAX_BYTES as _QUALITY_SHEET_MAX_BYTES,
 } from "./scrapTypes";
 type ScrapItem = _ScrapItem;
+type QualitySheet = _QualitySheet;
 type ScrapKind = _ScrapKind;
 type FirstArticle = _FirstArticle;
 type FaStatus = _FaStatus;
@@ -1410,10 +1415,160 @@ export async function listFactoryOptions(companyId: string): Promise<string[]> {
       UNION ALL SELECT factory FROM scrap_monthly_inputs WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_procure_days WHERE company_id = ${companyId}
       UNION ALL SELECT factory FROM scrap_items WHERE company_id = ${companyId}
+      UNION ALL SELECT factory FROM scrap_quality_sheets WHERE company_id = ${companyId}
     ) t WHERE factory <> '' ORDER BY factory`;
   for (const u of used) {
     const name = String(u.factory);
     if (!names.includes(name)) names.push(name);
   }
   return names;
+}
+
+// ===== 品質チェックシート（PDF） =====
+
+function mapQualitySheet(r: any): QualitySheet {
+  return {
+    id: String(r.id),
+    factory: r.factory ?? "",
+    ym: r.ym ?? "",
+    fileName: r.file_name ?? "",
+    sizeBytes: Number(r.size_bytes) || 0,
+    sha256: r.sha256 ?? "",
+    uploadedBy: r.uploaded_by ?? "",
+    uploadedById: r.uploaded_by_id ?? "",
+    uploadedAt: r.uploaded_at ? new Date(r.uploaded_at).toISOString() : "",
+  };
+}
+
+/**
+ * 品質チェックシートの一覧（本体は含まない）。年月・工場で絞り込む。
+ * factory が null なら全工場。所属工場の制限は呼び出し側（session の getFactoryRestriction）で掛ける。
+ */
+export async function listQualitySheets(
+  companyId: string,
+  opts: { ym?: string | null; factory?: string | null; limit?: number } = {}
+): Promise<QualitySheet[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const ym = opts.ym ?? null;
+  const factory = opts.factory ?? null;
+  const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
+  const rows = await sql`
+    SELECT id, factory, ym, file_name, size_bytes, sha256, uploaded_by, uploaded_by_id, uploaded_at
+      FROM scrap_quality_sheets
+     WHERE company_id = ${companyId}
+       AND (${ym}::text IS NULL OR ym = ${ym})
+       AND (${factory}::text IS NULL OR factory = ${factory})
+     ORDER BY uploaded_at DESC, file_name
+     LIMIT ${limit}`;
+  return (rows as any[]).map(mapQualitySheet);
+}
+
+/** 年月ごとの件数（工場で絞り込み可）。月切替の目安に出す。 */
+export async function countQualitySheetsByMonth(
+  companyId: string,
+  factory: string | null = null
+): Promise<{ ym: string; count: number }[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT ym, COUNT(*) AS cnt
+      FROM scrap_quality_sheets
+     WHERE company_id = ${companyId}
+       AND (${factory}::text IS NULL OR factory = ${factory})
+     GROUP BY ym
+     ORDER BY ym DESC`;
+  return (rows as any[]).map((r) => ({ ym: String(r.ym), count: Number(r.cnt) || 0 }));
+}
+
+/** メタ情報をIDで引く。他社のIDは引けない。 */
+export async function getQualitySheet(
+  companyId: string,
+  id: string
+): Promise<QualitySheet | null> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, factory, ym, file_name, size_bytes, sha256, uploaded_by, uploaded_by_id, uploaded_at
+      FROM scrap_quality_sheets
+     WHERE company_id = ${companyId} AND id = ${id}
+     LIMIT 1`;
+  return rows[0] ? mapQualitySheet(rows[0]) : null;
+}
+
+/**
+ * PDF本体を取り出す（閲覧・ダウンロード用）。
+ * bytea はドライバによって Buffer / '\\x…' 文字列と返り方が違うので、
+ * SQL 側で base64 にそろえてから Buffer に戻す。
+ */
+export async function getQualitySheetContent(
+  companyId: string,
+  id: string
+): Promise<{ meta: QualitySheet; content: Buffer } | null> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, factory, ym, file_name, size_bytes, sha256, uploaded_by, uploaded_by_id, uploaded_at,
+           encode(content, 'base64') AS content_b64
+      FROM scrap_quality_sheets
+     WHERE company_id = ${companyId} AND id = ${id}
+     LIMIT 1`;
+  if (!rows[0]) return null;
+  return {
+    meta: mapQualitySheet(rows[0]),
+    content: Buffer.from(String(rows[0].content_b64 ?? ""), "base64"),
+  };
+}
+
+/**
+ * 品質チェックシートを1件保存する。
+ * 同じ内容（sha256 が一致）のPDFが同じ会社に既にあれば保存せず、既存の1件を duplicate として返す
+ * （ファイル名が違っても中身が同じなら二重取込とみなす）。
+ * 本体はドライバ差を避けるため base64 で渡し、SQL 側で bytea に戻す。
+ */
+export async function insertQualitySheet(
+  companyId: string,
+  r: {
+    factory: string;
+    ym: string;
+    fileName: string;
+    sha256: string;
+    /** PDF本体。大きさは QUALITY_SHEET_MAX_BYTES 以内（呼び出し側でも検査する） */
+    content: Buffer;
+    uploadedBy: string;
+    uploadedById: string;
+  }
+): Promise<{ sheet: QualitySheet; duplicate: boolean }> {
+  await ensureSchema();
+  const sql = getSql();
+  const sizeBytes = r.content.length;
+  if (sizeBytes <= 0 || sizeBytes > _QUALITY_SHEET_MAX_BYTES) {
+    throw new Error("PDFの大きさが上限を超えています");
+  }
+  const contentBase64 = r.content.toString("base64");
+  const rows = await sql`
+    INSERT INTO scrap_quality_sheets (
+      company_id, factory, ym, file_name, size_bytes, sha256, content, uploaded_by, uploaded_by_id
+    ) VALUES (
+      ${companyId}, ${r.factory}, ${r.ym}, ${r.fileName}, ${sizeBytes}, ${r.sha256},
+      decode(${contentBase64}, 'base64'), ${r.uploadedBy}, ${r.uploadedById}
+    )
+    ON CONFLICT (company_id, sha256) DO NOTHING
+    RETURNING id, factory, ym, file_name, size_bytes, sha256, uploaded_by, uploaded_by_id, uploaded_at`;
+  if (rows[0]) return { sheet: mapQualitySheet(rows[0]), duplicate: false };
+  // 衝突＝同じ内容が既にある。どの1件かを返して、画面で「取込済み」と示す。
+  const existing = await sql`
+    SELECT id, factory, ym, file_name, size_bytes, sha256, uploaded_by, uploaded_by_id, uploaded_at
+      FROM scrap_quality_sheets
+     WHERE company_id = ${companyId} AND sha256 = ${r.sha256}
+     LIMIT 1`;
+  if (!existing[0]) throw new Error("保存に失敗しました");
+  return { sheet: mapQualitySheet(existing[0]), duplicate: true };
+}
+
+/** 品質チェックシートを1件削除する。権限（管理者 or 取込者本人）は呼び出し側で判定する。 */
+export async function deleteQualitySheet(companyId: string, id: string): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  await sql`DELETE FROM scrap_quality_sheets WHERE company_id = ${companyId} AND id = ${id}`;
 }

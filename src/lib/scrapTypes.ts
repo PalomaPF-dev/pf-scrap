@@ -230,3 +230,29 @@ export interface ScalePhotoResult extends ScaleReadResponse {
   /** 同じ写真から読めたQRコード。読めなければ空 */
   qr: string;
 }
+
+// ===== 品質チェックシート（PDF） =====
+
+/** 1ファイルあたりの上限。Vercel の関数はリクエスト本文 4.5MB までなので、その内側に置く。 */
+export const QUALITY_SHEET_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * 品質チェックシート（PDF）のメタ情報。本体（PDFのバイト列）は含めない。
+ * 一覧・削除の判定に使う。閲覧は /api/quality-sheets/[id] でそのつど取り出す。
+ */
+export interface QualitySheet {
+  id: string;
+  factory: string;
+  /** 対象年月 'YYYY-MM'（ファイルサーバーの月フォルダに相当） */
+  ym: string;
+  fileName: string;
+  sizeBytes: number;
+  /** 内容のハッシュ。同じPDFの二重取込を弾く */
+  sha256: string;
+  /** 取込者の氏名（表示用スナップショット） */
+  uploadedBy: string;
+  /** 取込者のユーザーID（本人による削除の判定用） */
+  uploadedById: string;
+  /** ISO 8601 */
+  uploadedAt: string;
+}

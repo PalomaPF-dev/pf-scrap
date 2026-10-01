@@ -20,6 +20,7 @@ export const config = {
     "/daily",
     "/summary",
     "/first",
+    "/quality",
     "/guide",
     "/items",
     "/scales",

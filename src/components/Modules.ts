@@ -7,6 +7,7 @@ import {
   FileCheck,
   Home,
   FileSpreadsheet,
+  Table2,
   LayoutDashboard,
   Package,
   PackageCheck,
@@ -29,6 +30,7 @@ export type ModuleKey =
   | "dailyImport"
   | "bags"
   | "first"
+  | "firstList"
   | "quality"
   | "summary"
   | "dashboard"
@@ -52,6 +54,8 @@ export interface AppModule {
   cta: string;
   /** 生産管理部・調達部のメンバーと管理者だけが使う */
   ops?: boolean;
+  /** 管理者だけが使う（取込など、記録を一括で書き換えるもの） */
+  admin?: boolean;
 }
 
 export const MODULES: Record<ModuleKey, AppModule> = {
@@ -101,14 +105,24 @@ export const MODULES: Record<ModuleKey, AppModule> = {
     points: ["品名のQRか品目CDで呼び出す", "承認された実測値が完成重量の計算に使われる"],
     cta: "測定を登録する",
   },
+  firstList: {
+    key: "firstList",
+    href: "/first/list",
+    title: "初品測定一覧",
+    icon: Table2,
+    lead: "初品測定の記録を月・工場・品目で絞り込んで一覧し、CSVに出します",
+    points: ["申請中・承認済み・差し戻しの状態も一緒に", "絞り込んだままCSV出力"],
+    cta: "一覧を見る",
+  },
   quality: {
     key: "quality",
     href: "/quality",
-    title: "品質チェックシート",
+    title: "品質チェックシート取込",
     icon: FileCheck,
-    lead: "品質チェックシート（PDF）を月ごとに保管します。複数のPDFをまとめてドラッグ＆ドロップで取り込めます",
-    points: ["フォルダごと落としても中のPDFだけを取り込む", "同じ内容のPDFは二重に入らない", "一覧からその場で開く・ダウンロード"],
+    lead: "品質チェックシート（PDF）の備考欄に書かれた完成品重量を、初品測定として一括登録します",
+    points: ["複数のPDFやフォルダごとドラッグ＆ドロップ", "読み取った内容を確認してから登録", "承認済みとして計算に反映"],
     cta: "PDFを取り込む",
+    admin: true,
   },
   summary: {
     key: "summary",
@@ -189,8 +203,9 @@ export const MODULES: Record<ModuleKey, AppModule> = {
   },
 };
 
-/** 使える機能か（ops の機能は canOperate の人だけ） */
-export const usable = (m: AppModule, canOperate: boolean) => !m.ops || canOperate;
+/** 使える機能か（ops の機能は canOperate の人だけ、admin の機能は管理者だけ） */
+export const usable = (m: AppModule, canOperate: boolean, isAdmin = false) =>
+  (!m.ops || canOperate) && (!m.admin || isAdmin);
 
 /**
  * 実際の業務の順番（ホームの①②③…と使い方の「はじめに」で共有する）。
@@ -231,7 +246,7 @@ export const FLOW: FlowStep[] = [
   },
   {
     module: "first",
-    also: ["quality"],
+    also: ["firstList", "quality"],
     title: "初品重量を測る",
     when: "生産した日（現場）",
     note: "完成品1個の重量を実測して登録します。承認された値が完成重量に使われます",

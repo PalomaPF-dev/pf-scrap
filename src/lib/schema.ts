@@ -33,7 +33,6 @@ let schemaReady: Promise<void> | null = null;
  * - scrap_first_articles  … 初品の実測完成品重量
  * - scrap_mcframe_qty     … McFrame取込の完成品数量（年月×品目CD×格納場所CD）
  * - scrap_monthly_inputs  … 月初在庫・購入重量・スクラップ売却数量（年月で1行）
- * - scrap_quality_sheets  … 品質チェックシート（PDF本体を bytea で保管。年月×工場で一覧）
  * - portal_factories / portal_workplaces … 工場・職場マスタ（ポータル配信＋手動追加。使う/使わないを持つ）
  *
  * 認証テーブル（companies/users）も同時に用意する。
@@ -484,27 +483,6 @@ async function buildSchema(): Promise<void> {
       created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_inventory_adjustments_idx ON scrap_inventory_adjustments(company_id, factory, adate)`);
-
-  // 品質チェックシート（PDF）。ファイルサーバーの月フォルダに置いている紙の記録を、
-  // 画面からまとめてドラッグ＆ドロップして取り込む。本体はこのDBに bytea で持つ
-  // （別のストレージを増やさず、日次記録と同じ場所で保管期間を管理するため）。
-  // 同じ内容（sha256）のPDFは会社内で1件だけ（二重取込を弾く）。
-  await safeDdl(() => sql`
-    CREATE TABLE IF NOT EXISTS scrap_quality_sheets (
-      id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      company_id     UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-      factory        TEXT NOT NULL DEFAULT '',
-      ym             TEXT NOT NULL,
-      file_name      TEXT NOT NULL,
-      size_bytes     INTEGER NOT NULL,
-      sha256         TEXT NOT NULL,
-      content        BYTEA NOT NULL,
-      uploaded_by    TEXT NOT NULL DEFAULT '',
-      uploaded_by_id TEXT NOT NULL DEFAULT '',
-      uploaded_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (company_id, sha256)
-    )`);
-  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_quality_sheets_list_idx ON scrap_quality_sheets(company_id, ym, factory, uploaded_at DESC)`);
 
   // ポータル配信の工場・職場マスタ（/api/portal-masters）。code で突合して upsert する。
   // このアプリでは日次記録・品目の「工場」の入力候補に使う（記録の値は文字列のまま）。

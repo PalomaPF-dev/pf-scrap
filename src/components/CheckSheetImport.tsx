@@ -1,8 +1,10 @@
 "use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FileUp, Save, X } from "lucide-react";
+import { Save, X } from "lucide-react";
+import PdfDropZone, { type PickedPdf } from "./PdfDropZone";
 import {
   importCheckSheetsAction,
   resolveCheckSheetItemsAction,
@@ -50,18 +52,38 @@ function problemOf(s: Sheet): string {
  * 品質チェックシート（PDF）の一括取込（管理者のみ）。
  * 大口工場は初品の単品完成品重量をチェックシートの備考欄に書いているため、
  * 日別の大量のPDFをまとめて読み、加工日×品目の初品測定として登録する。
- * PDFはブラウザ内で読み、サーバーへは読み取った値だけを送る。
+ * PDFはドロップ枠で受け取り、ブラウザ内で読む。サーバーへは読み取った値だけを送り、
+ * ファイル自体は保存しない。
  */
-export default function CheckSheetImport({ factory }: { factory: string }) {
+export default function CheckSheetImport({
+  factory,
+  standalone = false,
+}: {
+  factory: string;
+  /** 取込画面（/quality）に単体で置くとき true（上の余白を付けない） */
+  standalone?: boolean;
+}) {
   const router = useRouter();
-  const fileRef = useRef<HTMLInputElement>(null);
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [reading, setReading] = useState("");
   const [message, setMessage] = useState("");
+  const [done, setDone] = useState("");
   const [pending, startTransition] = useTransition();
 
-  async function onFiles(files: File[]) {
-    setMessage("");
+  function onPicked(picked: PickedPdf[], info: { skippedNonPdf: number; truncated: number }) {
+    const notes: string[] = [];
+    if (info.skippedNonPdf) notes.push(`PDF以外の ${info.skippedNonPdf} 件は読み取りません`);
+    if (info.truncated) notes.push(`一度に読めるのは ${info.truncated + picked.length} 件中 ${picked.length} 件までです`);
+    if (picked.length === 0) {
+      setMessage(notes.join("。") || "PDFファイルがありません");
+      return;
+    }
+    setDone("");
+    void onFiles(picked.map((p) => p.file), notes.join("。"));
+  }
+
+  async function onFiles(files: File[], prefix = "") {
+    setMessage(prefix);
     const out: Sheet[] = [];
     let failed = 0;
     for (let i = 0; i < files.length; i++) {
@@ -99,7 +121,11 @@ export default function CheckSheetImport({ factory }: { factory: string }) {
     setSheets(out);
     setReading("");
     if (failed) {
-      setMessage(`${failed}件のPDFは文字を読み取れませんでした（スキャン画像のPDFは非対応です）。`);
+      setMessage((m) =>
+        [m, `${failed}件のPDFは文字を読み取れませんでした（スキャン画像のPDFは非対応です）。`]
+          .filter(Boolean)
+          .join(" ")
+      );
     }
   }
 
@@ -140,8 +166,9 @@ export default function CheckSheetImport({ factory }: { factory: string }) {
     });
     startTransition(async () => {
       const res = await importCheckSheetsAction(rows);
-      setMessage(res.message ?? "");
+      setMessage(res.ok ? "" : (res.message ?? ""));
       if (res.ok) {
+        setDone(res.message ?? "登録しました");
         setSheets([]);
         router.refresh();
       }
@@ -149,41 +176,32 @@ export default function CheckSheetImport({ factory }: { factory: string }) {
   }
 
   return (
-    <section className="mt-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-bold text-[#333333]">品質チェックシート（PDF）から一括取込</h2>
-          <p className="mt-0.5 text-xs text-[#909090]">
-            チェックシートの「備考」欄に書かれた完成品重量（kg）を、加工日×図番の初品測定として登録します。
-            複数ファイルをまとめて選べます。G長確認済みの記録として、承認済みで計算に反映されます。
-            {factory ? `（${factory}の品目マスターと照合）` : ""}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => fileRef.current?.click()}
-            disabled={!!reading || pending}
-            className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5] disabled:opacity-50"
-          >
-            <FileUp className="h-4 w-4" />
-            {reading || "PDFを選択"}
-          </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/pdf,.pdf"
-            multiple
-            hidden
-            onChange={(e) => {
-              const fs = [...(e.target.files ?? [])];
-              e.target.value = "";
-              if (fs.length) void onFiles(fs);
-            }}
-          />
-        </div>
+    <section className={`${standalone ? "" : "mt-4 "}rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5`}>
+      <div className="mb-3">
+        <h2 className="text-sm font-bold text-[#333333]">品質チェックシート（PDF）から一括取込</h2>
+        <p className="mt-0.5 text-xs text-[#909090]">
+          チェックシートの「備考」欄に書かれた完成品重量（kg）を、加工日×図番の初品測定として登録します。
+          ファイル自体は保存しません。G長確認済みの記録として、承認済みで計算に反映されます。
+          {factory ? `（${factory}の品目マスターと照合）` : ""}
+        </p>
       </div>
 
-      {message && <p className="mt-3 text-xs text-[#555555]">{message}</p>}
+      <PdfDropZone
+        onFiles={onPicked}
+        disabled={pending}
+        busyLabel={reading}
+        footnote={`${factory ? `${factory} ・ ` : ""}PDFのみ ・ 文字を持つPDF（Excelから出力したもの）が対象`}
+      />
+
+      {message && <p className="mt-3 text-xs text-[#a15c00]">{message}</p>}
+      {done && (
+        <p className="mt-3 rounded-lg bg-[#eef4ee] px-3 py-2 text-sm text-[#2f6b2f]">
+          {done}{" "}
+          <Link href="/first/list" className="font-medium underline">
+            初品測定一覧で確認
+          </Link>
+        </p>
+      )}
 
       {sheets.length > 0 && (
         <>

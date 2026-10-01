@@ -3,6 +3,9 @@ import { canUseOperations, getSessionWithRole } from "@/lib/session";
 import {
   BAG_STATUS_LABEL,
   DAILY_STATUS_LABEL,
+  FA_STATUS_LABEL,
+  type FaStatus,
+  listFirstArticlesFiltered,
   bagGap,
   bagWeight,
   getBagStart,
@@ -29,6 +32,7 @@ export const dynamic = "force-dynamic";
  *   GET /api/export?type=workplaces&ym=YYYY-MM  … 職場別の月間集計
  *   GET /api/export?type=mcframe&ym=YYYY-MM   … 品目別の理論スクラップ計算結果
  *   GET /api/export?type=recon&year=YYYY      … 年間照合一覧
+ *   GET /api/export?type=first&ym=YYYY-MM|all … 初品測定一覧（工場・品目・状態で絞り込み可）
  *   GET /api/export?type=items                … 品目マスター（管理者のみ）
  * UTF-8 BOM 付き（Excel でそのまま開ける）。
  */
@@ -259,6 +263,44 @@ export async function GET(req: NextRequest) {
         ]);
       }
       return csvResponse(`月次照合_${year}.csv`, rows);
+    }
+
+    if (type === "first") {
+      // 初品測定の一覧（画面 /first/list と同じ絞り込み）。画面と同じく全員が出せる
+      if (ymParam && ymParam !== "all" && !isYmStr(ymParam)) {
+        return NextResponse.json({ message: "ymが不正です" }, { status: 400 });
+      }
+      const ym = isYmStr(ymParam) ? ymParam : null;
+      const factory = restrictedFactory ?? (factoryParam || null);
+      const q = (req.nextUrl.searchParams.get("q") ?? "").trim();
+      const st = req.nextUrl.searchParams.get("status") ?? "";
+      const status = st in FA_STATUS_LABEL ? (st as FaStatus) : null;
+      const list = await listFirstArticlesFiltered(s.companyId, { ym, factory, q, status, limit: 5000 });
+      const rows: (string | number | null)[][] = [
+        ["測定日", "工場", "品目CD", "格納場所CD", "品名", "実測完成重量(kg)", "理論値(kg)", "差(kg)", "差率", "測定者", "状態", "承認者", "差し戻し理由", "備考"],
+      ];
+      for (const r of list) {
+        const diff = r.kanseiJuryo !== null ? r.weight - r.kanseiJuryo : null;
+        const rate = r.kanseiJuryo ? r.weight / r.kanseiJuryo - 1 : null;
+        rows.push([
+          r.measuredOn,
+          r.factory || r.itemFactory,
+          r.hinmokuCD,
+          r.kakunoCD,
+          r.hinmei ?? "",
+          r.weight,
+          r.kanseiJuryo ?? "",
+          diff === null ? "" : Math.round(diff * 1e6) / 1e6,
+          pct(rate),
+          r.sokuteisha,
+          FA_STATUS_LABEL[r.status],
+          r.approvedBy,
+          r.rejectComment,
+          r.note,
+        ]);
+      }
+      const suffix = [factory, status ? FA_STATUS_LABEL[status] : "", q].filter(Boolean).join("_");
+      return csvResponse(`初品測定_${ym ?? "全期間"}${suffix ? `_${suffix}` : ""}.csv`, rows);
     }
 
     if (type === "items") {

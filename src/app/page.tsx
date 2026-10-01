@@ -14,9 +14,9 @@ const CIRCLED = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨"];
 
 /** 機能を目的ごとにまとめたもの。ops の機能は権限のある人にだけ出す（サイドバーと同じ規則）。 */
 const GROUPS: { title: string; note: string; keys: ModuleKey[] }[] = [
-  { title: "現場の記録", note: "毎日の投入・袋の締めと初品の実測", keys: ["daily", "bags", "first"] },
+  { title: "現場の記録", note: "毎日の投入・袋の締めと初品の実測", keys: ["daily", "bags", "first", "firstList"] },
   { title: "集計・照合", note: "月末にズレがないかを確かめる", keys: ["summary", "dashboard"] },
-  { title: "月次の入力・取込", note: "生産管理部・調達部", keys: ["procurement", "mcframe", "dailyImport"] },
+  { title: "月次の入力・取込", note: "生産管理部・調達部", keys: ["procurement", "mcframe", "dailyImport", "quality"] },
   { title: "マスタ・設定", note: "生産管理部・調達部", keys: ["scales", "items", "settings"] },
 ];
 
@@ -55,6 +55,7 @@ export default async function HomePage({
   const session = await requireEntitledSession();
   // 使えない機能は出さない。判定はサイドバー・各画面の入口と同じ規則
   const canOperate = await canUseOperations(session);
+  const isAdmin = session.role === "admin";
 
   const ym = thisMonthStr();
   const today = todayStr();
@@ -105,8 +106,8 @@ export default async function HomePage({
           {FLOW.map((step, i) => {
             const m = MODULES[step.module];
             const Icon = m.icon;
-            const others = (step.also ?? []).map((k) => MODULES[k]).filter((o) => usable(o, canOperate));
-            const can = usable(m, canOperate);
+            const others = (step.also ?? []).map((k) => MODULES[k]).filter((o) => usable(o, canOperate, isAdmin));
+            const can = usable(m, canOperate, isAdmin);
             return (
               <li
                 key={step.module}
@@ -207,7 +208,7 @@ export default async function HomePage({
       {/* 機能（目的ごと） */}
       <div className="grid gap-4 lg:grid-cols-2">
         {GROUPS.map((g) => {
-          const mods = g.keys.map((k) => MODULES[k]).filter((m) => usable(m, canOperate));
+          const mods = g.keys.map((k) => MODULES[k]).filter((m) => usable(m, canOperate, isAdmin));
           if (mods.length === 0) return null;
           return (
             <section key={g.title} className="rounded-2xl border border-[#e5e5e5] bg-white p-4">

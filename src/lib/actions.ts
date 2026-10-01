@@ -1671,6 +1671,8 @@ export async function importCheckSheetsAction(
       `${approver}（チェックシート取込）`
     );
     revalidatePath("/first");
+    revalidatePath("/first/list");
+    revalidatePath("/quality");
     revalidatePath("/");
     return {
       ok: true,

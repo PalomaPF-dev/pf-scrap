@@ -1,7 +1,9 @@
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { authOptions } from "./authOptions";
 import { getCompanyEntitlement } from "./entitlement";
+import { ALL_FACTORIES, FACTORY_COOKIE } from "./factoryCookie";
 import {
   getUserDepartment,
   getUserRoleFactory,
@@ -220,4 +222,50 @@ export async function getFactoryRestriction(
   const { factory } = await getUserRoleFactory(s.companyId, s.userId);
   if (!factory) return { restricted: false, factory: null };
   return { restricted: true, factory };
+}
+
+/** 画面に出すときの工場（所属による制限＋画面上部で選んだ工場）。 */
+export interface FactoryView extends FactoryRestriction {
+  /**
+   * true = この工場に固定して表示する（factory に工場名が入る）。
+   * 所属工場の人は所属工場、全工場を見られる人は上部で選んだ工場。
+   * 「全工場」を選んだときは false で、各画面の工場フィルタ（?factory=）で絞り込める。
+   */
+  restricted: boolean;
+  factory: string | null;
+  /** 全工場を見られる人か（所属工場が未設定・デモ）。上部の「工場を切り替え」を出すかに使う */
+  all: boolean;
+  /** 所属工場。全工場を見られる人は null */
+  home: string | null;
+}
+
+/**
+ * 画面の表示に使う工場を返す（一覧・ダッシュボード・集計の絞り込みの既定値）。
+ * - 所属工場の人: getFactoryRestriction と同じく所属工場に固定（Cookie は見ない）
+ * - 全工場を見られる人: 上部で選んだ工場（Cookie）。「全工場」または未選択なら固定しない
+ * 見てよい範囲は getFactoryRestriction で決まり、Cookie はその中での絞り込みにしか使わないので、
+ * Cookie を書き換えても範囲は広がらない。**書き込みの権限判定には使わない**（getFactoryRestriction を使う）。
+ */
+export async function getFactoryView(
+  s: Pick<AppSession, "companyId" | "userId" | "isDemo">
+): Promise<FactoryView> {
+  const r = await getFactoryRestriction(s);
+  if (r.restricted) return { ...r, all: false, home: r.factory };
+  const picked = await readPickedFactory();
+  return picked
+    ? { restricted: true, factory: picked, all: true, home: null }
+    : { restricted: false, factory: null, all: true, home: null };
+}
+
+/** 上部で選んだ工場（Cookie）。「全工場」・未選択・壊れた値は null */
+async function readPickedFactory(): Promise<string | null> {
+  const raw = (await cookies()).get(FACTORY_COOKIE)?.value ?? "";
+  if (!raw || raw === ALL_FACTORIES) return null;
+  try {
+    // 工場名は短いので、長すぎる値は壊れた Cookie として捨てる
+    const v = decodeURIComponent(raw).trim();
+    return v && v.length <= 50 ? v : null;
+  } catch {
+    return null;
+  }
 }

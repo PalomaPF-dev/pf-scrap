@@ -24,6 +24,8 @@ type Draft = {
   capacity: string;
   /** 目量（最小表示単位） kg。空欄可 */
   division: string;
+  /** 袋を交換する目安 kg。空欄なら既定値（800kg） */
+  bagTargetKg: string;
 };
 
 const emptyDraft = (factory: string): Draft => ({
@@ -37,6 +39,7 @@ const emptyDraft = (factory: string): Draft => ({
   active: true,
   capacity: "",
   division: "",
+  bagTargetKg: "",
 });
 
 /** QRコード値の自動生成（SCP- + 8桁英数）。 */
@@ -194,6 +197,7 @@ export default function ScalesTable({
                           active: s.active,
                           capacity: s.capacity !== null ? String(s.capacity) : "",
                           division: s.division !== null ? String(s.division) : "",
+                          bagTargetKg: s.bagTargetKg !== null ? String(s.bagTargetKg) : "",
                         });
                       }}
                       className="rounded p-1 text-[#555555] hover:bg-[#f0f0ee]"
@@ -280,6 +284,24 @@ export default function ScalesTable({
                 AI読取が桁を間違えたときに自動で弾けます（目量1kgなら小数点は出ない、など）。
                 分からなければ空欄で構いません。
               </p>
+              {/* 袋の交換の目安。超えても記録は止めず、日次記録に注意を出すだけ */}
+              <label className="flex flex-col gap-1 text-xs text-[#707070]">
+                袋を交換する目安 kg（空欄なら 800kg）
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="10"
+                  min="0"
+                  value={draft.bagTargetKg}
+                  onChange={(e) => setDraft({ ...draft, bagTargetKg: e.target.value })}
+                  className={input}
+                  placeholder="例: 800"
+                />
+                <span className="text-xs text-[#909090]">
+                  日次記録でこの重量を超えると注意を出します。超えても記録は止めません
+                  （目安より手前で交換することもあるため）。
+                </span>
+              </label>
               <label className="flex flex-col gap-1 text-xs text-[#707070]">
                 名称*（例: 上銅スクラップ箱①）
                 <input

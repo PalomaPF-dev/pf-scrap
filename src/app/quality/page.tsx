@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
+import { requireEntitledSession, getFactoryView } from "@/lib/session";
 import {
   countQualitySheetsByMonth,
   listFactoryOptions,
@@ -25,7 +25,7 @@ function fmtYm(ym: string): string {
  * 品質チェックシート（PDF）の保管。
  * ファイルサーバーの月フォルダ（…\02_PDF\2026\202609）に入れているPDFを、
  * 月と工場を選んでまとめてドラッグ＆ドロップで取り込み、一覧から開ける。
- * 所属工場が設定された人は自工場のものだけ（取込先も自工場に固定）。
+ * 所属工場が設定された人は自工場のものだけ（取込先も自工場に固定）。上部で工場を選んだ人はその工場に固定。
  */
 export default async function QualityPage({
   searchParams,
@@ -42,7 +42,9 @@ export default async function QualityPage({
   let sheets: QualitySheet[];
   let months: { ym: string; count: number }[];
   try {
-    const restriction = await getFactoryRestriction(session);
+    // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定（「全工場」ならここで絞り込める）。
+    // 取込（書き込み）側の工場の判定は API が getFactoryRestriction で別に行う。
+    const restriction = await getFactoryView(session);
     const factories = await listFactoryOptions(session.companyId);
     factoryLocked = restriction.restricted;
     factoryOptions = factoryLocked ? [restriction.factory!] : factories;

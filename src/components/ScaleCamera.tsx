@@ -153,16 +153,30 @@ export default function ScaleCamera({
         }),
       });
       const data = await res.json().catch(() => ({}));
+      // 成功でも失敗でもカメラは閉じる。開いたままだと結果のメッセージが
+      // カメラ画面の裏に隠れ、読めたのかどうか分からなくなる（現場から報告あり）。
+      close();
       if (!res.ok) {
-        // 読取が使えなくても運用は止めない。QRだけ返して手入力に落とす。
-        onError(data?.message ?? "読み取りに失敗しました。手入力してください。");
-        if (qr) onResult({ readId: "", value: null, digits: "", confidence: "low", note: "", qr });
+        // 読取が使えなくても運用は止めない。値なし（手入力へ）の結果として返し、
+        // 失敗の理由は note で渡す。onError と別々に出すと、呼び出し側の
+        // 「読み取れませんでした」で理由が上書きされて見えなくなるため。
+        onResult({
+          readId: "",
+          value: null,
+          digits: "",
+          confidence: "low",
+          note: data?.message ?? "読み取りに失敗しました。表示の数値を手入力してください。",
+          qr,
+        });
         return;
       }
       onResult({ ...data, qr });
-      close();
     } catch (e) {
-      onError("読み取りに失敗しました: " + (e as Error).message);
+      close();
+      onError(
+        "読み取りに失敗しました（通信エラー）。電波の良い場所で撮り直すか、表示の数値を手入力してください。" +
+          ((e as Error).message ? `（${(e as Error).message}）` : "")
+      );
     } finally {
       setBusy(false);
     }
@@ -201,7 +215,12 @@ export default function ScaleCamera({
         type="button"
         onClick={openCamera}
         disabled={disabled || busy}
-        className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#b4632c] text-base font-semibold text-white hover:bg-[#96521f] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-5 sm:text-sm"
+        /*
+          読み取り（機械を撮る）操作は青。日次記録では「読み取る（青）→ 記録する（オレンジ）
+          → 保存（枠線）」と色と形を変えて、同じ見た目のボタンが並ばないようにしている。
+          現場から「同じ色のボタンが3つあって押し間違える」と報告があったため。
+        */
+        className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#0b5ca8] text-base font-semibold text-white hover:bg-[#094a86] disabled:opacity-50 sm:h-11 sm:w-auto sm:px-5 sm:text-sm"
       >
         {busy ? <Loader2 className="h-5 w-5 animate-spin" /> : <Camera className="h-5 w-5" />}
         {busy ? "読み取り中…" : label}

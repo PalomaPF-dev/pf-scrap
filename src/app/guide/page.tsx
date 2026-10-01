@@ -11,12 +11,12 @@ export const dynamic = "force-dynamic";
  * 画面と一緒に更新できるよう、資料ファイルではなくアプリの中に置く。
  * 生産管理部・調達部だけが使う機能のスライドは、権限のある人にだけ出す
  * （使えない機能の説明を現場に読ませない）。
- * 並びはホームの「使う順番」（Modules.ts の FLOW）と同じにする:
+ * 並びは業務の順番（Modules.ts の FLOW）と同じにする:
  *   マスタ → 日次記録(袋の開始・交換を含む) → 袋の記録 → 初品重量測定 → 調達入力(月次在庫) → McFrame取込
  *   → 月間集計 → 照合
  */
 
-/** 最初の1枚。ホームの「使う順番」と同じ手順を、同じ言葉で並べる。 */
+/** 最初の1枚。業務の順番（Modules.ts の FLOW）を、同じ言葉で並べる。 */
 function introSlide(): GuideSlide {
   return {
     eyebrow: "はじめに",
@@ -245,7 +245,7 @@ export default async function GuidePage() {
     role: session.role,
     isDemo: session.isDemo,
   });
-  // ホームの「使う順番」と同じ並び。使えない機能のスライドは飛ばす
+  // 業務の順番（FLOW）と同じ並び。使えない機能のスライドは飛ばす
   const isAdmin = session.role === "admin";
   const slides = [
     introSlide(),
@@ -262,7 +262,7 @@ export default async function GuidePage() {
     <div className="p-4 sm:p-6">
       <PageHeader
         title="使い方"
-        description="ホームの「使う順番」に沿って、1画面ずつ見られます。矢印キー（← →）でも送れます"
+        description="業務の順番（記録 → 集計 → 照合）に沿って、1画面ずつ見られます。矢印キー（← →）でも送れます"
       />
       <div className="mx-auto max-w-3xl">
         <GuideSlides slides={slides} />

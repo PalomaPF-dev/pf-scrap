@@ -25,6 +25,7 @@ import {
   deleteDailyRecord,
   bulkImportFirstArticles,
   deleteFirstArticle,
+  deleteFirstArticles,
   findItemsByZuban,
   deleteItem,
   deleteScale,
@@ -1321,6 +1322,53 @@ export async function deleteFirstArticleAction(
   }
 }
 
+/**
+ * 初品測定のまとめて削除（一覧画面。管理者のみ）。
+ * 所属工場の人は、その工場の記録（登録時の工場、または品目マスターの工場が一致）だけ消せる。
+ */
+export async function deleteFirstArticlesAction(
+  keys: { measuredOn?: unknown; hinmokuCD?: unknown; kakunoCD?: unknown }[]
+): Promise<ActionResult & { deleted?: number }> {
+  try {
+    const s = await requireAdminSession();
+    const list = (Array.isArray(keys) ? keys : [])
+      .map((k) => ({
+        measuredOn: String(k.measuredOn ?? ""),
+        hinmokuCD: asStr(k.hinmokuCD, 50),
+        kakunoCD: asStr(k.kakunoCD, 50),
+      }))
+      .filter((k) => isDateStr(k.measuredOn) && k.hinmokuCD);
+    if (list.length === 0) return fail("削除する記録がありません。");
+    if (list.length > 1000) return fail("一度に削除できるのは1,000件までです。");
+    const restriction = await getFactoryRestriction(s);
+    const deleted = await deleteFirstArticles(
+      s.companyId,
+      list,
+      restriction.restricted ? restriction.factory : null
+    );
+    revalidatePath("/first");
+    revalidatePath("/first-list");
+    revalidatePath("/mcframe");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
+    if (deleted === 0) {
+      return fail(
+        restriction.restricted
+          ? `所属工場（${restriction.factory}）の記録ではないため削除できませんでした。`
+          : "削除できる記録がありませんでした。"
+      );
+    }
+    const skipped = list.length - deleted;
+    return {
+      ok: true,
+      deleted,
+      message: `${deleted}件を削除しました。${skipped ? `（${skipped}件は所属工場の記録ではないため残しました）` : ""}`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
 /** 初品測定の承認（管理者のみ）。承認された値が完成重量の計算に使われる。 */
 export async function approveFirstArticleAction(
   measuredOn: string,
@@ -1618,16 +1666,23 @@ export async function importCheckSheetsAction(
   rows: {
     date?: unknown;
     hinmokuCD?: unknown;
+    /** 品目マスターに無い図番は ''（図番のまま登録する） */
     kakunoCD?: unknown;
     weight?: unknown;
     inspector?: unknown;
-  }[]
+    /** シートの品名（マスター未登録のとき備考に残す） */
+    hinmei?: unknown;
+  }[],
+  /** 画面で選んでいた工場。所属工場の人は所属工場で上書きされる */
+  factory?: string | null
 ): Promise<ActionResult> {
   try {
     const s = await requireAdminSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("登録するデータがありません。");
     if (rows.length > 5000) return fail("一度に登録できるのは5,000件までです。");
     const restriction = await getFactoryRestriction(s);
+    const recordFactory =
+      restriction.restricted && restriction.factory ? restriction.factory : asStr(factory ?? "", 50);
     const refs = [...new Set(rows.map((r) => asStr(r.hinmokuCD, 50)).filter(Boolean))];
     const known = await findItemsByZuban(
       s.companyId,
@@ -1637,7 +1692,17 @@ export async function importCheckSheetsAction(
     const knownRefs = new Set(known.map((it) => `${it.kanriZuban}\t${it.kakunoCD}`));
     const merged = new Map<
       string,
-      { measuredOn: string; hinmokuCD: string; kakunoCD: string; sum: number; n: number; names: Set<string> }
+      {
+        measuredOn: string;
+        hinmokuCD: string;
+        kakunoCD: string;
+        sum: number;
+        n: number;
+        names: Set<string>;
+        /** マスター未登録（図番のまま登録）。品名を備考に残す */
+        unknown: boolean;
+        hinmei: string;
+      }
     >();
     let bad = 0;
     for (const r of rows) {
@@ -1645,20 +1710,28 @@ export async function importCheckSheetsAction(
       const hinmokuCD = asStr(r.hinmokuCD, 50);
       const kakunoCD = asStr(r.kakunoCD, 50);
       const weight = toNum(r.weight);
-      if (!measuredOn || !knownRefs.has(`${hinmokuCD}\t${kakunoCD}`) || !(weight > 0) || weight > 10000) {
+      // 品目マスターにある品目はその品目CD×格納場所CDで、無い図番は格納場所を空にして図番のまま登録する
+      // （マスターが後から整っても記録を失わないため。一覧では「マスター未登録」と出る）
+      const isKnown = knownRefs.has(`${hinmokuCD}\t${kakunoCD}`);
+      const unknown = !isKnown && kakunoCD === "" && hinmokuCD !== "";
+      if (!measuredOn || (!isKnown && !unknown) || !(weight > 0) || weight > 10000) {
         bad++;
         continue;
       }
       const k = `${measuredOn}\t${hinmokuCD}\t${kakunoCD}`;
-      const m = merged.get(k) ?? { measuredOn, hinmokuCD, kakunoCD, sum: 0, n: 0, names: new Set<string>() };
+      const m =
+        merged.get(k) ??
+        { measuredOn, hinmokuCD, kakunoCD, sum: 0, n: 0, names: new Set<string>(), unknown, hinmei: "" };
       m.sum += weight;
       m.n++;
       const name = asStr(r.inspector, 50);
       if (name) m.names.add(name);
+      if (unknown && !m.hinmei) m.hinmei = asStr(r.hinmei, 100);
       merged.set(k, m);
     }
     if (merged.size === 0) return fail("登録できる行がありませんでした。");
     const approver = s.userName || s.loginId || "";
+    const unknownCount = [...merged.values()].filter((m) => m.unknown).length;
     const count = await bulkImportFirstArticles(
       s.companyId,
       [...merged.values()].map((m) => ({
@@ -1667,16 +1740,23 @@ export async function importCheckSheetsAction(
         kakunoCD: m.kakunoCD,
         weight: Math.round((m.sum / m.n) * 1e6) / 1e6,
         sokuteisha: [...m.names].join("・") || "チェックシート取込",
+        factory: recordFactory,
+        note: m.unknown
+          ? `チェックシート取込（品目マスター未登録${m.hinmei ? ` / 品名 ${m.hinmei}` : ""}）`
+          : "チェックシート取込",
       })),
       `${approver}（チェックシート取込）`
     );
     revalidatePath("/first");
-    revalidatePath("/first/list");
+    revalidatePath("/first-list");
     revalidatePath("/quality");
     revalidatePath("/");
     return {
       ok: true,
-      message: `${count}件を登録しました（承認済みとして計算に反映）${bad ? ` / 対象外 ${bad}件` : ""}`,
+      message:
+        `${count}件を登録しました（承認済みとして計算に反映）` +
+        (unknownCount ? ` / うち品目マスター未登録 ${unknownCount}件は図番のまま登録` : "") +
+        (bad ? ` / 対象外 ${bad}件` : ""),
     };
   } catch (e) {
     return fail((e as Error).message);

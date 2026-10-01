@@ -266,7 +266,7 @@ export async function GET(req: NextRequest) {
     }
 
     if (type === "first") {
-      // 初品測定の一覧（画面 /first/list と同じ絞り込み）。画面と同じく全員が出せる
+      // 初品測定の一覧（画面 /first-list と同じ絞り込み）。画面と同じく全員が出せる
       if (ymParam && ymParam !== "all" && !isYmStr(ymParam)) {
         return NextResponse.json({ message: "ymが不正です" }, { status: 400 });
       }

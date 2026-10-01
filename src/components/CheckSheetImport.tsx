@@ -43,7 +43,7 @@ function problemOf(s: Sheet): string {
   if (!s.date) return "加工日なし";
   if (!s.zuban) return "図番なし";
   if (s.weight === null) return "重量なし";
-  if (s.candidates.length === 0) return "品目マスター未登録";
+  // 品目マスターに無い図番は、図番のまま（格納場所なし）で登録できる
   if (!s.ref) return "品目を選択";
   return "";
 }
@@ -111,6 +111,11 @@ export default function CheckSheetImport({
       for (const s of out) {
         s.candidates = map[s.zuban] ?? [];
         if (s.candidates.length === 1) s.ref = refOf(s.candidates[0]);
+        // マスターに無い図番は、図番のまま登録する（格納場所は空。一覧では「マスター未登録」と出る）
+        if (s.candidates.length === 0 && s.zuban) {
+          s.ref = `${s.zuban}\t`;
+          s.warnings.push("品目マスター未登録（図番のまま登録）");
+        }
         const r = ratioOf(s);
         s.checked = !problemOf(s) && (r === null || (r < RATIO_OFF && r > 1 / RATIO_OFF));
       }
@@ -141,15 +146,16 @@ export default function CheckSheetImport({
       { zuban: string; hinmei: string; ws: number[]; from: string; to: string; kansei: number }
     >();
     for (const s of targets) {
-      const c = s.candidates.find((x) => refOf(x) === s.ref)!;
+      // マスター未登録の図番は候補が無い（図番のまま登録）
+      const c = s.candidates.find((x) => refOf(x) === s.ref);
       const k = s.ref;
       const e = m.get(k) ?? {
-        zuban: `${c.hinmokuCD}${c.kakunoCD ? ` / ${c.kakunoCD}` : ""}`,
-        hinmei: c.hinmei || s.hinmei,
+        zuban: c ? `${c.hinmokuCD}${c.kakunoCD ? ` / ${c.kakunoCD}` : ""}` : `${s.zuban}（マスター未登録）`,
+        hinmei: c?.hinmei || s.hinmei,
         ws: [],
         from: s.date,
         to: s.date,
-        kansei: c.kanseiJuryo,
+        kansei: c?.kanseiJuryo ?? 0,
       };
       e.ws.push(s.weight!);
       if (s.date < e.from) e.from = s.date;
@@ -162,10 +168,10 @@ export default function CheckSheetImport({
   function save() {
     const rows = targets.map((s) => {
       const [hinmokuCD, kakunoCD] = s.ref.split("\t");
-      return { date: s.date, hinmokuCD, kakunoCD, weight: s.weight, inspector: s.inspector };
+      return { date: s.date, hinmokuCD, kakunoCD, weight: s.weight, inspector: s.inspector, hinmei: s.hinmei };
     });
     startTransition(async () => {
-      const res = await importCheckSheetsAction(rows);
+      const res = await importCheckSheetsAction(rows, factory || null);
       setMessage(res.ok ? "" : (res.message ?? ""));
       if (res.ok) {
         setDone(res.message ?? "登録しました");
@@ -181,7 +187,7 @@ export default function CheckSheetImport({
         <h2 className="text-sm font-bold text-[#333333]">品質チェックシート（PDF）から一括取込</h2>
         <p className="mt-0.5 text-xs text-[#909090]">
           チェックシートの「備考」欄に書かれた完成品重量（kg）を、加工日×図番の初品測定として登録します。
-          ファイル自体は保存しません。G長確認済みの記録として、承認済みで計算に反映されます。
+          品目マスターに無い図番も、図番のまま登録できます。ファイル自体は保存しません。G長確認済みの記録として、承認済みで計算に反映されます。
           {factory ? `（${factory}の品目マスターと照合）` : ""}
         </p>
       </div>
@@ -197,7 +203,7 @@ export default function CheckSheetImport({
       {done && (
         <p className="mt-3 rounded-lg bg-[#eef4ee] px-3 py-2 text-sm text-[#2f6b2f]">
           {done}{" "}
-          <Link href="/first/list" className="font-medium underline">
+          <Link href="/first-list" className="font-medium underline">
             初品測定一覧で確認
           </Link>
         </p>
@@ -328,6 +334,8 @@ export default function CheckSheetImport({
                           </select>
                         ) : s.candidates.length === 1 ? (
                           `${s.candidates[0].hinmokuCD} / ${s.candidates[0].kakunoCD}`
+                        ) : s.zuban ? (
+                          <span className="text-[#a15c00]">{s.zuban} / —</span>
                         ) : (
                           ""
                         )}

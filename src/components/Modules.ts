@@ -107,7 +107,7 @@ export const MODULES: Record<ModuleKey, AppModule> = {
   },
   firstList: {
     key: "firstList",
-    href: "/first/list",
+    href: "/first-list",
     title: "初品測定一覧",
     icon: Table2,
     lead: "初品測定の記録を月・工場・品目で絞り込んで一覧し、CSVに出します",
@@ -203,12 +203,29 @@ export const MODULES: Record<ModuleKey, AppModule> = {
   },
 };
 
+/**
+ * 機能を用途ごとにまとめたもの。サイドバーの見出しと、ホームの「機能」一覧で同じ分け方を使う。
+ * ops / admin の機能は権限のある人にだけ出す（usable で絞る）。
+ */
+export interface ModuleGroup {
+  title: string;
+  note: string;
+  keys: ModuleKey[];
+}
+
+export const MODULE_GROUPS: ModuleGroup[] = [
+  { title: "現場の記録", note: "毎日の投入・袋の締めと初品の実測", keys: ["daily", "bags", "first", "firstList"] },
+  { title: "集計・照合", note: "月末にズレがないかを確かめる", keys: ["summary", "dashboard"] },
+  { title: "入力・取込", note: "生産管理部・調達部・管理者", keys: ["procurement", "mcframe", "dailyImport", "quality"] },
+  { title: "マスタ・設定", note: "生産管理部・調達部", keys: ["scales", "items", "settings"] },
+];
+
 /** 使える機能か（ops の機能は canOperate の人だけ、admin の機能は管理者だけ） */
 export const usable = (m: AppModule, canOperate: boolean, isAdmin = false) =>
   (!m.ops || canOperate) && (!m.admin || isAdmin);
 
 /**
- * 実際の業務の順番（ホームの①②③…と使い方の「はじめに」で共有する）。
+ * 実際の業務の順番（使い方の「はじめに」で使う）。
  * マスタを用意 → 現場で毎日記録 → 袋を締めて承認 → 初品を実測 → 月次の在庫・購入・売却を入力
  * → McFrameの加工数を取込 → 月間集計 → 照合、の順。
  */

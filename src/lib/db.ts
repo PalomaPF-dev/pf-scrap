@@ -2541,6 +2541,7 @@ export async function deleteQualitySheet(companyId: string, id: string): Promise
   await ensureSchema();
   const sql = getSql();
   await sql`DELETE FROM scrap_quality_sheets WHERE company_id = ${companyId} AND id = ${id}`;
+}
 
 // ===== 工場・職場マスタの管理（設定画面） =====
 

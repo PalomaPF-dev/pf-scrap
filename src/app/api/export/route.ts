@@ -223,7 +223,7 @@ export async function GET(req: NextRequest) {
       const factory = restrictedFactory ?? (factoryParam || null);
       const list = await listShipments(s.companyId, { factory, ym: ymParam });
       const rows: (string | number | null)[][] = [
-        ["ポリ箱番号", "出荷日", "送り元", "送り先", "種類", "出荷重量(kg)", "出荷者", "処理日", "受入重量(kg)", "差(kg)", "要確認", "処理した重量計", "処理した人", "メモ"],
+        ["ポリ箱番号", "出荷日", "送り元", "送り先", "種類", "総重量(kg)", "ポリ箱の重さ(kg)", "出荷重量(kg)", "出荷者", "処理日", "受入重量(kg)", "差(kg)", "要確認", "処理した重量計", "処理した人", "メモ"],
       ];
       for (const sh of list) {
         rows.push([
@@ -232,6 +232,8 @@ export async function GET(req: NextRequest) {
           sh.fromFactory,
           sh.toFactory,
           sh.hinshu,
+          sh.grossWeight ?? "",
+          sh.tareWeight ?? "",
           sh.weight,
           sh.shippedBy,
           sh.received?.date ?? "未処理",

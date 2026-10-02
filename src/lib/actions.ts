@@ -2414,7 +2414,10 @@ export async function createShipmentAction(input: {
   factory: string;
   shipDate: string;
   hinshu: string;
-  weight: unknown;
+  /** ポリ箱ごと量った総重量 */
+  grossWeight: unknown;
+  /** 空のポリ箱の重さ（事前に量った値） */
+  tareWeight: unknown;
   note?: string;
 }): Promise<ActionResult & { boxNo?: string }> {
   try {
@@ -2429,16 +2432,16 @@ export async function createShipmentAction(input: {
     const kinds = (await listScrapKinds(s.companyId)).filter((k) => k.active).map((k) => k.name);
     const hinshu = asStr(input.hinshu, 20);
     if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
-    const weight = toNum(input.weight);
-    if (!(weight > 0)) return fail("ポリ箱の重量を入力してください。");
-    if (weight > 1000) return fail("重量が大きすぎます（1,000 kg まで）。単位を確認してください。");
+    const w = shipWeights(input.grossWeight, input.tareWeight);
+    if ("error" in w) return fail(w.error);
     const affiliation = await getUserAffiliation(s.userId);
     const sh = await createShipment(s.companyId, {
       fromFactory: from,
       toFactory: route.toFactory,
       shipDate,
       hinshu,
-      weight: Math.round(weight * 1000) / 1000,
+      grossWeight: w.gross,
+      tareWeight: w.tare,
       shippedBy: [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" "),
       note: asStr(input.note ?? "", 200),
     });
@@ -2446,11 +2449,31 @@ export async function createShipmentAction(input: {
     return {
       ok: true,
       boxNo: sh.boxNo,
-      message: `出荷を登録しました。ポリ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
+      message: `スクラップ ${sh.weight} kg（総重量 ${w.gross} − ポリ箱 ${w.tare}）で出荷を登録しました。ポリ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
     };
   } catch (e) {
     return fail((e as Error).message);
   }
+}
+
+/**
+ * 出荷の重量を確かめる。総重量（ポリ箱込み）とポリ箱の重さから、スクラップ重量を出す。
+ * ポリ箱は空のときに事前に量っておく運用。
+ */
+function shipWeights(
+  grossRaw: unknown,
+  tareRaw: unknown
+): { error: string } | { gross: number; tare: number; net: number } {
+  const gross = toNumOrNull(grossRaw);
+  const tare = toNumOrNull(tareRaw);
+  if (gross === null || !(gross > 0)) return { error: "総重量（ポリ箱込み）を入力してください。" };
+  if (tare === null || tare < 0) return { error: "ポリ箱の重さ（空の重さ）を入力してください。" };
+  if (gross > 1000) return { error: "総重量が大きすぎます（1,000 kg まで）。単位を確認してください。" };
+  const net = Math.round((gross - tare) * 1000) / 1000;
+  if (!(net > 0)) {
+    return { error: `総重量 ${gross} kg がポリ箱の重さ ${tare} kg 以下です。値を確認してください。` };
+  }
+  return { gross: Math.round(gross * 1000) / 1000, tare: Math.round(tare * 1000) / 1000, net };
 }
 
 /** 送った側の人か管理者だけが、そのポリ箱を直せる。 */
@@ -2474,7 +2497,10 @@ async function assertCanEditShipment(
 export async function updateShipmentAction(input: {
   id: string;
   hinshu: string;
-  weight: unknown;
+  /** 総重量（ポリ箱込み）とポリ箱の重さ。導入直後の登録分（総重量なし）は weight を直す */
+  grossWeight?: unknown;
+  tareWeight?: unknown;
+  weight?: unknown;
   note?: string;
 }): Promise<ActionResult> {
   try {
@@ -2484,11 +2510,19 @@ export async function updateShipmentAction(input: {
     const kinds = (await listScrapKinds(s.companyId)).map((k) => k.name);
     const hinshu = asStr(input.hinshu, 20);
     if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
-    const weight = toNum(input.weight);
-    if (!(weight > 0) || weight > 1000) return fail("重量を正しく入力してください。");
+    let patch: { grossWeight: number | null; tareWeight: number | null; weight: number };
+    if (input.grossWeight !== undefined || input.tareWeight !== undefined) {
+      const w = shipWeights(input.grossWeight, input.tareWeight);
+      if ("error" in w) return fail(w.error);
+      patch = { grossWeight: w.gross, tareWeight: w.tare, weight: w.net };
+    } else {
+      const weight = toNum(input.weight);
+      if (!(weight > 0) || weight > 1000) return fail("重量を正しく入力してください。");
+      patch = { grossWeight: null, tareWeight: null, weight: Math.round(weight * 1000) / 1000 };
+    }
     const ok = await updateShipment(s.companyId, r.shipment.id, {
       hinshu,
-      weight: Math.round(weight * 1000) / 1000,
+      ...patch,
       note: asStr(input.note ?? "", 200),
     });
     if (!ok) return fail("処理済みになったため直せませんでした。");

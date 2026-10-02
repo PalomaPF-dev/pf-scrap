@@ -78,6 +78,16 @@ import {
   type Scale,
   type ScrapItem,
 } from "./db";
+import {
+  createShipment,
+  deleteShipment,
+  getShipment,
+  listShipRoutes,
+  setShipRoute,
+  shipmentsUsedElsewhere,
+  updateShipment,
+  type Shipment,
+} from "./db";
 import { isDateStr, isYmStr, normDateStr, normYm, todayStr, toNum, toNumOrNull } from "./format";
 import { parseItemRef } from "./scrapTypes";
 
@@ -450,6 +460,29 @@ export async function saveDailyRecordAction(input: {
       .filter(Boolean);
     const reads = await getScaleReads(s.companyId, readIds);
 
+    // ===== 他工場から届いたポリ箱 =====
+    // ポリ箱を処理した明細は、送った工場のスクラップとして照合に回る。
+    // 1つのポリ箱は1回しか処理できない（別の日・別の明細で処理済みなら弾く）。
+    const shipmentIds = (Array.isArray(input.entries) ? input.entries : [])
+      .map((e) => asStr(e.shipmentId ?? "", 50))
+      .filter(Boolean);
+    if (new Set(shipmentIds).size !== shipmentIds.length) {
+      return fail("同じポリ箱を2回記録しています。");
+    }
+    const shipments = new Map<string, Shipment>();
+    for (const id of shipmentIds) {
+      const sh = await getShipment(s.companyId, id);
+      if (!sh) return fail("ポリ箱が見つかりません。画面を再読み込みしてください。");
+      if (sh.toFactory !== factory) {
+        return fail(`ポリ箱「${sh.boxNo}」の送り先は ${sh.toFactory} です。`);
+      }
+      shipments.set(id, sh);
+    }
+    const usedElsewhere = await shipmentsUsedElsewhere(s.companyId, shipmentIds, prev?.id ?? null);
+    for (const id of usedElsewhere) {
+      return fail(`ポリ箱「${shipments.get(id)?.boxNo ?? id}」は別の日の記録で処理済みです。`);
+    }
+
     // 記録者の表示名。「大口工場 内胴 大口太郎」のように所属を前に付ける。
     const affiliation = await getUserAffiliation(s.userId);
     const recorder = [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" ");
@@ -493,6 +526,15 @@ export async function saveDailyRecordAction(input: {
         }
       }
       if (!kindNames.includes(kind)) kind = kindNames[0] ?? SCALE_KIND_LIST[0];
+
+      // ポリ箱は種類ごとに分けて送られてくる。違う種類の箱に入れたら止める。
+      const shipmentId = asStr(e.shipmentId ?? "", 50) || null;
+      const shipment = shipmentId ? shipments.get(shipmentId)! : null;
+      if (shipment && shipment.hinshu !== kind) {
+        return fail(
+          `ポリ箱「${shipment.boxNo}」は ${shipment.hinshu} です。${kind} の箱（${scaleName}）には記録できません。`
+        );
+      }
 
       const bagId = asStr(e.bagId ?? "", 50) || null;
       const cumKey = bagId ?? scaleId ?? scaleName;
@@ -563,6 +605,9 @@ export async function saveDailyRecordAction(input: {
         kikai: asStr(e.kikai, 50),
         zairyo: asStr(e.zairyo, 50),
         kotei: asStr(e.kotei, 50),
+        // 発生元はポリ箱からだけ決める（画面から任意の工場名を入れさせない）
+        originFactory: shipment ? shipment.fromFactory : "",
+        shipmentId,
       });
     }
     await saveDailyRecord(s.companyId, {
@@ -588,6 +633,7 @@ export async function saveDailyRecordAction(input: {
     revalidatePath("/daily");
     revalidatePath("/");
     revalidatePath("/dashboard");
+    if (shipments.size > 0 || prev?.entries.some((e) => e.shipmentId)) revalidatePath("/shipments");
     const total = entries.reduce((t, e) => t + e.weight, 0);
     const revokedMsg = revoked.length
       ? `（袋 ${revoked.map((b) => b.bagNo).join("・")} は中身が変わったため承認を外しました。再度承認してください）`
@@ -2310,5 +2356,160 @@ export async function importDailyExcelAction(input: {
     };
   } catch (e) {
     return importFailed((e as Error).message);
+  }
+}
+
+// ===== 工場間のポリ箱送付 =====
+
+function revalidateShipmentPages() {
+  for (const p of ["/shipments", "/daily", "/dashboard", "/settings"]) revalidatePath(p);
+}
+
+/**
+ * スクラップの送り先を設定する（生産管理部・調達部と管理者）。
+ * toFactory が空なら「自工場で処理」に戻す。
+ */
+export async function setShipRouteAction(fromFactory: string, toFactory: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const from = asStr(fromFactory, 50);
+    const to = asStr(toFactory, 50);
+    if (!from) return fail("工場が指定されていません。");
+    if (to === from) return fail("自工場には送れません。");
+    // 送り先がさらに別の工場へ送っていると、どこで処理したか分からなくなる
+    if (to) {
+      const routes = await listShipRoutes(s.companyId);
+      if (routes.some((r) => r.fromFactory === to)) {
+        return fail(`${to} は他の工場へ送る設定になっています。処理する工場を送り先にしてください。`);
+      }
+      if (routes.some((r) => r.toFactory === from)) {
+        return fail(`${from} は他の工場から受け入れています。受け入れている工場は送る側にできません。`);
+      }
+    }
+    await setShipRoute(s.companyId, from, to);
+    revalidateShipmentPages();
+    return {
+      ok: true,
+      message: to ? `${from} のスクラップは ${to} へ送る設定にしました。` : `${from} は自工場で処理する設定にしました。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 送る側の工場（所属工場の人は所属工場に固定）。 */
+async function shippingFactory(
+  s: Awaited<ReturnType<typeof requireEntitledSession>>,
+  requested: string
+): Promise<string> {
+  const view = await getFactoryView(s);
+  return view.restricted && view.factory ? view.factory : asStr(requested, 50);
+}
+
+/**
+ * ポリ箱を出荷として登録する（送る側で量った重量）。箱に書く番号を返す。
+ * 出荷日は既定で当日。前日分を翌朝まとめて登録することもあるので、過去日は受け付ける。
+ */
+export async function createShipmentAction(input: {
+  factory: string;
+  shipDate: string;
+  hinshu: string;
+  weight: unknown;
+  note?: string;
+}): Promise<ActionResult & { boxNo?: string }> {
+  try {
+    const s = await requireEntitledSession();
+    const from = await shippingFactory(s, input.factory);
+    if (!from) return fail("工場を選んでください。");
+    const route = (await listShipRoutes(s.companyId)).find((r) => r.fromFactory === from);
+    if (!route) return fail(`${from} は送り先が設定されていません。設定画面で送り先を決めてください。`);
+    const shipDate = asStr(input.shipDate, 10);
+    if (!isDateStr(shipDate)) return fail("出荷日を入力してください。");
+    if (shipDate > todayStr()) return fail("出荷日に未来の日付は入れられません。");
+    const kinds = (await listScrapKinds(s.companyId)).filter((k) => k.active).map((k) => k.name);
+    const hinshu = asStr(input.hinshu, 20);
+    if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
+    const weight = toNum(input.weight);
+    if (!(weight > 0)) return fail("ポリ箱の重量を入力してください。");
+    if (weight > 1000) return fail("重量が大きすぎます（1,000 kg まで）。単位を確認してください。");
+    const affiliation = await getUserAffiliation(s.userId);
+    const sh = await createShipment(s.companyId, {
+      fromFactory: from,
+      toFactory: route.toFactory,
+      shipDate,
+      hinshu,
+      weight: Math.round(weight * 1000) / 1000,
+      shippedBy: [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" "),
+      note: asStr(input.note ?? "", 200),
+    });
+    revalidateShipmentPages();
+    return {
+      ok: true,
+      boxNo: sh.boxNo,
+      message: `出荷を登録しました。ポリ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 送った側の人か管理者だけが、そのポリ箱を直せる。 */
+async function assertCanEditShipment(
+  s: Awaited<ReturnType<typeof requireEntitledSession>>,
+  id: string
+): Promise<{ error: string } | { shipment: Shipment }> {
+  const sh = await getShipment(s.companyId, asStr(id, 50));
+  if (!sh) return { error: "ポリ箱が見つかりません。" };
+  const restriction = await getFactoryRestriction(s);
+  if (s.role !== "admin" && restriction.restricted && restriction.factory !== sh.fromFactory) {
+    return { error: `送った工場（${sh.fromFactory}）の人だけが直せます。` };
+  }
+  if (sh.received) {
+    return { error: `ポリ箱「${sh.boxNo}」は ${sh.toFactory} で処理済みのため直せません。` };
+  }
+  return { shipment: sh };
+}
+
+/** 未処理のポリ箱の重量・種類を直す。 */
+export async function updateShipmentAction(input: {
+  id: string;
+  hinshu: string;
+  weight: unknown;
+  note?: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    const r = await assertCanEditShipment(s, input.id);
+    if ("error" in r) return fail(r.error);
+    const kinds = (await listScrapKinds(s.companyId)).map((k) => k.name);
+    const hinshu = asStr(input.hinshu, 20);
+    if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
+    const weight = toNum(input.weight);
+    if (!(weight > 0) || weight > 1000) return fail("重量を正しく入力してください。");
+    const ok = await updateShipment(s.companyId, r.shipment.id, {
+      hinshu,
+      weight: Math.round(weight * 1000) / 1000,
+      note: asStr(input.note ?? "", 200),
+    });
+    if (!ok) return fail("処理済みになったため直せませんでした。");
+    revalidateShipmentPages();
+    return { ok: true, message: `ポリ箱「${r.shipment.boxNo}」を直しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 未処理のポリ箱を取り消す（送らなかった・二重に登録した）。 */
+export async function deleteShipmentAction(id: string): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    const r = await assertCanEditShipment(s, id);
+    if ("error" in r) return fail(r.error);
+    const ok = await deleteShipment(s.companyId, r.shipment.id);
+    if (!ok) return fail("処理済みになったため取り消せませんでした。");
+    revalidateShipmentPages();
+    return { ok: true, message: `ポリ箱「${r.shipment.boxNo}」を取り消しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
   }
 }

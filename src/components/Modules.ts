@@ -13,6 +13,7 @@ import {
   PackageCheck,
   QrCode,
   Scale,
+  Truck,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -29,6 +30,7 @@ export type ModuleKey =
   | "daily"
   | "dailyImport"
   | "bags"
+  | "shipments"
   | "first"
   | "firstList"
   | "quality"
@@ -95,6 +97,15 @@ export const MODULES: Record<ModuleKey, AppModule> = {
     lead: "袋を交換するたびに締めた「この袋は◯◯kgでした」を、月ごとに一覧・承認します",
     points: ["締めの重量と記録した投入の合計の差", "袋ごとの承認", "袋の一覧・明細のCSV"],
     cta: "袋の記録を見る",
+  },
+  shipments: {
+    key: "shipments",
+    href: "/shipments",
+    title: "ポリ箱（工場間）",
+    icon: Truck,
+    lead: "他工場へ送るスクラップをポリ箱ごとに量って出荷し、受け入れた工場で量った重量と突き合わせます",
+    points: ["出荷するとポリ箱に書く番号が出る", "受け入れ側は日次記録でポリ箱を選んで投入", "未処理の箱と重量の差が一覧で分かる"],
+    cta: "ポリ箱を開く",
   },
   first: {
     key: "first",
@@ -214,7 +225,7 @@ export interface ModuleGroup {
 }
 
 export const MODULE_GROUPS: ModuleGroup[] = [
-  { title: "現場の記録", note: "毎日の投入・袋の締めと初品の実測", keys: ["daily", "bags", "first", "firstList"] },
+  { title: "現場の記録", note: "毎日の投入・袋の締めと初品の実測", keys: ["daily", "bags", "shipments", "first", "firstList"] },
   { title: "集計・照合", note: "月末にズレがないかを確かめる", keys: ["summary", "dashboard"] },
   { title: "入力・取込", note: "生産管理部・調達部・管理者", keys: ["procurement", "mcframe", "dailyImport", "quality"] },
   { title: "マスタ・設定", note: "生産管理部・調達部", keys: ["scales", "items", "settings"] },

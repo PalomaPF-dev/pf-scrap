@@ -316,8 +316,21 @@ export interface MonthlySummary {
   mcframe: { dayRows: number; monthRows: number };
   /** 購入・売却に日次調達を使っているときの入力状況（何日分入っているか） */
   procureCoverage: { entered: number; inMonth: number; used: boolean } | null;
-  daily: { total: number; byKind: Record<string, number>; days: number };
+  /**
+   * total … 発生元の工場で数えた日次記録（理論との照合用）
+   * processed … この工場の箱で量った分（売却との突合用）。incoming/outgoing は工場間のポリ箱
+   */
+  daily: {
+    total: number;
+    byKind: Record<string, number>;
+    days: number;
+    processed: number;
+    incoming: number;
+    outgoing: number;
+  };
   baikyaku: number | null;
+  /** 売却のうち自工場分（他工場から届いたポリ箱の分を除く）。理論との比較に使う */
+  baikyakuOwn: number | null;
   diff6: number | null;
   rate6: number | null;
   diff7sell: number | null;
@@ -488,6 +501,10 @@ export async function monthlySummary(
     procure.cnt > 0 && procure.baikyaku !== null ? procure.baikyaku : (inp?.baikyaku ?? null);
   const dailyTotal = daily.total;
   const scrapTheo = perKubun["全体"].scrapTheo;
+  // 売却は処理した工場（大口など）でまとめて行う。売却と比べるのは、この工場の箱で量った量。
+  // 理論と比べる売却は、他工場から届いた分を除いた「自工場分」にする。
+  const processed = daily.processed;
+  const baikyakuOwn = baikyaku !== null ? baikyaku - daily.incoming : null;
 
   return {
     ym,
@@ -504,11 +521,12 @@ export async function monthlySummary(
     daily,
     baikyaku,
     // ⑥ 売却 vs 日次記録
-    diff6: baikyaku !== null ? baikyaku - dailyTotal : null,
-    rate6: baikyaku !== null && dailyTotal ? (baikyaku - dailyTotal) / dailyTotal : null,
+    diff6: baikyaku !== null ? baikyaku - processed : null,
+    rate6: baikyaku !== null && processed ? (baikyaku - processed) / processed : null,
     // ⑦ 売却 vs 理論 (Excel「売量vs理論」) / 日次 vs 理論
-    diff7sell: baikyaku !== null && scrapTheo !== null ? baikyaku - scrapTheo : null,
-    rate7sell: baikyaku !== null && scrapTheo ? (baikyaku - scrapTheo) / scrapTheo : null,
+    baikyakuOwn,
+    diff7sell: baikyakuOwn !== null && scrapTheo !== null ? baikyakuOwn - scrapTheo : null,
+    rate7sell: baikyakuOwn !== null && scrapTheo ? (baikyakuOwn - scrapTheo) / scrapTheo : null,
     diff7daily: scrapTheo !== null ? dailyTotal - scrapTheo : null,
     rate7daily: scrapTheo ? (dailyTotal - scrapTheo) / scrapTheo : null,
   };
@@ -550,7 +568,7 @@ export async function yearSummary(
       finished: s.itemRows.length ? g.finished : null,
       scrapTheo: s.itemRows.length ? g.scrapTheo : null,
       baikyaku: s.baikyaku,
-      daily: s.daily.days ? s.daily.total : null,
+      daily: s.daily.days || s.daily.outgoing ? s.daily.total : null,
       diff7sell: s.diff7sell,
       diff6: s.diff6,
     });

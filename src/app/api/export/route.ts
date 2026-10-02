@@ -16,6 +16,9 @@ import {
   listItems,
   listScales,
   listScrapKinds,
+  listShipments,
+  shipmentGap,
+  shipmentGapLarge,
 } from "@/lib/db";
 import { monthlyItemRows, yearSummary } from "@/lib/calc";
 import { toCsv } from "@/lib/csv";
@@ -30,6 +33,7 @@ export const dynamic = "force-dynamic";
  *   GET /api/export?type=bags&ym=YYYY-MM      … 袋の一覧（締めた月）
  *   GET /api/export?type=bag-entries&ym=YYYY-MM … 袋別の投入明細
  *   GET /api/export?type=workplaces&ym=YYYY-MM  … 職場別の月間集計
+ *   GET /api/export?type=shipments&ym=YYYY-MM   … 工場間のポリ箱（出荷・処理・重量差）
  *   GET /api/export?type=mcframe&ym=YYYY-MM   … 品目別の理論スクラップ計算結果
  *   GET /api/export?type=recon&year=YYYY      … 年間照合一覧
  *   GET /api/export?type=first&ym=YYYY-MM|all … 初品測定一覧（工場・品目・状態で絞り込み可）
@@ -211,6 +215,35 @@ export async function GET(req: NextRequest) {
       }
       const suffix = [factory, kind].filter(Boolean).join("_");
       return csvResponse(`職場別集計_${ymParam}${suffix ? `_${suffix}` : ""}.csv`, rows);
+    }
+
+    if (type === "shipments") {
+      if (!isYmStr(ymParam)) return NextResponse.json({ message: "ymが必要です" }, { status: 400 });
+      // 所属工場の人は、自工場が送った・受け入れたポリ箱だけ（画面と同じ範囲）
+      const factory = restrictedFactory ?? (factoryParam || null);
+      const list = await listShipments(s.companyId, { factory, ym: ymParam });
+      const rows: (string | number | null)[][] = [
+        ["ポリ箱番号", "出荷日", "送り元", "送り先", "種類", "出荷重量(kg)", "出荷者", "処理日", "受入重量(kg)", "差(kg)", "要確認", "処理した重量計", "処理した人", "メモ"],
+      ];
+      for (const sh of list) {
+        rows.push([
+          sh.boxNo,
+          sh.shipDate,
+          sh.fromFactory,
+          sh.toFactory,
+          sh.hinshu,
+          sh.weight,
+          sh.shippedBy,
+          sh.received?.date ?? "未処理",
+          sh.received?.weight ?? "",
+          shipmentGap(sh) ?? "",
+          shipmentGapLarge(sh) ? "要確認" : "",
+          sh.received?.scaleName ?? "",
+          sh.received?.kirokusha ?? "",
+          sh.note,
+        ]);
+      }
+      return csvResponse(`ポリ箱_${ymParam}${factory ? `_${factory}` : ""}.csv`, rows);
     }
 
     if (type === "mcframe") {

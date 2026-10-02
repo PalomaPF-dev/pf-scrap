@@ -12,7 +12,11 @@ import {
   listScaleReads,
   listScales,
   listScrapKinds,
+  getShipment,
+  listPendingShipments,
+  listShipRoutes,
   type DailyRecord,
+  type Shipment,
   type Scale,
   type ScaleRead,
   type ScrapBag,
@@ -52,6 +56,9 @@ export default async function DailyPage({
   let myWorkplace: string;
   let affiliation: string | null;
   let bom: DailyBom;
+  // 他工場から届くポリ箱（この工場が受け入れ側のとき）。未処理の箱と、この日に処理済みの箱
+  let shipFrom: string[] = [];
+  let shipments: Shipment[] = [];
   try {
     const restriction = await getFactoryView(session);
     const factories = await listFactoryOptions(session.companyId);
@@ -87,6 +94,17 @@ export default async function DailyPage({
       // McFrameの日別加工数 × 単品完成重量（初品実測を優先）＝ その日の完成品重量
       dailyBomTotals(session.companyId, date, factory),
     ]);
+    shipFrom = (await listShipRoutes(session.companyId))
+      .filter((r) => r.toFactory === factory)
+      .map((r) => r.fromFactory);
+    const linkedIds = (record?.entries ?? []).map((e) => e.shipmentId).filter((id): id is string => !!id);
+    if (shipFrom.length > 0 || linkedIds.length > 0) {
+      const [pendingList, linked] = await Promise.all([
+        listPendingShipments(session.companyId, factory),
+        Promise.all(linkedIds.map((id) => getShipment(session.companyId, id))),
+      ]);
+      shipments = [...pendingList, ...linked.filter((x): x is Shipment => x !== null)];
+    }
   } catch (e) {
     console.error("[daily]", e);
     return (
@@ -103,7 +121,10 @@ export default async function DailyPage({
   // 記録者は「所属（部署／工場 職場）＋氏名」。保存時にサーバーでも同じ規則で組み立てる。
   const recorder = [affiliation, session.userName].filter(Boolean).join(" ");
   // 当日の記録スクラップ合計（理論値との突合に使う）
-  const dayTotal = (record?.entries ?? []).reduce((t, e) => t + e.weight, 0);
+  // 他工場から届いたポリ箱の分は、送った工場の理論と比べるので除く
+  const dayTotal = (record?.entries ?? [])
+    .filter((e) => !e.originFactory || e.originFactory === factory)
+    .reduce((t, e) => t + e.weight, 0);
 
   return (
     <div className="p-4 sm:p-6">
@@ -126,6 +147,8 @@ export default async function DailyPage({
         bagStartOn={bagStartOn}
         workplaces={workplaces}
         myWorkplace={myWorkplace}
+        shipFrom={shipFrom}
+        shipments={shipments}
         kinds={kinds}
         userName={recorder}
         isAdmin={isAdmin}

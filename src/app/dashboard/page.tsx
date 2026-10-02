@@ -72,9 +72,11 @@ export default async function DashboardPage({
 
   const g = s.perKubun["全体"];
   const dailyTotal = s.daily.total;
+  // 売却と比べるのは、この工場の箱で量った量（他工場から届いたポリ箱を含む）
+  const processed = s.daily.processed;
   // 差異5%超は要確認としてハイライトする
   const warn6 =
-    s.diff6 !== null && dailyTotal > 0 && Math.abs(s.diff6) / dailyTotal > 0.05;
+    s.diff6 !== null && processed > 0 && Math.abs(s.diff6) / processed > 0.05;
   const warn7 =
     s.diff7sell !== null && g.scrapTheo ? Math.abs(s.diff7sell) / Math.abs(g.scrapTheo) > 0.05 : false;
 
@@ -187,14 +189,37 @@ export default async function DashboardPage({
             <tbody>
               <tr>
                 <th className={th}>スクラップ売却数量（⑤入力）</th>
-                <td className={tdNum}>{s.baikyaku !== null ? `${fmt(s.baikyaku)} kg` : "未入力"}</td>
+                <td className={tdNum}>
+                  {s.baikyaku !== null ? `${fmt(s.baikyaku)} kg` : s.daily.outgoing > 0 ? "送り先で計上" : "未入力"}
+                </td>
                 <td className={td}></td>
               </tr>
               <tr>
-                <th className={th}>日次記録スクラップ合計（①）</th>
-                <td className={tdNum}>{fmt(dailyTotal)} kg</td>
+                <th className={th}>
+                  日次記録スクラップ合計（①）
+                  {s.daily.incoming > 0 && <div className="text-xs font-normal">この工場の箱で量った量</div>}
+                </th>
+                <td className={tdNum}>{fmt(processed)} kg</td>
                 <td className={td}>{s.daily.days}日分</td>
               </tr>
+              {s.daily.incoming > 0 && (
+                <tr>
+                  <th className={`${th} font-normal`}>　うち他工場から届いたポリ箱</th>
+                  <td className={tdNum}>{fmt(s.daily.incoming)} kg</td>
+                  <td className={td}>
+                    <Link href={`/shipments?ym=${ym}`} className="text-xs underline">
+                      ポリ箱の一覧
+                    </Link>
+                  </td>
+                </tr>
+              )}
+              {s.daily.outgoing > 0 && (
+                <tr>
+                  <th className={`${th} font-normal`}>他工場へ送って処理した分</th>
+                  <td className={tdNum}>{fmt(s.daily.outgoing)} kg</td>
+                  <td className={td}>売却は送り先で計上</td>
+                </tr>
+              )}
               <tr>
                 <th className={th}>差異（売却 − 日次記録）</th>
                 <td className={`${tdNum} ${warn6 ? "bg-[#fdecea] text-[#dc000c]" : s.diff6 !== null ? "bg-[#eef4ee]" : ""}`}>
@@ -217,6 +242,13 @@ export default async function DashboardPage({
                   <MethodBadge method={g.method} />
                 </td>
               </tr>
+              {s.daily.incoming > 0 && s.baikyakuOwn !== null && (
+                <tr>
+                  <th className={`${th} font-normal`}>売却のうち自工場分（他工場のポリ箱を除く）</th>
+                  <td className={tdNum}>{fmt(s.baikyakuOwn)} kg</td>
+                  <td className={td}></td>
+                </tr>
+              )}
               <tr>
                 <th className={th}>売却 − 理論（売量vs理論）</th>
                 <td className={`${tdNum} ${warn7 ? "bg-[#fdecea] text-[#dc000c]" : s.diff7sell !== null ? "bg-[#eef4ee]" : ""}`}>
@@ -225,7 +257,14 @@ export default async function DashboardPage({
                 <td className={td}>{s.rate7sell !== null ? `率 ${fmtPct(s.rate7sell)}` : ""}</td>
               </tr>
               <tr>
-                <th className={th}>日次記録 − 理論</th>
+                <th className={th}>
+                  日次記録 − 理論
+                  {(s.daily.incoming > 0 || s.daily.outgoing > 0) && (
+                    <div className="text-xs font-normal">
+                      日次記録はこの工場のスクラップ {fmt(dailyTotal)} kg（他工場へ送った分を含み、届いた分を除く）
+                    </div>
+                  )}
+                </th>
                 <td className={tdNum}>{s.diff7daily !== null ? `${fmt(s.diff7daily)} kg` : "-"}</td>
                 <td className={td}>{s.rate7daily !== null ? `率 ${fmtPct(s.rate7daily)}` : ""}</td>
               </tr>

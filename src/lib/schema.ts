@@ -515,4 +515,44 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE portal_factories ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'portal'`);
   await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`);
   await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'portal'`);
+
+  // ===== 工場間のポリ箱送付（2026-10） =====
+  // 本社工場・第二工場などはスクラップをポリ箱に入れて毎日大口工場へ送り、
+  // 大口のスクラップ箱で処理（投入・売却）する。送る側でポリ箱ごとに計量して出荷し、
+  // 大口でも投入前に量って突き合わせる。
+  //
+  // 送り先（どの工場がどこへ送るか）。送らない工場は行が無い＝自工場で処理。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_ship_routes (
+      company_id   UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      from_factory TEXT NOT NULL,
+      to_factory   TEXT NOT NULL,
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (company_id, from_factory)
+    )`);
+  // ポリ箱1つ＝1行。box_no は箱に書く番号（例: 本社工場-1002-03）。
+  // 処理済みかどうかは持たない。日次記録の明細（shipment_id）から引く。
+  // 明細は保存のたびに入れ直すので、状態を別に持つと食い違うため。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_shipments (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id   UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      box_no       TEXT NOT NULL,
+      from_factory TEXT NOT NULL,
+      to_factory   TEXT NOT NULL,
+      ship_date    DATE NOT NULL,
+      hinshu       TEXT NOT NULL,
+      weight       NUMERIC NOT NULL,
+      shipped_by   TEXT NOT NULL DEFAULT '',
+      note         TEXT NOT NULL DEFAULT '',
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, box_no)
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_to_idx ON scrap_shipments(company_id, to_factory, ship_date)`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_from_idx ON scrap_shipments(company_id, from_factory, ship_date)`);
+  // 明細の発生元工場（空＝記録した工場）と、処理したポリ箱。
+  // 1つのポリ箱を2回処理しないよう、ポリ箱は明細1件にしか結べない。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS origin_factory TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS shipment_id UUID`);
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_daily_entries_shipment_uidx ON scrap_daily_entries(shipment_id) WHERE shipment_id IS NOT NULL`);
 }

@@ -10,6 +10,7 @@ import {
   Save,
   Sparkles,
   Stamp,
+  Truck,
   Undo2,
 } from "lucide-react";
 import {
@@ -27,6 +28,9 @@ import {
   type ScalePhotoResult,
   type ScrapBag,
   type ScrapKind,
+  type Shipment,
+  shipmentGap,
+  shipmentGapLarge,
 } from "@/lib/scrapTypes";
 import { fmt, fmtPct, toNum, toNumOrNull } from "@/lib/format";
 import DateNav from "@/components/DateNav";
@@ -66,6 +70,8 @@ type EntryDraft = {
   kikai: string;
   zairyo: string;
   kotei: string;
+  /** 他工場から届いたポリ箱を投入した行だけ。発生元の工場はサーバーがポリ箱から決める */
+  shipmentId: string | null;
 };
 
 /** モバイルでの拡大表示を避けるため、入力は 16px（text-base）を基準にする */
@@ -213,6 +219,8 @@ export default function DailyRecordForm({
   bagStartOn,
   workplaces,
   myWorkplace,
+  shipFrom = [],
+  shipments = [],
   kinds,
   userName,
   isAdmin,
@@ -235,6 +243,10 @@ export default function DailyRecordForm({
   workplaces: string[];
   /** ログインユーザーの所属職場（候補にあれば最初から選んでおく） */
   myWorkplace: string;
+  /** この工場へポリ箱を送ってくる工場。空なら他工場の受け入れは無い */
+  shipFrom?: string[];
+  /** 未処理のポリ箱と、この日の記録で処理済みのポリ箱 */
+  shipments?: Shipment[];
   /** スクラップ種類（設定マスタ。並び順＝表示順・色の順） */
   kinds: ScrapKind[];
   userName: string;
@@ -271,6 +283,7 @@ export default function DailyRecordForm({
       kikai: e.kikai ?? "",
       zairyo: e.zairyo ?? "",
       kotei: e.kotei ?? "",
+      shipmentId: e.shipmentId ?? null,
     }))
   );
   const [kaishu, setKaishu] = useState(
@@ -296,6 +309,13 @@ export default function DailyRecordForm({
 
   // ===== 計量入力（AI読取） =====
   const [ijo, setIjo] = useState("");
+
+  // ===== 他工場から届いたポリ箱 =====
+  // 受け入れる工場だけ「自工場のスクラップ」と「届いたポリ箱」を切り替えられる。
+  // ポリ箱を選んで投入すると、その分は送った工場のスクラップとして照合に回る。
+  const [source, setSource] = useState<"own" | "poly">("own");
+  const [pickedShipmentId, setPickedShipmentId] = useState<string | null>(null);
+  const shipmentById = useMemo(() => new Map(shipments.map((sh) => [sh.id, sh])), [shipments]);
 
   // ===== どの職場のスクラップか =====
   // 同じ人は同じ職場のスクラップを続けて記録するので、選んだ職場は端末に覚えておき、
@@ -593,7 +613,25 @@ export default function DailyRecordForm({
       setMessage({ ok: false, text: "投入先のスクラップ箱（重量計）を選択してください。" });
       return;
     }
-    if (workplaces.length > 0 && !workplace) {
+    const poly = source === "poly";
+    const shipment = poly && pickedShipmentId ? shipmentById.get(pickedShipmentId) ?? null : null;
+    if (poly && !shipment) {
+      setMessage({
+        ok: false,
+        title: "ポリ箱を選んでください",
+        text: "どのポリ箱を投入するか、番号を選んでから記録してください。",
+      });
+      return;
+    }
+    if (shipment && shipment.hinshu !== selectedScale.kind) {
+      setMessage({
+        ok: false,
+        title: "種類が違います",
+        text: `ポリ箱「${shipment.boxNo}」は ${shipment.hinshu} です。${shipment.hinshu} のスクラップ箱を選んでください。`,
+      });
+      return;
+    }
+    if (!poly && workplaces.length > 0 && !workplace) {
       setMessage({
         ok: false,
         title: "職場を選んでください",
@@ -660,10 +698,12 @@ export default function DailyRecordForm({
         // 発生元はExcelの記録票にしか無い項目（新しい画面では入力しない）
         // どの職場のスクラップか。紙の記録票の「部署」欄と同じ列に入れて、
         // 取り込んだ過去の記録と同じ切り口で集計できるようにする。
-        busho: workplace,
+        // 届いたポリ箱は職場ではなく、送ってきた工場（ポリ箱）で記録する
+        busho: shipment ? "" : workplace,
         kikai: "",
         zairyo: "",
         kotei: "",
+        shipmentId: shipment?.id ?? null,
       },
     ];
     setEntries(next);
@@ -674,17 +714,36 @@ export default function DailyRecordForm({
     // 記録したらそのまま保存する。以前は「記録する」→「保存」の2操作で、
     // 同じ見た目のボタンが並んで押し間違いが起きていた。保存に失敗したときだけ
     // 未保存として残り、画面下の「保存」で送り直せる。
-    setMessage({ ok: true, title: `${fmt(weight)} kg を記録しました`, text: "保存しています…" });
+    // ポリ箱は送った工場で量った重量と突き合わせる
+    const gapText = shipment
+      ? (() => {
+          const gap = Math.round(((weight ?? 0) - shipment.weight) * 1000) / 1000;
+          return `ポリ箱「${shipment.boxNo}」: ${shipment.fromFactory}で ${fmt(shipment.weight)} kg → ここで ${fmt(weight)} kg（差 ${gap > 0 ? "+" : ""}${fmt(gap)} kg）。`;
+        })()
+      : "";
+    const gapLarge = shipment
+      ? shipmentGapLarge({ ...shipment, received: { date, weight: weight ?? 0, scaleName: "", kirokusha: "" } })
+      : false;
+    if (shipment) setPickedShipmentId(null);
+    setMessage({ ok: true, title: `${fmt(weight)} kg を記録しました`, text: `${gapText}保存しています…` });
     startTransition(async () => {
       const res = await saveDailyRecordAction(buildPayload(next));
       if (res.ok) {
         setSavedCount(next.length);
         setFieldsDirty(false);
-        setMessage({
-          ok: true,
-          title: `${fmt(weight)} kg を記録しました`,
-          text: "保存しました。次の投入に進めます。",
-        });
+        setMessage(
+          gapLarge
+            ? {
+                ok: false,
+                title: `${fmt(weight)} kg を記録しました（重量差を確認してください）`,
+                text: `${gapText}送った工場で量った重量と差があります。ポリ箱の取り違え・量り間違いがないか確かめてください。`,
+              }
+            : {
+                ok: true,
+                title: `${fmt(weight)} kg を記録しました`,
+                text: `${gapText}保存しました。次の投入に進めます。`,
+              }
+        );
         router.refresh();
       } else {
         setMessage({
@@ -724,6 +783,7 @@ export default function DailyRecordForm({
         kikai: e.kikai,
         zairyo: e.zairyo,
         kotei: e.kotei,
+        shipmentId: e.shipmentId,
       })),
     };
   }
@@ -1075,7 +1135,89 @@ export default function DailyRecordForm({
             どの職場のスクラップか。前回選んだ職場（無ければ所属職場）が最初から選ばれている。
             ボタンの色は読み取り（青）・記録（オレンジ）と重ならないよう、濃いグレーにする。
           */}
-          {workplaces.length > 0 && (
+          {shipFrom.length > 0 && (
+            <div className="mb-4">
+              <div className="mb-1.5 text-sm font-bold text-[#333333]">どこのスクラップですか</div>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="どこのスクラップか">
+                {(
+                  [
+                    ["own", `${factory}（自工場）`],
+                    ["poly", "他工場から届いたポリ箱"],
+                  ] as const
+                ).map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    role="radio"
+                    aria-checked={source === v}
+                    onClick={() => {
+                      setSource(v);
+                      setPickedShipmentId(null);
+                    }}
+                    className={`inline-flex h-11 items-center gap-1.5 rounded-lg border px-4 text-base font-semibold sm:h-10 sm:text-sm ${
+                      source === v
+                        ? "border-[#333333] bg-[#333333] text-white"
+                        : "border-[#cfcac3] bg-white text-[#555555] hover:bg-[#f7f7f5]"
+                    }`}
+                  >
+                    {v === "poly" && <Truck className="h-4 w-4" />}
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {source === "poly" &&
+                (() => {
+                  // まだ処理していないポリ箱（この画面で記録済みのものは除く）
+                  const usedIds = new Set(entries.map((e) => e.shipmentId).filter(Boolean));
+                  const open = shipments.filter((sh) => !sh.received && !usedIds.has(sh.id));
+                  const fit = selectedScale ? open.filter((sh) => sh.hinshu === selectedScale.kind) : open;
+                  const otherKind = open.length - fit.length;
+                  return (
+                    <div className="mt-3">
+                      <div className="mb-1.5 text-sm font-bold text-[#333333]">
+                        投入するポリ箱の番号を選んでください
+                      </div>
+                      {fit.length === 0 ? (
+                        <p className="rounded-lg bg-[#fff3e0] px-3 py-2 text-sm text-[#a15c00]">
+                          {open.length === 0
+                            ? `届いているポリ箱はありません（${shipFrom.join("・")}で出荷を登録すると出ます）。`
+                            : `${selectedScale?.kind ?? ""} のポリ箱はありません。`}
+                        </p>
+                      ) : (
+                        <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="ポリ箱">
+                          {fit.map((sh) => (
+                            <button
+                              key={sh.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={pickedShipmentId === sh.id}
+                              onClick={() => setPickedShipmentId(sh.id)}
+                              className={`rounded-xl border-2 px-3 py-2 text-left ${
+                                pickedShipmentId === sh.id
+                                  ? "border-[#333333] bg-[#f0f0ee]"
+                                  : "border-[#e5e5e5] bg-white hover:bg-[#f7f7f5]"
+                              }`}
+                            >
+                              <div className="font-mono text-base font-bold text-[#333333] sm:text-sm">{sh.boxNo}</div>
+                              <div className="text-xs text-[#707070]">
+                                {sh.fromFactory} ／ {sh.shipDate} 出荷 ／ {sh.hinshu} ／ 出荷時 {fmt(sh.weight)} kg
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {otherKind > 0 && (
+                        <p className="mt-1.5 text-xs text-[#707070]">
+                          ほかの種類のポリ箱が {otherKind} 箱あります。その種類のスクラップ箱を選ぶと出ます。
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+            </div>
+          )}
+
+          {source === "own" && workplaces.length > 0 && (
             <div className="mb-4">
               <div className="mb-1.5 text-sm font-bold text-[#333333]">どの職場のスクラップですか</div>
               {workplaces.length <= 8 ? (
@@ -1328,6 +1470,7 @@ export default function DailyRecordForm({
                               {e.busho}
                             </span>
                           )}
+                          {e.shipmentId && <PolyTag sh={shipmentById.get(e.shipmentId)} weight={toNumOrNull(e.cumAfter) !== null && toNumOrNull(e.cumBefore) !== null ? toNum(e.cumAfter) - toNum(e.cumBefore) : null} />}
                         </div>
                         <div className="mt-0.5 text-xs text-[#909090]">
                           {fmt(cb)} → {fmt(ca)}
@@ -1355,7 +1498,7 @@ export default function DailyRecordForm({
                   <tr>
                     <th className={th}>時刻</th>
                     <th className={th}>袋</th>
-                    <th className={th}>職場</th>
+                    <th className={th}>職場・ポリ箱</th>
                     <th className={th}>種類</th>
                     <th className={`${th} text-right`}>投入前</th>
                     <th className={`${th} text-right`}>投入後</th>
@@ -1378,7 +1521,10 @@ export default function DailyRecordForm({
                       <tr key={i}>
                         <td className={td}>{e.jikoku}</td>
                         <td className={td}>{(e.bagId && bagNoById.get(e.bagId)) || ""}</td>
-                        <td className={td}>{e.busho}</td>
+                        <td className={td}>
+                          {e.busho}
+                          {e.shipmentId && <PolyTag sh={shipmentById.get(e.shipmentId)} weight={toNumOrNull(e.cumAfter) !== null && toNumOrNull(e.cumBefore) !== null ? toNum(e.cumAfter) - toNum(e.cumBefore) : null} />}
+                        </td>
                         <td className={td}>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
                           {/* Excelから取り込んだ行は発生元（機械・品種・工程）を添える */}
@@ -1577,5 +1723,32 @@ export default function DailyRecordForm({
 
       {/* カメラ読み取りモーダル */}
     </div>
+  );
+}
+
+/** 他工場から届いたポリ箱を投入した行の目印。送った工場で量った重量との差も出す。 */
+function PolyTag({ sh, weight }: { sh: Shipment | undefined; weight: number | null }) {
+  if (!sh) {
+    return (
+      <span className="rounded-md bg-[#e8f0f8] px-1.5 py-0.5 text-[11px] font-bold text-[#0b5ca8]">ポリ箱</span>
+    );
+  }
+  const gap =
+    weight !== null
+      ? shipmentGap({ ...sh, received: { date: "", weight, scaleName: "", kirokusha: "" } })
+      : null;
+  const large =
+    weight !== null &&
+    shipmentGapLarge({ ...sh, received: { date: "", weight, scaleName: "", kirokusha: "" } });
+  return (
+    <span
+      className={`inline-block rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+        large ? "bg-[#fdecea] text-[#dc000c]" : "bg-[#e8f0f8] text-[#0b5ca8]"
+      }`}
+      title={`出荷 ${sh.shipDate} ／ ${sh.fromFactory}で ${sh.weight} kg`}
+    >
+      ポリ箱 {sh.boxNo}
+      {gap !== null && `（出荷時 ${fmt(sh.weight)}・差 ${gap > 0 ? "+" : ""}${fmt(gap)}）`}
+    </span>
   );
 }

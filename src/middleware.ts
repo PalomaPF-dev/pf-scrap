@@ -21,6 +21,7 @@ export const config = {
     "/daily",
     "/daily/import",
     "/bags",
+    "/shipments",
     "/summary",
     "/first",
     "/first-list",

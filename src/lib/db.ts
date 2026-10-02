@@ -25,6 +25,9 @@ export {
   type DailyEntry,
   type DailyRecord,
   type Scale,
+  type Shipment,
+  shipmentGap,
+  shipmentGapLarge,
 } from "./scrapTypes";
 import {
   type ScrapBag as _ScrapBag,
@@ -37,6 +40,7 @@ import {
   type DailyRecord as _DailyRecord,
   type DailyStatus as _DailyStatus,
   type Scale as _Scale,
+  type Shipment as _Shipment,
 } from "./scrapTypes";
 type ScrapBag = _ScrapBag;
 type BagStatus = _BagStatus;
@@ -48,6 +52,7 @@ type DailyEntry = _DailyEntry;
 type DailyRecord = _DailyRecord;
 type DailyStatus = _DailyStatus;
 type Scale = _Scale;
+type Shipment = _Shipment;
 
 export interface MonthlyInput {
   ym: string;
@@ -568,6 +573,8 @@ function mapDailyRecord(r: any, entries: any[]): DailyRecord {
       kikai: e.kikai ?? "",
       zairyo: e.zairyo ?? "",
       kotei: e.kotei ?? "",
+      originFactory: e.origin_factory ?? "",
+      shipmentId: e.shipment_id ?? null,
     })),
   };
 }
@@ -608,7 +615,7 @@ export async function getDailyRecord(
     SELECT jikoku, hinshu, scale_id, scale_name, gross_weight, tare_weight,
            weight, cum_before, cum_after, cum_before_reason, cum_after_reason,
            cum_before_read_id, cum_after_read_id, bag_id, kirokusha, ijo,
-           busho, kikai, zairyo, kotei
+           busho, kikai, zairyo, kotei, origin_factory, shipment_id
     FROM scrap_daily_entries WHERE record_id = ${r.id} ORDER BY sort ASC`;
   return mapDailyRecord(r, entries);
 }
@@ -668,7 +675,8 @@ async function replaceDailyEntries(
         company_id, record_id, jikoku, hinshu, scale_id, scale_name,
         gross_weight, tare_weight, weight, cum_before, cum_after,
         cum_before_reason, cum_after_reason, cum_before_read_id, cum_after_read_id,
-        bag_id, kirokusha, ijo, busho, kikai, zairyo, kotei, sort
+        bag_id, kirokusha, ijo, busho, kikai, zairyo, kotei, sort,
+        origin_factory, shipment_id
       )
       VALUES (
         ${companyId}, ${recordId}, ${e.jikoku}, ${e.hinshu}, ${e.scaleId}, ${e.scaleName},
@@ -676,7 +684,8 @@ async function replaceDailyEntries(
         ${e.cumBeforeReason ?? ""}, ${e.cumAfterReason ?? ""},
         ${e.cumBeforeReadId ?? null}, ${e.cumAfterReadId ?? null},
         ${e.bagId ?? null}, ${e.kirokusha}, ${e.ijo},
-        ${e.busho ?? ""}, ${e.kikai ?? ""}, ${e.zairyo ?? ""}, ${e.kotei ?? ""}, ${i}
+        ${e.busho ?? ""}, ${e.kikai ?? ""}, ${e.zairyo ?? ""}, ${e.kotei ?? ""}, ${i},
+        ${e.originFactory ?? ""}, ${e.shipmentId ?? null}
       )`);
   }
   await sql.transaction(queries);
@@ -1142,7 +1151,12 @@ export async function listBagEntriesByMonth(
   const rows = await sql`
     SELECT b.bag_no, b.status, b.factory, b.scale_name,
            r.record_date, e.jikoku, e.hinshu, e.cum_before, e.cum_after, e.weight,
-           e.kirokusha, e.ijo, e.busho
+           e.kirokusha, e.ijo,
+           -- 他工場から届いたポリ箱は職場の代わりに「送った工場 ポリ箱 番号」
+           CASE WHEN e.shipment_id IS NOT NULL
+             THEN COALESCE((SELECT 'ポリ箱 ' || sh.box_no FROM scrap_shipments sh
+                            WHERE sh.id = e.shipment_id), 'ポリ箱')
+             ELSE e.busho END AS busho
     FROM scrap_bags b
     JOIN scrap_daily_entries e ON e.bag_id = b.id
     JOIN scrap_daily_records r ON r.id = e.record_id
@@ -1523,34 +1537,82 @@ export async function listDailyAgg(
 }
 
 /** 月間の日次記録合計（種類別）。⑥の突合に使う。factory 指定で自工場のみ。 */
+/**
+ * 日次記録の月合計。
+ *
+ * 工場間でポリ箱を送る運用（本社工場 → 大口工場など）があるため、2つの数え方を持つ。
+ * - total / byKind … 発生元の工場で数える（理論スクラップとの照合用）。
+ *     他工場から届いたポリ箱は送った工場の分。月は出荷日で数える（生産した月に合わせる）。
+ * - processed … その工場のスクラップ箱で量った分（売却との突合用。売却は処理した工場で行う）。
+ * - incoming … processed のうち、他工場から届いた分
+ * - outgoing … total のうち、他工場で量った分（送った側から見た「送って処理された量」）
+ * factory が null（全社合算）のときは incoming/outgoing は 0。
+ */
 export async function dailyMonthTotals(
   companyId: string,
   ym: string,
   factory: string | null = null
-): Promise<{ total: number; byKind: Record<string, number>; days: number }> {
+): Promise<{
+  total: number;
+  byKind: Record<string, number>;
+  days: number;
+  processed: number;
+  incoming: number;
+  outgoing: number;
+}> {
   await ensureSchema();
   const sql = getSql();
-  const [totals, kinds] = await Promise.all([
+  const [totals, kinds, days] = await Promise.all([
     sql`
-      SELECT COALESCE(SUM(e.weight), 0) AS total, COUNT(DISTINCT r.id) AS days
-      FROM scrap_daily_records r
-      LEFT JOIN scrap_daily_entries e ON e.record_id = r.id
+      SELECT
+        COALESCE(SUM(e.weight) FILTER (
+          WHERE to_char(COALESCE(s.ship_date, r.record_date), 'YYYY-MM') = ${ym}
+            AND (${factory}::text IS NULL OR COALESCE(NULLIF(e.origin_factory, ''), r.factory) = ${factory})
+        ), 0) AS total,
+        COALESCE(SUM(e.weight) FILTER (
+          WHERE to_char(r.record_date, 'YYYY-MM') = ${ym}
+            AND (${factory}::text IS NULL OR r.factory = ${factory})
+        ), 0) AS processed,
+        COALESCE(SUM(e.weight) FILTER (
+          WHERE ${factory}::text IS NOT NULL AND to_char(r.record_date, 'YYYY-MM') = ${ym}
+            AND r.factory = ${factory} AND e.origin_factory <> '' AND e.origin_factory <> r.factory
+        ), 0) AS incoming,
+        COALESCE(SUM(e.weight) FILTER (
+          WHERE ${factory}::text IS NOT NULL
+            AND to_char(COALESCE(s.ship_date, r.record_date), 'YYYY-MM') = ${ym}
+            AND e.origin_factory = ${factory} AND r.factory <> ${factory}
+        ), 0) AS outgoing
+      FROM scrap_daily_entries e
+      JOIN scrap_daily_records r ON r.id = e.record_id
+      LEFT JOIN scrap_shipments s ON s.id = e.shipment_id
       WHERE r.company_id = ${companyId}
-        AND to_char(r.record_date, 'YYYY-MM') = ${ym}
-        AND (${factory}::text IS NULL OR r.factory = ${factory})`,
+        AND (to_char(r.record_date, 'YYYY-MM') = ${ym} OR to_char(s.ship_date, 'YYYY-MM') = ${ym})`,
     sql`
       SELECT e.hinshu, SUM(e.weight) AS w
       FROM scrap_daily_entries e
       JOIN scrap_daily_records r ON r.id = e.record_id
+      LEFT JOIN scrap_shipments s ON s.id = e.shipment_id
+      WHERE r.company_id = ${companyId}
+        AND to_char(COALESCE(s.ship_date, r.record_date), 'YYYY-MM') = ${ym}
+        AND (${factory}::text IS NULL OR COALESCE(NULLIF(e.origin_factory, ''), r.factory) = ${factory})
+      GROUP BY e.hinshu`,
+    sql`
+      SELECT COUNT(*)::int AS days FROM scrap_daily_records r
       WHERE r.company_id = ${companyId}
         AND to_char(r.record_date, 'YYYY-MM') = ${ym}
-        AND (${factory}::text IS NULL OR r.factory = ${factory})
-      GROUP BY e.hinshu`,
+        AND (${factory}::text IS NULL OR r.factory = ${factory})`,
   ]);
   const byKind: Record<string, number> = {};
   for (const k of kinds) byKind[String((k as any).hinshu)] = num((k as any).w);
   const t = totals[0] ?? {};
-  return { total: num((t as any).total), byKind, days: Number((t as any).days) || 0 };
+  return {
+    total: num((t as any).total),
+    byKind,
+    days: Number(days[0]?.days) || 0,
+    processed: num((t as any).processed),
+    incoming: num((t as any).incoming),
+    outgoing: num((t as any).outgoing),
+  };
 }
 
 // ===== ③ 初品重量測定 =====
@@ -2642,14 +2704,18 @@ export async function listWorkplaceAgg(
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`
-    SELECT r.factory, e.busho AS workplace, e.hinshu, SUM(e.weight) AS w, COUNT(*)::int AS n
+    SELECT r.factory,
+      -- 他工場から届いたポリ箱は「送った工場（ポリ箱）」を1つの職場のように数える
+      CASE WHEN e.origin_factory <> '' AND e.origin_factory <> r.factory
+        THEN e.origin_factory || '（ポリ箱）' ELSE e.busho END AS workplace,
+      e.hinshu, SUM(e.weight) AS w, COUNT(*)::int AS n
     FROM scrap_daily_entries e
     JOIN scrap_daily_records r ON r.id = e.record_id
     WHERE r.company_id = ${companyId}
       AND to_char(r.record_date, 'YYYY-MM') = ${ym}
       AND (${factory}::text IS NULL OR r.factory = ${factory})
-    GROUP BY r.factory, e.busho, e.hinshu
-    ORDER BY r.factory, e.busho`;
+    GROUP BY 1, 2, e.hinshu
+    ORDER BY 1, 2`;
   const map = new Map<string, WorkplaceAggRow>();
   for (const r of rows) {
     const key = `${r.factory}\u0000${r.workplace}`;
@@ -2801,4 +2867,214 @@ export async function deleteWorkplace(
   if (asSource(rows[0].source) === "portal") return "portal";
   await sql`DELETE FROM portal_workplaces WHERE company_id = ${companyId} AND code = ${code}`;
   return "deleted";
+}
+
+// ===== 工場間のポリ箱送付 =====
+
+/** どの工場がどこへスクラップを送るか。送らない工場は含まない。 */
+export async function listShipRoutes(
+  companyId: string
+): Promise<{ fromFactory: string; toFactory: string }[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT from_factory, to_factory FROM scrap_ship_routes
+    WHERE company_id = ${companyId} ORDER BY from_factory`;
+  return rows.map((r: any) => ({ fromFactory: String(r.from_factory), toFactory: String(r.to_factory) }));
+}
+
+/** 送り先を設定する。toFactory が空なら「自工場で処理」に戻す。 */
+export async function setShipRoute(
+  companyId: string,
+  fromFactory: string,
+  toFactory: string
+): Promise<void> {
+  await ensureSchema();
+  const sql = getSql();
+  if (!toFactory) {
+    await sql`DELETE FROM scrap_ship_routes WHERE company_id = ${companyId} AND from_factory = ${fromFactory}`;
+    return;
+  }
+  await sql`
+    INSERT INTO scrap_ship_routes (company_id, from_factory, to_factory)
+    VALUES (${companyId}, ${fromFactory}, ${toFactory})
+    ON CONFLICT (company_id, from_factory) DO UPDATE SET to_factory = EXCLUDED.to_factory, updated_at = NOW()`;
+}
+
+function mapShipment(r: any): Shipment {
+  return {
+    id: String(r.id),
+    boxNo: String(r.box_no),
+    fromFactory: String(r.from_factory),
+    toFactory: String(r.to_factory),
+    shipDate: dateStr(r.ship_date),
+    hinshu: String(r.hinshu),
+    weight: num(r.weight),
+    shippedBy: r.shipped_by ?? "",
+    note: r.note ?? "",
+    received:
+      r.recv_date !== null && r.recv_date !== undefined
+        ? {
+            date: dateStr(r.recv_date),
+            weight: num(r.recv_weight),
+            scaleName: r.recv_scale ?? "",
+            kirokusha: r.recv_by ?? "",
+          }
+        : null,
+  };
+}
+
+/** ポリ箱を、受け入れ側の処理記録（日次記録の明細）と一緒に引く。 */
+async function queryShipments(
+  companyId: string,
+  q: {
+    id?: string | null;
+    /** 送った側か受け入れた側がこの工場 */
+    factory?: string | null;
+    /** 受け入れ側がこの工場 */
+    toFactory?: string | null;
+    /** 出荷か処理がこの月のもの（未処理は月に関係なく含める） */
+    ym?: string | null;
+    pendingOnly?: boolean;
+  }
+): Promise<Shipment[]> {
+  await ensureSchema();
+  const sql = getSql();
+  const id = q.id ?? null;
+  const factory = q.factory ?? null;
+  const toFactory = q.toFactory ?? null;
+  const ym = q.ym ?? null;
+  const pendingOnly = Boolean(q.pendingOnly);
+  const rows = await sql`
+    SELECT s.id, s.box_no, s.from_factory, s.to_factory, s.ship_date, s.hinshu, s.weight,
+      s.shipped_by, s.note,
+      r.record_date AS recv_date, e.weight AS recv_weight, e.scale_name AS recv_scale,
+      e.kirokusha AS recv_by
+    FROM scrap_shipments s
+    LEFT JOIN scrap_daily_entries e ON e.shipment_id = s.id
+    LEFT JOIN scrap_daily_records r ON r.id = e.record_id
+    WHERE s.company_id = ${companyId}
+      AND (${id}::uuid IS NULL OR s.id = ${id}::uuid)
+      AND (${factory}::text IS NULL OR s.from_factory = ${factory} OR s.to_factory = ${factory})
+      AND (${toFactory}::text IS NULL OR s.to_factory = ${toFactory})
+      AND (${pendingOnly}::boolean = false OR e.id IS NULL)
+      AND (${ym}::text IS NULL
+        OR to_char(s.ship_date, 'YYYY-MM') = ${ym}
+        OR to_char(r.record_date, 'YYYY-MM') = ${ym}
+        OR e.id IS NULL)
+    ORDER BY (e.id IS NULL) DESC, s.ship_date DESC, s.box_no DESC
+    LIMIT 2000`;
+  return rows.map(mapShipment);
+}
+
+export async function getShipment(companyId: string, id: string): Promise<Shipment | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  return (await queryShipments(companyId, { id }))[0] ?? null;
+}
+
+/**
+ * ポリ箱の一覧。factory を送った側か受け入れた側に持つもの（null＝全工場）。
+ * 未処理のものは月に関係なく必ず含め、先頭に並べる（処理し忘れを見落とさないため）。
+ */
+export async function listShipments(
+  companyId: string,
+  opts: { factory: string | null; ym: string }
+): Promise<Shipment[]> {
+  return queryShipments(companyId, { factory: opts.factory, ym: opts.ym });
+}
+
+/** 受け入れ側でまだ処理していないポリ箱（日次記録で選ぶ候補）。古い順。 */
+export async function listPendingShipments(companyId: string, toFactory: string): Promise<Shipment[]> {
+  const list = await queryShipments(companyId, { toFactory, pendingOnly: true });
+  return list.reverse();
+}
+
+/**
+ * ポリ箱を出荷として登録し、箱に書く番号を振る（送った工場-月日-連番）。
+ * 番号は消した箱の番号を使い回さないよう、その日の最大の連番の次にする。
+ */
+export async function createShipment(
+  companyId: string,
+  x: {
+    fromFactory: string;
+    toFactory: string;
+    shipDate: string;
+    hinshu: string;
+    weight: number;
+    shippedBy: string;
+    note: string;
+  }
+): Promise<Shipment> {
+  await ensureSchema();
+  const sql = getSql();
+  const prefix = `${x.fromFactory}-${x.shipDate.slice(5, 7)}${x.shipDate.slice(8, 10)}-`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const rows = await sql`
+      SELECT box_no FROM scrap_shipments
+      WHERE company_id = ${companyId} AND from_factory = ${x.fromFactory} AND ship_date = ${x.shipDate}`;
+    let max = 0;
+    for (const r of rows) {
+      const no = String(r.box_no);
+      if (!no.startsWith(prefix)) continue;
+      const n = Number(no.slice(prefix.length));
+      if (Number.isInteger(n) && n > max) max = n;
+    }
+    const boxNo = `${prefix}${String(max + 1).padStart(2, "0")}`;
+    const inserted = await sql`
+      INSERT INTO scrap_shipments
+        (company_id, box_no, from_factory, to_factory, ship_date, hinshu, weight, shipped_by, note)
+      VALUES (${companyId}, ${boxNo}, ${x.fromFactory}, ${x.toFactory}, ${x.shipDate},
+              ${x.hinshu}, ${x.weight}, ${x.shippedBy}, ${x.note})
+      ON CONFLICT (company_id, box_no) DO NOTHING
+      RETURNING id`;
+    if (inserted.length > 0) {
+      const sh = await getShipment(companyId, String(inserted[0].id));
+      if (sh) return sh;
+    }
+  }
+  throw new Error("ポリ箱の番号を振れませんでした。もう一度お試しください。");
+}
+
+/** 未処理のポリ箱の重量・種類・メモを直す（処理済みは直せない）。 */
+export async function updateShipment(
+  companyId: string,
+  id: string,
+  patch: { hinshu: string; weight: number; note: string }
+): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE scrap_shipments s SET hinshu = ${patch.hinshu}, weight = ${patch.weight}, note = ${patch.note}
+    WHERE s.company_id = ${companyId} AND s.id = ${id}
+      AND NOT EXISTS (SELECT 1 FROM scrap_daily_entries e WHERE e.shipment_id = s.id)
+    RETURNING s.id`;
+  return rows.length > 0;
+}
+
+/** 未処理のポリ箱を取り消す（処理済みは消せない）。 */
+export async function deleteShipment(companyId: string, id: string): Promise<boolean> {
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`
+    DELETE FROM scrap_shipments s
+    WHERE s.company_id = ${companyId} AND s.id = ${id}
+      AND NOT EXISTS (SELECT 1 FROM scrap_daily_entries e WHERE e.shipment_id = s.id)
+    RETURNING s.id`;
+  return rows.length > 0;
+}
+
+/** 指定したポリ箱のうち、別の日次記録（exceptRecordId 以外）で処理済みのもの。 */
+export async function shipmentsUsedElsewhere(
+  companyId: string,
+  ids: string[],
+  exceptRecordId: string | null
+): Promise<Set<string>> {
+  await ensureSchema();
+  const sql = getSql();
+  if (ids.length === 0) return new Set();
+  const rows = await sql`
+    SELECT shipment_id FROM scrap_daily_entries
+    WHERE company_id = ${companyId} AND shipment_id = ANY(${ids}::uuid[])
+      AND (${exceptRecordId}::uuid IS NULL OR record_id <> ${exceptRecordId}::uuid)`;
+  return new Set(rows.map((r: any) => String(r.shipment_id)));
 }

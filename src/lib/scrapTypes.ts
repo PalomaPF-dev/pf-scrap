@@ -156,6 +156,39 @@ export interface DailyEntry {
   kikai: string;
   zairyo: string;
   kotei: string;
+  /**
+   * 発生元の工場。空＝記録した工場のスクラップ。他工場からポリ箱で届いた分は
+   * 送ってきた工場名が入る（照合は発生元の工場で、売却・箱の記録は記録した工場で数える）。
+   */
+  originFactory?: string;
+  /** 処理したポリ箱（scrap_shipments.id）。他工場からの持ち込み分だけ */
+  shipmentId?: string | null;
+}
+
+/** 工場間で送るポリ箱1つ。送る側で計量して出荷し、受け入れ側で投入前に量って突き合わせる。 */
+export interface Shipment {
+  id: string;
+  /** 箱に書く番号（例: 本社工場-1002-03） */
+  boxNo: string;
+  fromFactory: string;
+  toFactory: string;
+  /** 出荷日（送る側の記録日） */
+  shipDate: string;
+  /** スクラップの種類（ポリ箱ごとに分けて送る） */
+  hinshu: string;
+  /** 送る側で量った重量 kg */
+  weight: number;
+  shippedBy: string;
+  note: string;
+  /** 受け入れ側で処理した記録。未処理なら null */
+  received: {
+    /** 処理日（受け入れ側の日次記録の日付） */
+    date: string;
+    /** 受け入れ側で量った重量（スクラップ箱への投入重量）kg */
+    weight: number;
+    scaleName: string;
+    kirokusha: string;
+  } | null;
 }
 
 export interface DailyRecord {
@@ -337,4 +370,20 @@ export interface ScaleReadResponse {
 export interface ScalePhotoResult extends ScaleReadResponse {
   /** 同じ写真から読めたQRコード。読めなければ空 */
   qr: string;
+}
+
+/**
+ * ポリ箱の重量差（受け入れ側 − 送る側）。未処理は null。
+ * 両方で量っているので、差が大きければ量り間違い・取り違え・こぼれを疑う。
+ */
+export function shipmentGap(sh: Shipment): number | null {
+  if (!sh.received) return null;
+  return Math.round((sh.received.weight - sh.weight) * 1000) / 1000;
+}
+
+/** 差が「要確認」か。1kg 未満の差は量りのばらつきとして扱い、それ以上は重量の3%を超えたら要確認。 */
+export function shipmentGapLarge(sh: Shipment): boolean {
+  const gap = shipmentGap(sh);
+  if (gap === null) return false;
+  return Math.abs(gap) > Math.max(1, sh.weight * 0.03);
 }

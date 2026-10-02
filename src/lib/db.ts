@@ -2910,6 +2910,8 @@ function mapShipment(r: any): Shipment {
     shipDate: dateStr(r.ship_date),
     hinshu: String(r.hinshu),
     weight: num(r.weight),
+    grossWeight: numOrNull(r.gross_weight),
+    tareWeight: numOrNull(r.tare_weight),
     shippedBy: r.shipped_by ?? "",
     note: r.note ?? "",
     received:
@@ -2947,7 +2949,7 @@ async function queryShipments(
   const pendingOnly = Boolean(q.pendingOnly);
   const rows = await sql`
     SELECT s.id, s.box_no, s.from_factory, s.to_factory, s.ship_date, s.hinshu, s.weight,
-      s.shipped_by, s.note,
+      s.gross_weight, s.tare_weight, s.shipped_by, s.note,
       r.record_date AS recv_date, e.weight AS recv_weight, e.scale_name AS recv_scale,
       e.kirokusha AS recv_by
     FROM scrap_shipments s
@@ -3000,7 +3002,10 @@ export async function createShipment(
     toFactory: string;
     shipDate: string;
     hinshu: string;
-    weight: number;
+    /** ポリ箱ごと量った総重量 */
+    grossWeight: number;
+    /** 空のポリ箱の重さ */
+    tareWeight: number;
     shippedBy: string;
     note: string;
   }
@@ -3008,6 +3013,7 @@ export async function createShipment(
   await ensureSchema();
   const sql = getSql();
   const prefix = `${x.fromFactory}-${x.shipDate.slice(5, 7)}${x.shipDate.slice(8, 10)}-`;
+  const weight = Math.round((x.grossWeight - x.tareWeight) * 1000) / 1000;
   for (let attempt = 0; attempt < 5; attempt++) {
     const rows = await sql`
       SELECT box_no FROM scrap_shipments
@@ -3022,9 +3028,10 @@ export async function createShipment(
     const boxNo = `${prefix}${String(max + 1).padStart(2, "0")}`;
     const inserted = await sql`
       INSERT INTO scrap_shipments
-        (company_id, box_no, from_factory, to_factory, ship_date, hinshu, weight, shipped_by, note)
+        (company_id, box_no, from_factory, to_factory, ship_date, hinshu, weight,
+         gross_weight, tare_weight, shipped_by, note)
       VALUES (${companyId}, ${boxNo}, ${x.fromFactory}, ${x.toFactory}, ${x.shipDate},
-              ${x.hinshu}, ${x.weight}, ${x.shippedBy}, ${x.note})
+              ${x.hinshu}, ${weight}, ${x.grossWeight}, ${x.tareWeight}, ${x.shippedBy}, ${x.note})
       ON CONFLICT (company_id, box_no) DO NOTHING
       RETURNING id`;
     if (inserted.length > 0) {
@@ -3035,16 +3042,31 @@ export async function createShipment(
   throw new Error("ポリ箱の番号を振れませんでした。もう一度お試しください。");
 }
 
-/** 未処理のポリ箱の重量・種類・メモを直す（処理済みは直せない）。 */
+/**
+ * 未処理のポリ箱の重量・種類・メモを直す（処理済みは直せない）。
+ * 総重量とポリ箱の重さがあればスクラップ重量はそこから出し直す。
+ */
 export async function updateShipment(
   companyId: string,
   id: string,
-  patch: { hinshu: string; weight: number; note: string }
+  patch: {
+    hinshu: string;
+    grossWeight: number | null;
+    tareWeight: number | null;
+    /** 総重量が無い（導入直後の登録分）ときだけ使うスクラップ重量 */
+    weight: number;
+    note: string;
+  }
 ): Promise<boolean> {
   await ensureSchema();
   const sql = getSql();
+  const weight =
+    patch.grossWeight !== null && patch.tareWeight !== null
+      ? Math.round((patch.grossWeight - patch.tareWeight) * 1000) / 1000
+      : patch.weight;
   const rows = await sql`
-    UPDATE scrap_shipments s SET hinshu = ${patch.hinshu}, weight = ${patch.weight}, note = ${patch.note}
+    UPDATE scrap_shipments s SET hinshu = ${patch.hinshu}, weight = ${weight},
+      gross_weight = ${patch.grossWeight}, tare_weight = ${patch.tareWeight}, note = ${patch.note}
     WHERE s.company_id = ${companyId} AND s.id = ${id}
       AND NOT EXISTS (SELECT 1 FROM scrap_daily_entries e WHERE e.shipment_id = s.id)
     RETURNING s.id`;

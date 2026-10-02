@@ -176,8 +176,12 @@ export interface Shipment {
   shipDate: string;
   /** スクラップの種類（ポリ箱ごとに分けて送る） */
   hinshu: string;
-  /** 送る側で量った重量 kg */
+  /** スクラップ重量 kg ＝ 総重量 − ポリ箱の重さ（送る側で量った値から計算） */
   weight: number;
+  /** ポリ箱ごと量った総重量 kg。導入直後の登録分は null */
+  grossWeight: number | null;
+  /** 空のポリ箱の重さ kg（事前に量った値）。導入直後の登録分は null */
+  tareWeight: number | null;
   shippedBy: string;
   note: string;
   /** 受け入れ側で処理した記録。未処理なら null */

@@ -548,6 +548,11 @@ async function buildSchema(): Promise<void> {
       created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (company_id, box_no)
     )`);
+  // 送る側は空のポリ箱を先に量っておき、ポリ箱ごと量った総重量から差し引いて
+  // スクラップ重量（weight）を出す。両方残して、後から計算を確かめられるようにする。
+  // 2026-10 の導入直後に登録した分は NULL（weight だけ）。
+  await safeDdl(() => sql`ALTER TABLE scrap_shipments ADD COLUMN IF NOT EXISTS gross_weight NUMERIC`);
+  await safeDdl(() => sql`ALTER TABLE scrap_shipments ADD COLUMN IF NOT EXISTS tare_weight NUMERIC`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_to_idx ON scrap_shipments(company_id, to_factory, ship_date)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_from_idx ON scrap_shipments(company_id, from_factory, ship_date)`);
   // 明細の発生元工場（空＝記録した工場）と、処理したポリ箱。

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Pencil, Send, Trash2 } from "lucide-react";
 import {
@@ -9,7 +9,7 @@ import {
   updateShipmentAction,
 } from "@/lib/actions";
 import { shipmentGap, shipmentGapLarge, type Shipment } from "@/lib/scrapTypes";
-import { fmt } from "@/lib/format";
+import { fmt, toNumOrNull } from "@/lib/format";
 import ScaleCamera from "./ScaleCamera";
 import { ResultBanner, type PanelMessage } from "./ScrapBagPanel";
 
@@ -18,6 +18,21 @@ const input =
 const td = "border border-[#e5e5e5] px-2 py-1.5 whitespace-nowrap";
 const tdNum = `${td} text-right tabular-nums`;
 const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2 py-1.5 text-left font-semibold whitespace-nowrap";
+
+/** 端末の保存（localStorage）の変化を受け取る。他のタブで変えたときも追従する。 */
+function subscribeStorage(onChange: () => void): () => void {
+  window.addEventListener("storage", onChange);
+  return () => window.removeEventListener("storage", onChange);
+}
+
+/** 端末の保存から読む。使えない端末（プライベートモード等）では null。 */
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
 
 /** YYYY-MM-DD どうしの日数差 */
 function daysBetween(from: string, to: string): number {
@@ -56,7 +71,28 @@ export default function ShipmentPanel({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [hinshu, setHinshu] = useState(kinds[0] ?? "");
-  const [weight, setWeight] = useState("");
+  // 総重量（ポリ箱込み）と、空のポリ箱の重さ（事前に量った値）。差がスクラップ重量。
+  // ポリ箱の重さは同じ箱を使い回すことが多いので、工場ごとに端末に覚えておく。
+  const [gross, setGross] = useState("");
+  const tareKey = `scrap.polyTare.${factory}`;
+  const savedTare = useSyncExternalStore(
+    subscribeStorage,
+    () => readStorage(tareKey),
+    () => null
+  );
+  const [pickedTare, setPickedTare] = useState<string | null>(null);
+  const tare = pickedTare ?? savedTare ?? "";
+  function setTare(v: string) {
+    setPickedTare(v);
+    try {
+      window.localStorage.setItem(tareKey, v);
+    } catch {
+      /* 覚えられない端末でも入力はできる */
+    }
+  }
+  const grossN = toNumOrNull(gross);
+  const tareN = toNumOrNull(tare);
+  const net = grossN !== null && tareN !== null ? Math.round((grossN - tareN) * 1000) / 1000 : null;
   const [shipDate, setShipDate] = useState(today);
   const [note, setNote] = useState("");
   const [message, setMessage] = useState<PanelMessage | null>(null);
@@ -71,13 +107,15 @@ export default function ShipmentPanel({
         factory,
         shipDate,
         hinshu,
-        weight,
+        grossWeight: gross,
+        tareWeight: tare,
         note,
       });
       if (res.ok) {
         setBoxNo(res.boxNo ?? null);
         setMessage({ ok: true, title: "出荷を登録しました", text: res.message ?? "" });
-        setWeight("");
+        // ポリ箱の重さは次の箱でも使うことが多いので残す
+        setGross("");
         setNote("");
         router.refresh();
       } else {
@@ -90,10 +128,29 @@ export default function ShipmentPanel({
     !sh.received && (isAdmin || myFactory === null || myFactory === sh.fromFactory);
 
   function edit(sh: Shipment) {
-    const v = prompt(`ポリ箱「${sh.boxNo}」の重量 kg（${sh.hinshu}）`, String(sh.weight));
-    if (v === null) return;
+    // 総重量を量り直したことが多いので総重量を聞く。ポリ箱の重さが違っていたら続けて聞く。
+    if (sh.grossWeight === null || sh.tareWeight === null) {
+      const v = prompt(`ポリ箱「${sh.boxNo}」のスクラップ重量 kg（${sh.hinshu}）`, String(sh.weight));
+      if (v === null) return;
+      startTransition(async () => {
+        const res = await updateShipmentAction({ id: sh.id, hinshu: sh.hinshu, weight: v, note: sh.note });
+        setListMsg({ ok: res.ok, text: res.message ?? "" });
+        if (res.ok) router.refresh();
+      });
+      return;
+    }
+    const g = prompt(`ポリ箱「${sh.boxNo}」の総重量 kg（ポリ箱込み）`, String(sh.grossWeight));
+    if (g === null) return;
+    const t = prompt(`ポリ箱「${sh.boxNo}」のポリ箱の重さ kg（空の重さ）`, String(sh.tareWeight));
+    if (t === null) return;
     startTransition(async () => {
-      const res = await updateShipmentAction({ id: sh.id, hinshu: sh.hinshu, weight: v, note: sh.note });
+      const res = await updateShipmentAction({
+        id: sh.id,
+        hinshu: sh.hinshu,
+        grossWeight: g,
+        tareWeight: t,
+        note: sh.note,
+      });
       setListMsg({ ok: res.ok, text: res.message ?? "" });
       if (res.ok) router.refresh();
     });
@@ -165,15 +222,15 @@ export default function ShipmentPanel({
 
             <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
-                ポリ箱の重量 kg（中身のスクラップの重さ）
+                総重量 kg（ポリ箱ごと量った重さ）
                 <input
                   type="number"
                   inputMode="decimal"
                   step="0.1"
                   min="0"
-                  value={weight}
-                  onChange={(e) => setWeight(e.target.value)}
-                  aria-label="ポリ箱の重量 kg"
+                  value={gross}
+                  onChange={(e) => setGross(e.target.value)}
+                  aria-label="総重量 kg（ポリ箱込み）"
                   className={`${input} text-right tabular-nums`}
                 />
               </label>
@@ -194,12 +251,41 @@ export default function ShipmentPanel({
                     });
                     return;
                   }
-                  setWeight(String(r.value));
-                  setMessage({ ok: true, title: `${fmt(r.value)} kg を読み取りました`, text: "値を確かめて登録してください。" });
+                  setGross(String(r.value));
+                  setMessage({ ok: true, title: `総重量 ${fmt(r.value)} kg を読み取りました`, text: "値を確かめて登録してください。" });
                 }}
                 onError={(text) => setMessage({ ok: false, text })}
               />
             </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 sm:items-end">
+              <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
+                ポリ箱の重さ kg（空のときに量った重さ）
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.1"
+                  min="0"
+                  value={tare}
+                  onChange={(e) => setTare(e.target.value)}
+                  aria-label="ポリ箱の重さ kg"
+                  className={`${input} text-right tabular-nums`}
+                />
+              </label>
+              <div
+                className={`flex h-11 items-center justify-between rounded-lg px-3 sm:h-10 ${
+                  net !== null && net <= 0 ? "bg-[#fdecea] text-[#dc000c]" : "bg-[#faf6ef] text-[#b4632c]"
+                }`}
+              >
+                <span className="text-xs font-bold">スクラップ重量（総重量 − ポリ箱）</span>
+                <span className="text-lg font-extrabold tabular-nums" aria-label="スクラップ重量">
+                  {net !== null ? `${fmt(net)} kg` : "—"}
+                </span>
+              </div>
+            </div>
+            <p className="-mt-1 text-xs text-[#909090]">
+              ポリ箱の重さはこの端末に覚えておきます。違う箱を使うときだけ入れ直してください。
+            </p>
 
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
@@ -228,7 +314,7 @@ export default function ShipmentPanel({
             <button
               type="button"
               onClick={ship}
-              disabled={pending || !weight || !hinshu}
+              disabled={pending || net === null || net <= 0 || !hinshu}
               className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#b4632c] text-base font-bold text-white hover:bg-[#9a5424] disabled:opacity-50 sm:w-auto sm:px-6"
             >
               <Send className="h-5 w-5" />
@@ -286,7 +372,7 @@ export default function ShipmentPanel({
         <h2 className="mb-1 text-base font-bold text-[#333333] sm:text-sm">ポリ箱の一覧</h2>
         <p className="mb-3 text-xs text-[#909090]">
           この月に出荷・処理したポリ箱と、まだ処理していないポリ箱（月に関係なく先頭）を表示しています。
-          差は「受入 − 出荷」です。
+          出荷重量は「総重量 − ポリ箱」のスクラップ重量、差は「受入 − 出荷」です。
         </p>
         {listMsg && <ResultBanner msg={listMsg} className="mb-3" />}
 
@@ -311,6 +397,12 @@ export default function ShipmentPanel({
                 </div>
                 <div className="mt-1 text-sm tabular-nums">
                   出荷 {fmt(sh.weight)} kg
+                  {sh.grossWeight !== null && sh.tareWeight !== null && (
+                    <span className="text-xs text-[#909090]">
+                      {" "}
+                      （総 {fmt(sh.grossWeight)} − 箱 {fmt(sh.tareWeight)}）
+                    </span>
+                  )}
                   {sh.received && (
                     <>
                       {" → "}受入 {fmt(sh.received.weight)} kg
@@ -360,6 +452,8 @@ export default function ShipmentPanel({
                 <th className={th}>出荷日</th>
                 <th className={th}>送り元 → 送り先</th>
                 <th className={th}>種類</th>
+                <th className={`${th} text-right`}>総重量(kg)</th>
+                <th className={`${th} text-right`}>ポリ箱(kg)</th>
                 <th className={`${th} text-right`}>出荷重量(kg)</th>
                 <th className={th}>処理日</th>
                 <th className={`${th} text-right`}>受入重量(kg)</th>
@@ -371,7 +465,7 @@ export default function ShipmentPanel({
             <tbody>
               {shipments.length === 0 && (
                 <tr>
-                  <td className={td} colSpan={10}>
+                  <td className={td} colSpan={12}>
                     ポリ箱はありません
                   </td>
                 </tr>
@@ -387,7 +481,9 @@ export default function ShipmentPanel({
                       {sh.fromFactory} → {sh.toFactory}
                     </td>
                     <td className={td}>{sh.hinshu}</td>
-                    <td className={tdNum}>{fmt(sh.weight)}</td>
+                    <td className={`${tdNum} text-[#909090]`}>{sh.grossWeight !== null ? fmt(sh.grossWeight) : ""}</td>
+                    <td className={`${tdNum} text-[#909090]`}>{sh.tareWeight !== null ? fmt(sh.tareWeight) : ""}</td>
+                    <td className={`${tdNum} font-semibold`}>{fmt(sh.weight)}</td>
                     <td className={td}>{sh.received?.date ?? ""}</td>
                     <td className={tdNum}>{sh.received ? fmt(sh.received.weight) : ""}</td>
                     <td className={`${tdNum} ${large ? "bg-[#fdecea] font-bold text-[#dc000c]" : ""}`}>

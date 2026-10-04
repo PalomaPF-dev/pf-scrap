@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useSyncExternalStore, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Pencil, Send, Trash2 } from "lucide-react";
 import {
@@ -18,21 +18,6 @@ const input =
 const td = "border border-[#e5e5e5] px-2 py-1.5 whitespace-nowrap";
 const tdNum = `${td} text-right tabular-nums`;
 const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2 py-1.5 text-left font-semibold whitespace-nowrap";
-
-/** 端末の保存（localStorage）の変化を受け取る。他のタブで変えたときも追従する。 */
-function subscribeStorage(onChange: () => void): () => void {
-  window.addEventListener("storage", onChange);
-  return () => window.removeEventListener("storage", onChange);
-}
-
-/** 端末の保存から読む。使えない端末（プライベートモード等）では null。 */
-function readStorage(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
 
 /** YYYY-MM-DD どうしの日数差 */
 function daysBetween(from: string, to: string): number {
@@ -71,25 +56,10 @@ export default function ShipmentPanel({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [hinshu, setHinshu] = useState(kinds[0] ?? "");
-  // 総重量（ポリ箱込み）と、空のポリ箱の重さ（事前に量った値）。差がスクラップ重量。
-  // ポリ箱の重さは同じ箱を使い回すことが多いので、工場ごとに端末に覚えておく。
+  // 空のポリ箱の重さと、スクラップを入れてポリ箱ごと量った総重量。差がスクラップ重量。
+  // ポリ箱は1つずつ重さが違うので、どちらも1箱ごとに量って入れる（前の箱の値は残さない）。
+  const [tare, setTare] = useState("");
   const [gross, setGross] = useState("");
-  const tareKey = `scrap.polyTare.${factory}`;
-  const savedTare = useSyncExternalStore(
-    subscribeStorage,
-    () => readStorage(tareKey),
-    () => null
-  );
-  const [pickedTare, setPickedTare] = useState<string | null>(null);
-  const tare = pickedTare ?? savedTare ?? "";
-  function setTare(v: string) {
-    setPickedTare(v);
-    try {
-      window.localStorage.setItem(tareKey, v);
-    } catch {
-      /* 覚えられない端末でも入力はできる */
-    }
-  }
   const grossN = toNumOrNull(gross);
   const tareN = toNumOrNull(tare);
   const net = grossN !== null && tareN !== null ? Math.round((grossN - tareN) * 1000) / 1000 : null;
@@ -114,7 +84,7 @@ export default function ShipmentPanel({
       if (res.ok) {
         setBoxNo(res.boxNo ?? null);
         setMessage({ ok: true, title: "出荷を登録しました", text: res.message ?? "" });
-        // ポリ箱の重さは次の箱でも使うことが多いので残す
+        setTare("");
         setGross("");
         setNote("");
         router.refresh();
@@ -122,6 +92,23 @@ export default function ShipmentPanel({
         setMessage({ ok: false, title: "登録できませんでした", text: res.message });
       }
     });
+  }
+
+  /** 重量計の写真読取の結果を、指定した欄に入れる。 */
+  function onRead(label: string, set: (v: string) => void) {
+    return (r: { value: number | null; note?: string }) => {
+      if (r.value === null) {
+        const n = r.note?.trim();
+        setMessage({
+          ok: false,
+          title: "読み取れませんでした",
+          text: n && n.includes("手入力") ? n : [n, "もう一度撮るか、手入力してください。"].filter(Boolean).join(" "),
+        });
+        return;
+      }
+      set(String(r.value));
+      setMessage({ ok: true, title: `${label} ${fmt(r.value)} kg を読み取りました`, text: "値を確かめてください。" });
+    };
   }
 
   const canEdit = (sh: Shipment) =>
@@ -220,9 +207,36 @@ export default function ShipmentPanel({
               </div>
             </div>
 
+            {/* ① 空のポリ箱 → ② スクラップを入れて総重量。量る順番どおりに並べる */}
             <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
-                総重量 kg（ポリ箱ごと量った重さ）
+                ① ポリ箱の重さ kg（空のポリ箱を量る）
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.1"
+                  min="0"
+                  value={tare}
+                  onChange={(e) => setTare(e.target.value)}
+                  aria-label="ポリ箱の重さ kg"
+                  className={`${input} text-right tabular-nums`}
+                />
+              </label>
+              <ScaleCamera
+                phase="before"
+                recordDate={shipDate}
+                factory={factory}
+                needQr={false}
+                label="空のポリ箱を撮って読み取る"
+                disabled={pending}
+                onResult={onRead("ポリ箱の重さ", setTare)}
+                onError={(text) => setMessage({ ok: false, text })}
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
+              <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
+                ② 総重量 kg（スクラップを入れてポリ箱ごと量る）
                 <input
                   type="number"
                   inputMode="decimal"
@@ -235,57 +249,27 @@ export default function ShipmentPanel({
                 />
               </label>
               <ScaleCamera
-                phase="before"
+                phase="after"
                 recordDate={shipDate}
                 factory={factory}
                 needQr={false}
-                label="重量計を撮って読み取る"
+                label="総重量を撮って読み取る"
                 disabled={pending}
-                onResult={(r) => {
-                  if (r.value === null) {
-                    const n = r.note?.trim();
-                    setMessage({
-                      ok: false,
-                      title: "読み取れませんでした",
-                      text: n && n.includes("手入力") ? n : [n, "もう一度撮るか、手入力してください。"].filter(Boolean).join(" "),
-                    });
-                    return;
-                  }
-                  setGross(String(r.value));
-                  setMessage({ ok: true, title: `総重量 ${fmt(r.value)} kg を読み取りました`, text: "値を確かめて登録してください。" });
-                }}
+                onResult={onRead("総重量", setGross)}
                 onError={(text) => setMessage({ ok: false, text })}
               />
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 sm:items-end">
-              <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
-                ポリ箱の重さ kg（空のときに量った重さ）
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.1"
-                  min="0"
-                  value={tare}
-                  onChange={(e) => setTare(e.target.value)}
-                  aria-label="ポリ箱の重さ kg"
-                  className={`${input} text-right tabular-nums`}
-                />
-              </label>
-              <div
-                className={`flex h-11 items-center justify-between rounded-lg px-3 sm:h-10 ${
-                  net !== null && net <= 0 ? "bg-[#fdecea] text-[#dc000c]" : "bg-[#faf6ef] text-[#b4632c]"
-                }`}
-              >
-                <span className="text-xs font-bold">スクラップ重量（総重量 − ポリ箱）</span>
-                <span className="text-lg font-extrabold tabular-nums" aria-label="スクラップ重量">
-                  {net !== null ? `${fmt(net)} kg` : "—"}
-                </span>
-              </div>
+            <div
+              className={`flex h-12 items-center justify-between rounded-lg px-3 ${
+                net !== null && net <= 0 ? "bg-[#fdecea] text-[#dc000c]" : "bg-[#faf6ef] text-[#b4632c]"
+              }`}
+            >
+              <span className="text-xs font-bold">スクラップ重量（② − ①）</span>
+              <span className="text-xl font-extrabold tabular-nums" aria-label="スクラップ重量">
+                {net !== null ? `${fmt(net)} kg` : "—"}
+              </span>
             </div>
-            <p className="-mt-1 text-xs text-[#909090]">
-              ポリ箱の重さはこの端末に覚えておきます。違う箱を使うときだけ入れ直してください。
-            </p>
 
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">

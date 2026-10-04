@@ -28,6 +28,7 @@ export {
   type Shipment,
   shipmentGap,
   shipmentGapLarge,
+  shipmentPair,
 } from "./scrapTypes";
 import {
   type ScrapBag as _ScrapBag,
@@ -575,6 +576,7 @@ function mapDailyRecord(r: any, entries: any[]): DailyRecord {
       kotei: e.kotei ?? "",
       originFactory: e.origin_factory ?? "",
       shipmentId: e.shipment_id ?? null,
+      polyTare: numOrNull(e.poly_tare),
     })),
   };
 }
@@ -615,7 +617,7 @@ export async function getDailyRecord(
     SELECT jikoku, hinshu, scale_id, scale_name, gross_weight, tare_weight,
            weight, cum_before, cum_after, cum_before_reason, cum_after_reason,
            cum_before_read_id, cum_after_read_id, bag_id, kirokusha, ijo,
-           busho, kikai, zairyo, kotei, origin_factory, shipment_id
+           busho, kikai, zairyo, kotei, origin_factory, shipment_id, poly_tare
     FROM scrap_daily_entries WHERE record_id = ${r.id} ORDER BY sort ASC`;
   return mapDailyRecord(r, entries);
 }
@@ -676,7 +678,7 @@ async function replaceDailyEntries(
         gross_weight, tare_weight, weight, cum_before, cum_after,
         cum_before_reason, cum_after_reason, cum_before_read_id, cum_after_read_id,
         bag_id, kirokusha, ijo, busho, kikai, zairyo, kotei, sort,
-        origin_factory, shipment_id
+        origin_factory, shipment_id, poly_tare
       )
       VALUES (
         ${companyId}, ${recordId}, ${e.jikoku}, ${e.hinshu}, ${e.scaleId}, ${e.scaleName},
@@ -685,7 +687,7 @@ async function replaceDailyEntries(
         ${e.cumBeforeReadId ?? null}, ${e.cumAfterReadId ?? null},
         ${e.bagId ?? null}, ${e.kirokusha}, ${e.ijo},
         ${e.busho ?? ""}, ${e.kikai ?? ""}, ${e.zairyo ?? ""}, ${e.kotei ?? ""}, ${i},
-        ${e.originFactory ?? ""}, ${e.shipmentId ?? null}
+        ${e.originFactory ?? ""}, ${e.shipmentId ?? null}, ${e.polyTare ?? null}
       )`);
   }
   await sql.transaction(queries);
@@ -2919,6 +2921,7 @@ function mapShipment(r: any): Shipment {
         ? {
             date: dateStr(r.recv_date),
             weight: num(r.recv_weight),
+            polyTare: numOrNull(r.recv_poly_tare),
             scaleName: r.recv_scale ?? "",
             kirokusha: r.recv_by ?? "",
           }
@@ -2950,7 +2953,8 @@ async function queryShipments(
   const rows = await sql`
     SELECT s.id, s.box_no, s.from_factory, s.to_factory, s.ship_date, s.hinshu, s.weight,
       s.gross_weight, s.tare_weight, s.shipped_by, s.note,
-      r.record_date AS recv_date, e.weight AS recv_weight, e.scale_name AS recv_scale,
+      r.record_date AS recv_date, e.weight AS recv_weight, e.poly_tare AS recv_poly_tare,
+      e.scale_name AS recv_scale,
       e.kirokusha AS recv_by
     FROM scrap_shipments s
     LEFT JOIN scrap_daily_entries e ON e.shipment_id = s.id
@@ -3002,10 +3006,10 @@ export async function createShipment(
     toFactory: string;
     shipDate: string;
     hinshu: string;
-    /** ポリ箱ごと量った総重量 */
+    /** ポリ箱ごと量った重さ（出荷重量） */
     grossWeight: number;
-    /** 空のポリ箱の重さ */
-    tareWeight: number;
+    /** 送る側で量ったポリ箱の重さ。いまの運用では量らない（null） */
+    tareWeight: number | null;
     shippedBy: string;
     note: string;
   }
@@ -3013,7 +3017,11 @@ export async function createShipment(
   await ensureSchema();
   const sql = getSql();
   const prefix = `${x.fromFactory}-${x.shipDate.slice(5, 7)}${x.shipDate.slice(8, 10)}-`;
-  const weight = Math.round((x.grossWeight - x.tareWeight) * 1000) / 1000;
+  // 出荷重量はポリ箱込み。送る側でポリ箱を量ったとき（試行版）だけスクラップ重量にする
+  const weight =
+    x.tareWeight !== null
+      ? Math.round((x.grossWeight - x.tareWeight) * 1000) / 1000
+      : Math.round(x.grossWeight * 1000) / 1000;
   for (let attempt = 0; attempt < 5; attempt++) {
     const rows = await sql`
       SELECT box_no FROM scrap_shipments

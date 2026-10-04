@@ -89,7 +89,7 @@ import {
   type Shipment,
 } from "./db";
 import { isDateStr, isYmStr, normDateStr, normYm, todayStr, toNum, toNumOrNull } from "./format";
-import { parseItemRef } from "./scrapTypes";
+import { parseItemRef, shipmentNeedsPolyTare } from "./scrapTypes";
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; message: string };
 
@@ -535,6 +535,14 @@ export async function saveDailyRecordAction(input: {
           `ポリ箱「${shipment.boxNo}」は ${shipment.hinshu} です。${kind} の箱（${scaleName}）には記録できません。`
         );
       }
+      // 空けたあとのポリ箱の重さ。送る側はポリ箱込みで量っているので、これが無いと突き合わせられない。
+      const polyTare = shipment ? toNumOrNull(e.polyTare) : null;
+      if (shipment && polyTare === null && shipmentNeedsPolyTare(shipment)) {
+        return fail(`ポリ箱「${shipment.boxNo}」の重さ（空けたあと）を量って入力してください。`);
+      }
+      if (polyTare !== null && (polyTare < 0 || (shipment?.grossWeight != null && polyTare >= shipment.grossWeight))) {
+        return fail(`ポリ箱「${shipment!.boxNo}」の重さ ${polyTare} kg が正しくありません。量り直してください。`);
+      }
 
       const bagId = asStr(e.bagId ?? "", 50) || null;
       const cumKey = bagId ?? scaleId ?? scaleName;
@@ -608,6 +616,7 @@ export async function saveDailyRecordAction(input: {
         // 発生元はポリ箱からだけ決める（画面から任意の工場名を入れさせない）
         originFactory: shipment ? shipment.fromFactory : "",
         shipmentId,
+        polyTare,
       });
     }
     await saveDailyRecord(s.companyId, {
@@ -2407,17 +2416,16 @@ async function shippingFactory(
 }
 
 /**
- * ポリ箱を出荷として登録する（送る側で量った重量）。箱に書く番号を返す。
+ * ポリ箱を出荷として登録する（送る側でポリ箱ごと量った重量）。箱に書く番号を返す。
+ * ポリ箱の重さは受け入れ側が、スクラップを空けたあとに量る。
  * 出荷日は既定で当日。前日分を翌朝まとめて登録することもあるので、過去日は受け付ける。
  */
 export async function createShipmentAction(input: {
   factory: string;
   shipDate: string;
   hinshu: string;
-  /** ポリ箱ごと量った総重量 */
+  /** ポリ箱ごと量った重さ（出荷重量） */
   grossWeight: unknown;
-  /** 空のポリ箱の重さ（事前に量った値） */
-  tareWeight: unknown;
   note?: string;
 }): Promise<ActionResult & { boxNo?: string }> {
   try {
@@ -2432,16 +2440,16 @@ export async function createShipmentAction(input: {
     const kinds = (await listScrapKinds(s.companyId)).filter((k) => k.active).map((k) => k.name);
     const hinshu = asStr(input.hinshu, 20);
     if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
-    const w = shipWeights(input.grossWeight, input.tareWeight);
-    if ("error" in w) return fail(w.error);
+    const gross = grossWeight(input.grossWeight);
+    if (typeof gross === "string") return fail(gross);
     const affiliation = await getUserAffiliation(s.userId);
     const sh = await createShipment(s.companyId, {
       fromFactory: from,
       toFactory: route.toFactory,
       shipDate,
       hinshu,
-      grossWeight: w.gross,
-      tareWeight: w.tare,
+      grossWeight: gross,
+      tareWeight: null,
       shippedBy: [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" "),
       note: asStr(input.note ?? "", 200),
     });
@@ -2449,15 +2457,24 @@ export async function createShipmentAction(input: {
     return {
       ok: true,
       boxNo: sh.boxNo,
-      message: `スクラップ ${sh.weight} kg（総重量 ${w.gross} − ポリ箱 ${w.tare}）で出荷を登録しました。ポリ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
+      message: `${gross} kg（ポリ箱込み）で出荷を登録しました。ポリ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
     };
   } catch (e) {
     return fail((e as Error).message);
   }
 }
 
+/** 出荷重量（ポリ箱込み）を確かめる。正しければ数値、おかしければ理由の文字列。 */
+function grossWeight(raw: unknown): number | string {
+  const gross = toNumOrNull(raw);
+  if (gross === null || !(gross > 0)) return "出荷重量（ポリ箱込み）を入力してください。";
+  if (gross > 1000) return "重量が大きすぎます（1,000 kg まで）。単位を確認してください。";
+  return Math.round(gross * 1000) / 1000;
+}
+
 /**
- * 出荷の重量を確かめる。総重量（ポリ箱込み）とポリ箱の重さから、スクラップ重量を出す。
+ * 試行版（送る側でポリ箱も量っていた）の登録分を直すときの確認。
+ * 総重量（ポリ箱込み）とポリ箱の重さから、スクラップ重量を出す。
  * ポリ箱は空のときに事前に量っておく運用。
  */
 function shipWeights(
@@ -2511,10 +2528,15 @@ export async function updateShipmentAction(input: {
     const hinshu = asStr(input.hinshu, 20);
     if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
     let patch: { grossWeight: number | null; tareWeight: number | null; weight: number };
-    if (input.grossWeight !== undefined || input.tareWeight !== undefined) {
+    if (input.tareWeight !== undefined) {
+      // 試行版の登録分（送る側でポリ箱も量っていた）
       const w = shipWeights(input.grossWeight, input.tareWeight);
       if ("error" in w) return fail(w.error);
       patch = { grossWeight: w.gross, tareWeight: w.tare, weight: w.net };
+    } else if (input.grossWeight !== undefined) {
+      const gross = grossWeight(input.grossWeight);
+      if (typeof gross === "string") return fail(gross);
+      patch = { grossWeight: gross, tareWeight: null, weight: gross };
     } else {
       const weight = toNum(input.weight);
       if (!(weight > 0) || weight > 1000) return fail("重量を正しく入力してください。");

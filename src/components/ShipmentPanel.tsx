@@ -8,7 +8,7 @@ import {
   deleteShipmentAction,
   updateShipmentAction,
 } from "@/lib/actions";
-import { shipmentGap, shipmentGapLarge, type Shipment } from "@/lib/scrapTypes";
+import { shipmentGap, shipmentGapLarge, shipmentPair, type Shipment } from "@/lib/scrapTypes";
 import { fmt, toNumOrNull } from "@/lib/format";
 import ScaleCamera from "./ScaleCamera";
 import { ResultBanner, type PanelMessage } from "./ScrapBagPanel";
@@ -56,13 +56,9 @@ export default function ShipmentPanel({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [hinshu, setHinshu] = useState(kinds[0] ?? "");
-  // 空のポリ箱の重さと、スクラップを入れてポリ箱ごと量った総重量。差がスクラップ重量。
-  // ポリ箱は1つずつ重さが違うので、どちらも1箱ごとに量って入れる（前の箱の値は残さない）。
-  const [tare, setTare] = useState("");
+  // 出荷重量はポリ箱ごと量った重さ。ポリ箱の重さは受け入れ側が、空けたあとに量る。
   const [gross, setGross] = useState("");
   const grossN = toNumOrNull(gross);
-  const tareN = toNumOrNull(tare);
-  const net = grossN !== null && tareN !== null ? Math.round((grossN - tareN) * 1000) / 1000 : null;
   const [shipDate, setShipDate] = useState(today);
   const [note, setNote] = useState("");
   const [message, setMessage] = useState<PanelMessage | null>(null);
@@ -78,13 +74,11 @@ export default function ShipmentPanel({
         shipDate,
         hinshu,
         grossWeight: gross,
-        tareWeight: tare,
         note,
       });
       if (res.ok) {
         setBoxNo(res.boxNo ?? null);
         setMessage({ ok: true, title: "出荷を登録しました", text: res.message ?? "" });
-        setTare("");
         setGross("");
         setNote("");
         router.refresh();
@@ -115,32 +109,28 @@ export default function ShipmentPanel({
     !sh.received && (isAdmin || myFactory === null || myFactory === sh.fromFactory);
 
   function edit(sh: Shipment) {
-    // 総重量を量り直したことが多いので総重量を聞く。ポリ箱の重さが違っていたら続けて聞く。
-    if (sh.grossWeight === null || sh.tareWeight === null) {
-      const v = prompt(`ポリ箱「${sh.boxNo}」のスクラップ重量 kg（${sh.hinshu}）`, String(sh.weight));
-      if (v === null) return;
+    const run = (patch: { grossWeight?: string; tareWeight?: string; weight?: string }) =>
       startTransition(async () => {
-        const res = await updateShipmentAction({ id: sh.id, hinshu: sh.hinshu, weight: v, note: sh.note });
+        const res = await updateShipmentAction({ id: sh.id, hinshu: sh.hinshu, note: sh.note, ...patch });
         setListMsg({ ok: res.ok, text: res.message ?? "" });
         if (res.ok) router.refresh();
       });
-      return;
+    if (sh.grossWeight !== null && sh.tareWeight !== null) {
+      // 試行版の登録分（送る側でポリ箱も量っていた）
+      const g = prompt(`ポリ箱「${sh.boxNo}」の総重量 kg（ポリ箱込み）`, String(sh.grossWeight));
+      if (g === null) return;
+      const t = prompt(`ポリ箱「${sh.boxNo}」のポリ箱の重さ kg`, String(sh.tareWeight));
+      if (t === null) return;
+      run({ grossWeight: g, tareWeight: t });
+    } else if (sh.grossWeight !== null) {
+      const g = prompt(`ポリ箱「${sh.boxNo}」の出荷重量 kg（ポリ箱込み・${sh.hinshu}）`, String(sh.grossWeight));
+      if (g === null) return;
+      run({ grossWeight: g });
+    } else {
+      const v = prompt(`ポリ箱「${sh.boxNo}」の重量 kg（${sh.hinshu}）`, String(sh.weight));
+      if (v === null) return;
+      run({ weight: v });
     }
-    const g = prompt(`ポリ箱「${sh.boxNo}」の総重量 kg（ポリ箱込み）`, String(sh.grossWeight));
-    if (g === null) return;
-    const t = prompt(`ポリ箱「${sh.boxNo}」のポリ箱の重さ kg（空の重さ）`, String(sh.tareWeight));
-    if (t === null) return;
-    startTransition(async () => {
-      const res = await updateShipmentAction({
-        id: sh.id,
-        hinshu: sh.hinshu,
-        grossWeight: g,
-        tareWeight: t,
-        note: sh.note,
-      });
-      setListMsg({ ok: res.ok, text: res.message ?? "" });
-      if (res.ok) router.refresh();
-    });
   }
 
   function remove(sh: Shipment) {
@@ -163,8 +153,9 @@ export default function ShipmentPanel({
       shippedN: shipped.length,
       shippedKg: shipped.reduce((t, sh) => t + sh.weight, 0),
       doneN: done.length,
-      doneShipKg: done.reduce((t, sh) => t + sh.weight, 0),
-      doneRecvKg: done.reduce((t, sh) => t + (sh.received?.weight ?? 0), 0),
+      // 突き合わせる重さどうしで足す（ポリ箱込みの出荷 ↔ 投入重量＋ポリ箱）
+      doneShipKg: done.reduce((t, sh) => t + (shipmentPair(sh)?.sent ?? 0), 0),
+      doneRecvKg: done.reduce((t, sh) => t + (shipmentPair(sh)?.received ?? 0), 0),
       openN: open.length,
       openKg: open.reduce((t, sh) => t + sh.weight, 0),
       lateN: late.length,
@@ -207,18 +198,17 @@ export default function ShipmentPanel({
               </div>
             </div>
 
-            {/* ① 空のポリ箱 → ② スクラップを入れて総重量。量る順番どおりに並べる */}
             <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
-                ① ポリ箱の重さ kg（空のポリ箱を量る）
+                出荷重量 kg（スクラップを入れたポリ箱ごと量る）
                 <input
                   type="number"
                   inputMode="decimal"
                   step="0.1"
                   min="0"
-                  value={tare}
-                  onChange={(e) => setTare(e.target.value)}
-                  aria-label="ポリ箱の重さ kg"
+                  value={gross}
+                  onChange={(e) => setGross(e.target.value)}
+                  aria-label="出荷重量 kg（ポリ箱込み）"
                   className={`${input} text-right tabular-nums`}
                 />
               </label>
@@ -227,49 +217,16 @@ export default function ShipmentPanel({
                 recordDate={shipDate}
                 factory={factory}
                 needQr={false}
-                label="空のポリ箱を撮って読み取る"
+                label="重量計を撮って読み取る"
                 disabled={pending}
-                onResult={onRead("ポリ箱の重さ", setTare)}
+                onResult={onRead("出荷重量", setGross)}
                 onError={(text) => setMessage({ ok: false, text })}
               />
             </div>
-
-            <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-              <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
-                ② 総重量 kg（スクラップを入れてポリ箱ごと量る）
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.1"
-                  min="0"
-                  value={gross}
-                  onChange={(e) => setGross(e.target.value)}
-                  aria-label="総重量 kg（ポリ箱込み）"
-                  className={`${input} text-right tabular-nums`}
-                />
-              </label>
-              <ScaleCamera
-                phase="after"
-                recordDate={shipDate}
-                factory={factory}
-                needQr={false}
-                label="総重量を撮って読み取る"
-                disabled={pending}
-                onResult={onRead("総重量", setGross)}
-                onError={(text) => setMessage({ ok: false, text })}
-              />
-            </div>
-
-            <div
-              className={`flex h-12 items-center justify-between rounded-lg px-3 ${
-                net !== null && net <= 0 ? "bg-[#fdecea] text-[#dc000c]" : "bg-[#faf6ef] text-[#b4632c]"
-              }`}
-            >
-              <span className="text-xs font-bold">スクラップ重量（② − ①）</span>
-              <span className="text-xl font-extrabold tabular-nums" aria-label="スクラップ重量">
-                {net !== null ? `${fmt(net)} kg` : "—"}
-              </span>
-            </div>
+            <p className="-mt-1 text-xs text-[#909090]">
+              ポリ箱の重さは量らなくて構いません。受け入れ側でスクラップを空けたあとに量り、
+              「投入したスクラップ ＋ ポリ箱 ＝ この出荷重量」で突き合わせます。
+            </p>
 
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
@@ -298,7 +255,7 @@ export default function ShipmentPanel({
             <button
               type="button"
               onClick={ship}
-              disabled={pending || net === null || net <= 0 || !hinshu}
+              disabled={pending || grossN === null || grossN <= 0 || !hinshu}
               className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#b4632c] text-base font-bold text-white hover:bg-[#9a5424] disabled:opacity-50 sm:w-auto sm:px-6"
             >
               <Send className="h-5 w-5" />
@@ -356,7 +313,7 @@ export default function ShipmentPanel({
         <h2 className="mb-1 text-base font-bold text-[#333333] sm:text-sm">ポリ箱の一覧</h2>
         <p className="mb-3 text-xs text-[#909090]">
           この月に出荷・処理したポリ箱と、まだ処理していないポリ箱（月に関係なく先頭）を表示しています。
-          出荷重量は「総重量 − ポリ箱」のスクラップ重量、差は「受入 − 出荷」です。
+          出荷重量は送った工場でポリ箱ごと量った重さ、受入計は「投入したスクラップ ＋ 空けたあとのポリ箱」、差は「受入計 − 出荷重量」です。
         </p>
         {listMsg && <ResultBanner msg={listMsg} className="mb-3" />}
 
@@ -368,6 +325,7 @@ export default function ShipmentPanel({
           {shipments.map((sh) => {
             const gap = shipmentGap(sh);
             const large = shipmentGapLarge(sh);
+            const p = shipmentPair(sh);
             return (
               <li key={sh.id} className="rounded-xl border border-[#e5e5e5] p-3">
                 <div className="flex items-start justify-between gap-2">
@@ -380,16 +338,18 @@ export default function ShipmentPanel({
                   <StatusTag sh={sh} today={today} />
                 </div>
                 <div className="mt-1 text-sm tabular-nums">
-                  出荷 {fmt(sh.weight)} kg
-                  {sh.grossWeight !== null && sh.tareWeight !== null && (
-                    <span className="text-xs text-[#909090]">
-                      {" "}
-                      （総 {fmt(sh.grossWeight)} − 箱 {fmt(sh.tareWeight)}）
-                    </span>
+                  出荷 {fmt(p?.sent ?? sh.grossWeight ?? sh.weight)} kg
+                  {sh.grossWeight !== null && sh.tareWeight === null && (
+                    <span className="text-xs text-[#909090]">（ポリ箱込み）</span>
                   )}
-                  {sh.received && (
+                  {sh.received && p && (
                     <>
-                      {" → "}受入 {fmt(sh.received.weight)} kg
+                      {" → "}受入 {fmt(p.received)} kg
+                      {p.withBox && (
+                        <span className="text-xs text-[#909090]">
+                          （スクラップ {fmt(sh.received.weight)} ＋ ポリ箱 {fmt(sh.received.polyTare)}）
+                        </span>
+                      )}
                       <span className={`ml-1 font-bold ${large ? "text-[#dc000c]" : "text-[#555555]"}`}>
                         （差 {gap !== null && gap > 0 ? "+" : ""}
                         {fmt(gap)}）
@@ -436,11 +396,11 @@ export default function ShipmentPanel({
                 <th className={th}>出荷日</th>
                 <th className={th}>送り元 → 送り先</th>
                 <th className={th}>種類</th>
-                <th className={`${th} text-right`}>総重量(kg)</th>
-                <th className={`${th} text-right`}>ポリ箱(kg)</th>
                 <th className={`${th} text-right`}>出荷重量(kg)</th>
                 <th className={th}>処理日</th>
-                <th className={`${th} text-right`}>受入重量(kg)</th>
+                <th className={`${th} text-right`}>投入重量(kg)</th>
+                <th className={`${th} text-right`}>ポリ箱(kg)</th>
+                <th className={`${th} text-right`}>受入計(kg)</th>
                 <th className={`${th} text-right`}>差</th>
                 <th className={th}>状態</th>
                 <th className={th}></th>
@@ -457,6 +417,7 @@ export default function ShipmentPanel({
               {shipments.map((sh) => {
                 const gap = shipmentGap(sh);
                 const large = shipmentGapLarge(sh);
+                const p = shipmentPair(sh);
                 return (
                   <tr key={sh.id}>
                     <td className={`${td} font-mono`}>{sh.boxNo}</td>
@@ -465,11 +426,13 @@ export default function ShipmentPanel({
                       {sh.fromFactory} → {sh.toFactory}
                     </td>
                     <td className={td}>{sh.hinshu}</td>
-                    <td className={`${tdNum} text-[#909090]`}>{sh.grossWeight !== null ? fmt(sh.grossWeight) : ""}</td>
-                    <td className={`${tdNum} text-[#909090]`}>{sh.tareWeight !== null ? fmt(sh.tareWeight) : ""}</td>
-                    <td className={`${tdNum} font-semibold`}>{fmt(sh.weight)}</td>
+                    <td className={`${tdNum} font-semibold`}>{fmt(p?.sent ?? sh.grossWeight ?? sh.weight)}</td>
                     <td className={td}>{sh.received?.date ?? ""}</td>
                     <td className={tdNum}>{sh.received ? fmt(sh.received.weight) : ""}</td>
+                    <td className={`${tdNum} text-[#909090]`}>
+                      {sh.received?.polyTare !== null && sh.received?.polyTare !== undefined ? fmt(sh.received.polyTare) : ""}
+                    </td>
+                    <td className={`${tdNum} font-semibold`}>{p ? fmt(p.received) : ""}</td>
                     <td className={`${tdNum} ${large ? "bg-[#fdecea] font-bold text-[#dc000c]" : ""}`}>
                       {gap === null ? "" : `${gap > 0 ? "+" : ""}${fmt(gap)}`}
                     </td>

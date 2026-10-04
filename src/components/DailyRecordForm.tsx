@@ -31,6 +31,8 @@ import {
   type Shipment,
   shipmentGap,
   shipmentGapLarge,
+  shipmentNeedsPolyTare,
+  shipmentPair,
 } from "@/lib/scrapTypes";
 import { fmt, fmtPct, toNum, toNumOrNull } from "@/lib/format";
 import DateNav from "@/components/DateNav";
@@ -72,6 +74,8 @@ type EntryDraft = {
   kotei: string;
   /** 他工場から届いたポリ箱を投入した行だけ。発生元の工場はサーバーがポリ箱から決める */
   shipmentId: string | null;
+  /** 空けたあとに量ったポリ箱の重さ（ポリ箱を投入した行だけ） */
+  polyTare: string;
 };
 
 /** モバイルでの拡大表示を避けるため、入力は 16px（text-base）を基準にする */
@@ -284,6 +288,7 @@ export default function DailyRecordForm({
       zairyo: e.zairyo ?? "",
       kotei: e.kotei ?? "",
       shipmentId: e.shipmentId ?? null,
+      polyTare: e.polyTare !== null && e.polyTare !== undefined ? String(e.polyTare) : "",
     }))
   );
   const [kaishu, setKaishu] = useState(
@@ -315,6 +320,8 @@ export default function DailyRecordForm({
   // ポリ箱を選んで投入すると、その分は送った工場のスクラップとして照合に回る。
   const [source, setSource] = useState<"own" | "poly">("own");
   const [pickedShipmentId, setPickedShipmentId] = useState<string | null>(null);
+  // 空けたあとのポリ箱の重さ。投入重量 ＋ これ ＝ 送った工場で量った重量（ポリ箱込み）
+  const [polyTare, setPolyTare] = useState("");
   const shipmentById = useMemo(() => new Map(shipments.map((sh) => [sh.id, sh])), [shipments]);
 
   // ===== どの職場のスクラップか =====
@@ -631,6 +638,14 @@ export default function DailyRecordForm({
       });
       return;
     }
+    if (shipment && shipmentNeedsPolyTare(shipment) && toNumOrNull(polyTare) === null) {
+      setMessage({
+        ok: false,
+        title: "ポリ箱の重さを量ってください",
+        text: `スクラップを空けたあとのポリ箱「${shipment.boxNo}」を量り、③ に入力してから記録してください。`,
+      });
+      return;
+    }
     if (!poly && workplaces.length > 0 && !workplace) {
       setMessage({
         ok: false,
@@ -704,6 +719,7 @@ export default function DailyRecordForm({
         zairyo: "",
         kotei: "",
         shipmentId: shipment?.id ?? null,
+        polyTare: shipment ? polyTare.trim() : "",
       },
     ];
     setEntries(next);
@@ -715,16 +731,16 @@ export default function DailyRecordForm({
     // 同じ見た目のボタンが並んで押し間違いが起きていた。保存に失敗したときだけ
     // 未保存として残り、画面下の「保存」で送り直せる。
     // ポリ箱は送った工場で量った重量と突き合わせる
-    const gapText = shipment
-      ? (() => {
-          const gap = Math.round(((weight ?? 0) - shipment.weight) * 1000) / 1000;
-          return `ポリ箱「${shipment.boxNo}」: ${shipment.fromFactory}で ${fmt(shipment.weight)} kg → ここで ${fmt(weight)} kg（差 ${gap > 0 ? "+" : ""}${fmt(gap)} kg）。`;
-        })()
-      : "";
-    const gapLarge = shipment
-      ? shipmentGapLarge({ ...shipment, received: { date, weight: weight ?? 0, scaleName: "", kirokusha: "" } })
-      : false;
-    if (shipment) setPickedShipmentId(null);
+    const tareN = toNumOrNull(polyTare);
+    const trial = shipment
+      ? { ...shipment, received: { date, weight: weight ?? 0, polyTare: tareN, scaleName: "", kirokusha: "" } }
+      : null;
+    const gapText = trial ? `ポリ箱「${trial.boxNo}」: ${polyGapText(trial)}。` : "";
+    const gapLarge = trial ? shipmentGapLarge(trial) : false;
+    if (shipment) {
+      setPickedShipmentId(null);
+      setPolyTare("");
+    }
     setMessage({ ok: true, title: `${fmt(weight)} kg を記録しました`, text: `${gapText}保存しています…` });
     startTransition(async () => {
       const res = await saveDailyRecordAction(buildPayload(next));
@@ -784,6 +800,7 @@ export default function DailyRecordForm({
         zairyo: e.zairyo,
         kotei: e.kotei,
         shipmentId: e.shipmentId,
+        polyTare: e.polyTare,
       })),
     };
   }
@@ -1191,7 +1208,10 @@ export default function DailyRecordForm({
                               type="button"
                               role="radio"
                               aria-checked={pickedShipmentId === sh.id}
-                              onClick={() => setPickedShipmentId(sh.id)}
+                              onClick={() => {
+                                if (pickedShipmentId !== sh.id) setPolyTare("");
+                                setPickedShipmentId(sh.id);
+                              }}
                               className={`rounded-xl border-2 px-3 py-2 text-left ${
                                 pickedShipmentId === sh.id
                                   ? "border-[#333333] bg-[#f0f0ee]"
@@ -1200,7 +1220,10 @@ export default function DailyRecordForm({
                             >
                               <div className="font-mono text-base font-bold text-[#333333] sm:text-sm">{sh.boxNo}</div>
                               <div className="text-xs text-[#707070]">
-                                {sh.fromFactory} ／ {sh.shipDate} 出荷 ／ {sh.hinshu} ／ 出荷時 {fmt(sh.weight)} kg
+                                {sh.fromFactory} ／ {sh.shipDate} 出荷 ／ {sh.hinshu} ／ 出荷時{" "}
+                                {sh.grossWeight !== null && sh.tareWeight === null
+                                  ? `${fmt(sh.grossWeight)} kg（ポリ箱込み）`
+                                  : `${fmt(sh.weight)} kg`}
                               </div>
                             </button>
                           ))}
@@ -1392,10 +1415,80 @@ export default function DailyRecordForm({
             </p>
           )}
 
+          {/*
+            ③ 他工場のポリ箱は、スクラップを空けたあとのポリ箱を量る（異常メモは ④ に繰り下げる）。
+            送った工場はポリ箱ごと量っているので、投入重量 ＋ ポリ箱 で突き合わせる。
+          */}
+          {source === "poly" &&
+            pickedShipmentId &&
+            (() => {
+              const sh = shipmentById.get(pickedShipmentId);
+              if (!sh) return null;
+              const tareN = toNumOrNull(polyTare);
+              const sum = scrapWeight !== null && tareN !== null ? scrapWeight + tareN : null;
+              return (
+                <div className="mt-4 rounded-xl border-2 border-[#0b5ca8] bg-[#f3f7fb] p-3">
+                  <label className="flex flex-col gap-1 text-xs text-[#707070]">
+                    <span className="flex items-center gap-1.5 text-sm font-bold text-[#333333]">
+                      <FieldNo n="③" />
+                      空けたあとのポリ箱の重さ kg
+                    </span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.1"
+                      min="0"
+                      value={polyTare}
+                      onChange={(e) => setPolyTare(e.target.value)}
+                      aria-label="空けたあとのポリ箱の重さ kg"
+                      className={`${numInput} w-full`}
+                    />
+                  </label>
+                  <div className="mt-2">
+                    <ScaleCamera
+                      phase="after"
+                      recordDate={date}
+                      factory={factory}
+                      needQr={false}
+                      label="空のポリ箱を撮って読み取る"
+                      disabled={pending}
+                      onResult={(r) => {
+                        if (r.value === null) {
+                          const n = r.note?.trim();
+                          setMessage({
+                            ok: false,
+                            title: "読み取れませんでした",
+                            text:
+                              n && n.includes("手入力")
+                                ? n
+                                : [n, "もう一度撮るか、手入力してください。"].filter(Boolean).join(" "),
+                          });
+                          return;
+                        }
+                        setPolyTare(String(r.value));
+                        setMessage({ ok: true, title: `ポリ箱の重さ ${fmt(r.value)} kg を読み取りました`, text: "" });
+                      }}
+                      onError={(text) => setMessage({ ok: false, text })}
+                    />
+                  </div>
+                  <p className="mt-2 text-sm tabular-nums text-[#333333]">
+                    スクラップ {fmt(scrapWeight)} ＋ ポリ箱 {fmt(tareN)} ＝{" "}
+                    <strong>{fmt(sum)} kg</strong>
+                    <span className="text-[#707070]">
+                      {" "}
+                      ／ {sh.fromFactory}で{" "}
+                      {fmt(sh.grossWeight !== null && sh.tareWeight === null ? sh.grossWeight : sh.weight)} kg
+                      {sh.grossWeight !== null && sh.tareWeight === null ? "（ポリ箱込み）" : ""}
+                    </span>
+                  </p>
+                </div>
+              );
+            })()}
+
           {/* 異常メモ */}
           <label className="mt-4 flex flex-col gap-1 text-xs text-[#707070]">
             <span className="flex items-center gap-1.5">
-              <FieldNo n="③" />
+              <FieldNo n={source === "poly" && pickedShipmentId ? "④" : "③"} />
               異常メモ
             </span>
             <input
@@ -1470,7 +1563,7 @@ export default function DailyRecordForm({
                               {e.busho}
                             </span>
                           )}
-                          {e.shipmentId && <PolyTag sh={shipmentById.get(e.shipmentId)} weight={toNumOrNull(e.cumAfter) !== null && toNumOrNull(e.cumBefore) !== null ? toNum(e.cumAfter) - toNum(e.cumBefore) : null} />}
+                          {e.shipmentId && <PolyTag sh={shipmentById.get(e.shipmentId)} weight={toNumOrNull(e.cumAfter) !== null && toNumOrNull(e.cumBefore) !== null ? toNum(e.cumAfter) - toNum(e.cumBefore) : null} polyTare={toNumOrNull(e.polyTare)} />}
                         </div>
                         <div className="mt-0.5 text-xs text-[#909090]">
                           {fmt(cb)} → {fmt(ca)}
@@ -1523,7 +1616,7 @@ export default function DailyRecordForm({
                         <td className={td}>{(e.bagId && bagNoById.get(e.bagId)) || ""}</td>
                         <td className={td}>
                           {e.busho}
-                          {e.shipmentId && <PolyTag sh={shipmentById.get(e.shipmentId)} weight={toNumOrNull(e.cumAfter) !== null && toNumOrNull(e.cumBefore) !== null ? toNum(e.cumAfter) - toNum(e.cumBefore) : null} />}
+                          {e.shipmentId && <PolyTag sh={shipmentById.get(e.shipmentId)} weight={toNumOrNull(e.cumAfter) !== null && toNumOrNull(e.cumBefore) !== null ? toNum(e.cumAfter) - toNum(e.cumBefore) : null} polyTare={toNumOrNull(e.polyTare)} />}
                         </td>
                         <td className={td}>
                           <KindTag kind={e.kind} order={kindOrder.get(e.kind)} />
@@ -1726,29 +1819,51 @@ export default function DailyRecordForm({
   );
 }
 
+/** 突き合わせの文言（例「本社工場で 15.3 kg（ポリ箱込み）→ ここで 13.6 ＋ ポリ箱 1.6 ＝ 15.2 kg（差 -0.1 kg）」） */
+function polyGapText(sh: Shipment): string {
+  const p = shipmentPair(sh);
+  const gap = shipmentGap(sh);
+  if (!p || gap === null || !sh.received) return "";
+  const sign = gap > 0 ? "+" : "";
+  return p.withBox
+    ? `${sh.fromFactory}で ${fmt(p.sent)} kg（ポリ箱込み）→ ここで ${fmt(sh.received.weight)} ＋ ポリ箱 ${fmt(sh.received.polyTare)} ＝ ${fmt(p.received)} kg（差 ${sign}${fmt(gap)} kg）`
+    : `${sh.fromFactory}で ${fmt(p.sent)} kg → ここで ${fmt(p.received)} kg（差 ${sign}${fmt(gap)} kg）`;
+}
+
 /** 他工場から届いたポリ箱を投入した行の目印。送った工場で量った重量との差も出す。 */
-function PolyTag({ sh, weight }: { sh: Shipment | undefined; weight: number | null }) {
+function PolyTag({
+  sh,
+  weight,
+  polyTare,
+}: {
+  sh: Shipment | undefined;
+  weight: number | null;
+  polyTare: number | null;
+}) {
   if (!sh) {
     return (
       <span className="rounded-md bg-[#e8f0f8] px-1.5 py-0.5 text-[11px] font-bold text-[#0b5ca8]">ポリ箱</span>
     );
   }
-  const gap =
+  const trial =
     weight !== null
-      ? shipmentGap({ ...sh, received: { date: "", weight, scaleName: "", kirokusha: "" } })
+      ? { ...sh, received: { date: "", weight, polyTare, scaleName: "", kirokusha: "" } }
       : null;
-  const large =
-    weight !== null &&
-    shipmentGapLarge({ ...sh, received: { date: "", weight, scaleName: "", kirokusha: "" } });
+  const gap = trial ? shipmentGap(trial) : null;
+  const large = trial ? shipmentGapLarge(trial) : false;
+  const p = trial ? shipmentPair(trial) : null;
   return (
     <span
       className={`inline-block rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
         large ? "bg-[#fdecea] text-[#dc000c]" : "bg-[#e8f0f8] text-[#0b5ca8]"
       }`}
-      title={`出荷 ${sh.shipDate} ／ ${sh.fromFactory}で ${sh.weight} kg`}
+      title={trial ? polyGapText(trial) : `出荷 ${sh.shipDate}`}
     >
       ポリ箱 {sh.boxNo}
-      {gap !== null && `（出荷時 ${fmt(sh.weight)}・差 ${gap > 0 ? "+" : ""}${fmt(gap)}）`}
+      {p && gap !== null &&
+        (p.withBox
+          ? `（箱 ${fmt(polyTare)}・計 ${fmt(p.received)}／出荷 ${fmt(p.sent)}・差 ${gap > 0 ? "+" : ""}${fmt(gap)}）`
+          : `（出荷時 ${fmt(p.sent)}・差 ${gap > 0 ? "+" : ""}${fmt(gap)}）`)}
     </span>
   );
 }

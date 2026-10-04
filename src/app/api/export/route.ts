@@ -19,6 +19,7 @@ import {
   listShipments,
   shipmentGap,
   shipmentGapLarge,
+  shipmentPair,
 } from "@/lib/db";
 import { monthlyItemRows, yearSummary } from "@/lib/calc";
 import { toCsv } from "@/lib/csv";
@@ -223,21 +224,22 @@ export async function GET(req: NextRequest) {
       const factory = restrictedFactory ?? (factoryParam || null);
       const list = await listShipments(s.companyId, { factory, ym: ymParam });
       const rows: (string | number | null)[][] = [
-        ["ポリ箱番号", "出荷日", "送り元", "送り先", "種類", "総重量(kg)", "ポリ箱の重さ(kg)", "出荷重量(kg)", "出荷者", "処理日", "受入重量(kg)", "差(kg)", "要確認", "処理した重量計", "処理した人", "メモ"],
+        ["ポリ箱番号", "出荷日", "送り元", "送り先", "種類", "出荷重量(kg・ポリ箱込み)", "出荷者", "処理日", "投入重量(kg)", "ポリ箱の重さ(kg)", "受入計(kg)", "差(kg)", "要確認", "処理した重量計", "処理した人", "メモ"],
       ];
       for (const sh of list) {
+        const p = shipmentPair(sh);
         rows.push([
           sh.boxNo,
           sh.shipDate,
           sh.fromFactory,
           sh.toFactory,
           sh.hinshu,
-          sh.grossWeight ?? "",
-          sh.tareWeight ?? "",
-          sh.weight,
+          p?.sent ?? sh.grossWeight ?? sh.weight,
           sh.shippedBy,
           sh.received?.date ?? "未処理",
           sh.received?.weight ?? "",
+          sh.received?.polyTare ?? "",
+          p?.received ?? "",
           shipmentGap(sh) ?? "",
           shipmentGapLarge(sh) ? "要確認" : "",
           sh.received?.scaleName ?? "",

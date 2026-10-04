@@ -559,5 +559,8 @@ async function buildSchema(): Promise<void> {
   // 1つのポリ箱を2回処理しないよう、ポリ箱は明細1件にしか結べない。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS origin_factory TEXT NOT NULL DEFAULT ''`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS shipment_id UUID`);
+  // 受け入れ側で、スクラップ箱へ空けたあとに量ったポリ箱の重さ（2026-10）。
+  // 送る側はポリ箱ごと量って出荷するので、投入重量 ＋ これ ＝ 出荷重量 で突き合わせる。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS poly_tare NUMERIC`);
   await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_daily_entries_shipment_uidx ON scrap_daily_entries(shipment_id) WHERE shipment_id IS NOT NULL`);
 }

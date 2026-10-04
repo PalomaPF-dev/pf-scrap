@@ -163,6 +163,11 @@ export interface DailyEntry {
   originFactory?: string;
   /** 処理したポリ箱（scrap_shipments.id）。他工場からの持ち込み分だけ */
   shipmentId?: string | null;
+  /**
+   * 受け入れ側で、スクラップを空けたあとに量ったポリ箱の重さ kg。ポリ箱を処理した行だけ。
+   * 投入重量（スクラップ）＋ ポリ箱 ＝ 送った工場で量った重量（ポリ箱込み）になるはず。
+   */
+  polyTare?: number | null;
 }
 
 /** 工場間で送るポリ箱1つ。送る側で計量して出荷し、受け入れ側で投入前に量って突き合わせる。 */
@@ -176,11 +181,14 @@ export interface Shipment {
   shipDate: string;
   /** スクラップの種類（ポリ箱ごとに分けて送る） */
   hinshu: string;
-  /** スクラップ重量 kg ＝ 総重量 − ポリ箱の重さ（送る側で量った値から計算） */
+  /**
+   * 出荷重量 kg。送る側はポリ箱ごと量るので、ふつうはポリ箱込みの重さ（＝ grossWeight）。
+   * 2026-10-02〜04 の試行版で登録した分だけ、送る側で出したスクラップ重量が入っている。
+   */
   weight: number;
-  /** ポリ箱ごと量った総重量 kg。導入直後の登録分は null */
+  /** ポリ箱ごと量った重さ kg（出荷重量）。導入直後の登録分は null */
   grossWeight: number | null;
-  /** 空のポリ箱の重さ kg（事前に量った値）。導入直後の登録分は null */
+  /** 送る側で量ったポリ箱の重さ kg。試行版の登録分だけ。いまは受け入れ側で量る */
   tareWeight: number | null;
   shippedBy: string;
   note: string;
@@ -190,6 +198,8 @@ export interface Shipment {
     date: string;
     /** 受け入れ側で量った重量（スクラップ箱への投入重量）kg */
     weight: number;
+    /** 受け入れ側で、空けたあとに量ったポリ箱の重さ kg。未入力は null */
+    polyTare: number | null;
     scaleName: string;
     kirokusha: string;
   } | null;
@@ -377,17 +387,42 @@ export interface ScalePhotoResult extends ScaleReadResponse {
 }
 
 /**
+ * 送る側と受け入れ側の、突き合わせる重さの組。未処理は null。
+ *
+ * 送る側はポリ箱ごと量って出荷し、受け入れ側はスクラップ箱へ空けた重量（投入重量）と、
+ * 空になったポリ箱の重さを量る。投入重量 ＋ ポリ箱 ＝ 出荷重量（ポリ箱込み）になるはず。
+ * 受け入れ側のポリ箱の重さが無い記録（試行版の登録分）は、スクラップ重量どうしで比べる。
+ */
+export function shipmentPair(sh: Shipment): { sent: number; received: number; withBox: boolean } | null {
+  if (!sh.received) return null;
+  if (sh.received.polyTare !== null && sh.grossWeight !== null) {
+    return {
+      sent: sh.grossWeight,
+      received: Math.round((sh.received.weight + sh.received.polyTare) * 1000) / 1000,
+      withBox: true,
+    };
+  }
+  return { sent: sh.weight, received: sh.received.weight, withBox: false };
+}
+
+/**
  * ポリ箱の重量差（受け入れ側 − 送る側）。未処理は null。
  * 両方で量っているので、差が大きければ量り間違い・取り違え・こぼれを疑う。
  */
 export function shipmentGap(sh: Shipment): number | null {
-  if (!sh.received) return null;
-  return Math.round((sh.received.weight - sh.weight) * 1000) / 1000;
+  const p = shipmentPair(sh);
+  if (!p) return null;
+  return Math.round((p.received - p.sent) * 1000) / 1000;
 }
 
 /** 差が「要確認」か。1kg 未満の差は量りのばらつきとして扱い、それ以上は重量の3%を超えたら要確認。 */
 export function shipmentGapLarge(sh: Shipment): boolean {
-  const gap = shipmentGap(sh);
-  if (gap === null) return false;
-  return Math.abs(gap) > Math.max(1, sh.weight * 0.03);
+  const p = shipmentPair(sh);
+  if (!p) return false;
+  return Math.abs(p.received - p.sent) > Math.max(1, p.sent * 0.03);
+}
+
+/** 受け入れ側でポリ箱の重さを量る必要がある箱か（送る側がポリ箱込みだけを量った箱）。 */
+export function shipmentNeedsPolyTare(sh: Shipment): boolean {
+  return sh.tareWeight === null && sh.grossWeight !== null;
 }

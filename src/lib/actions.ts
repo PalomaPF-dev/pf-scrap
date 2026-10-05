@@ -2062,10 +2062,26 @@ export async function addAdjustmentAction(input: {
   }
 }
 
+/**
+ * 在庫補正の削除（管理者のみ。画面でも削除ボタンは管理者にだけ出す）。
+ * 所属工場の人は、その工場の補正だけ消せる。
+ */
 export async function deleteAdjustmentAction(id: string): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
-    await deleteAdjustment(s.companyId, asStr(id, 50));
+    const s = await requireAdminSession();
+    const restriction = await getFactoryRestriction(s);
+    const deleted = await deleteAdjustment(
+      s.companyId,
+      asStr(id, 50),
+      restriction.restricted ? restriction.factory : null
+    );
+    if (deleted === 0) {
+      return fail(
+        restriction.restricted
+          ? `所属工場（${restriction.factory}）の在庫補正のみ削除できます。`
+          : "削除する在庫補正が見つかりませんでした。"
+      );
+    }
     revalidatePath("/procurement");
     revalidatePath("/");
     revalidatePath("/dashboard");
@@ -2076,7 +2092,8 @@ export async function deleteAdjustmentAction(id: string): Promise<ActionResult> 
 }
 
 /**
- * 月初在庫アンカー（棚卸で確定した月初在庫）の保存（管理者のみ）。
+ * 月初在庫アンカー（棚卸で確定した月初在庫）の保存（管理者のみ。画面でも管理者にだけ出す）。
+ * 所属工場の人は、その工場の月初在庫だけ保存できる。
  * 空欄はアンカー無し＝前月からの理論ロールで自動計算される。
  */
 export async function saveMonthlyAnchorAction(input: {
@@ -2087,10 +2104,14 @@ export async function saveMonthlyAnchorAction(input: {
   zaikoSonota: unknown;
 }): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
+    const s = await requireAdminSession();
     if (!isYmStr(input.ym)) return fail("年月が正しくありません。");
     const factory = asStr(input.factory, 50);
     if (!factory) return fail("工場を選択してください。");
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）のデータのみ入力できます。`);
+    }
     const prev = await getMonthlyInput(s.companyId, input.ym, factory);
     await saveMonthlyInput(s.companyId, {
       ym: input.ym,

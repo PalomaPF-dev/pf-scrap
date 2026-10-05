@@ -2,6 +2,9 @@
 
 /* 共通UIパッケージ（@paloma-pf/ui）内のクラスも Tailwind の検出対象にする */
 @source "../../node_modules/@paloma-pf/ui/src";
+/* 共通UIのスマホのメニュー（ドロワー）は `z-40${...}` と書かれていて、検出で z-40 が拾われない。
+   重なり順が無いままだと、画面下の固定の帯（日次記録の保存）やガイドのシートの下にメニューが潜るので、明示して作らせる */
+@source inline("z-40");
 
 /* サイドバーを常時表示する条件：幅が広く かつ 高さも十分（=タブレット/PC）。
    横向きスマホ（高さが低い）は対象外＝ドロワー（☰）に自動で隠す。 */
@@ -24,6 +27,16 @@ body {
      読み込み前・未対応時のみ OS 標準にフォールバックする */
   font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI",
     "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, Arial, sans-serif;
+}
+
+/* 作業しながら見るガイドの枠（components/GuidePanel.tsx）。枠は画面に固定して出し、
+   本文が枠の下に隠れないように、PCは本文の列を枠の幅だけ狭め、スマホはシートの高さだけ下に余白を足す。
+   画面の下に固定した帯（日次記録の保存）とカメラの撮影画面は .guide-avoid-bottom でシートの上へ持ち上げる
+   （ボタンがシートに隠れて押せなくならないように）。画面のときだけ（印刷には影響させない）。 */
+@media screen {
+  html[data-guide="side"] main.print-main { margin-right: var(--guide-w); }
+  html[data-guide="sheet"] main.print-main { padding-bottom: var(--guide-avoid-h); }
+  html[data-guide="sheet"] .guide-avoid-bottom { bottom: var(--guide-avoid-h); }
 }
 
 /* 印刷時：画面用UI（サイドバー等）を隠して帳票を全ページ印刷する */

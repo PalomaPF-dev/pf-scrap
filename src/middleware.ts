@@ -27,6 +27,7 @@ export const config = {
     "/first-list",
     "/quality",
     "/guide",
+    "/guide/print",
     "/items",
     "/scales",
     "/mcframe",

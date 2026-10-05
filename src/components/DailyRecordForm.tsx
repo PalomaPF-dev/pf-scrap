@@ -1782,9 +1782,9 @@ export default function DailyRecordForm({
         </div>
       </Step>
 
-      {/* 操作バー（モバイルは画面下に固定） */}
+      {/* 操作バー（モバイルは画面下に固定。ガイドのシートを開いているときはその上に持ち上げる） */}
       {!locked && (
-        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#e5e5e5] bg-white/95 p-3 backdrop-blur sm:static sm:z-auto sm:rounded-2xl sm:border sm:p-4">
+        <div className="guide-avoid-bottom fixed inset-x-0 bottom-0 z-30 border-t border-[#e5e5e5] bg-white/95 p-3 backdrop-blur sm:static sm:z-auto sm:rounded-2xl sm:border sm:p-4">
           <div className="flex items-center gap-2">
             {/*
               記録すると自動で保存されるので、ふだんこのボタンは押さなくてよい。

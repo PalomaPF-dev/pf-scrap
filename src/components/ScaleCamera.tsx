@@ -227,7 +227,8 @@ export default function ScaleCamera({
       </button>
 
       {open && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-black/90 p-3">
+        // ガイドのシートを開いているときは、その上までにする（見ながら撮れるように・撮るボタンを隠さない）
+        <div className="guide-avoid-bottom fixed inset-0 z-50 flex flex-col bg-black/90 p-3">
           <div className="mb-2 flex items-center justify-between text-white">
             <span className="text-sm font-semibold">{label}</span>
             <button type="button" onClick={close} aria-label="閉じる" className="rounded-lg p-1.5">

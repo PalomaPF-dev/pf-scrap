@@ -157,20 +157,20 @@ export interface DailyEntry {
   zairyo: string;
   kotei: string;
   /**
-   * 発生元の工場。空＝記録した工場のスクラップ。他工場からポリ箱で届いた分は
+   * 発生元の工場。空＝記録した工場のスクラップ。他工場からプラ箱で届いた分は
    * 送ってきた工場名が入る（照合は発生元の工場で、売却・箱の記録は記録した工場で数える）。
    */
   originFactory?: string;
-  /** 処理したポリ箱（scrap_shipments.id）。他工場からの持ち込み分だけ */
+  /** 処理したプラ箱（scrap_shipments.id）。他工場からの持ち込み分だけ */
   shipmentId?: string | null;
   /**
-   * 受け入れ側で、スクラップを空けたあとに量ったポリ箱の重さ kg。ポリ箱を処理した行だけ。
-   * 投入重量（スクラップ）＋ ポリ箱 ＝ 送った工場で量った重量（ポリ箱込み）になるはず。
+   * 受け入れ側で、スクラップを空けたあとに量ったプラ箱の重さ kg。プラ箱を処理した行だけ。
+   * 投入重量（スクラップ）＋ プラ箱 ＝ 送った工場で量った重量（プラ箱込み）になるはず。
    */
   polyTare?: number | null;
 }
 
-/** 工場間で送るポリ箱1つ。送る側で計量して出荷し、受け入れ側で投入前に量って突き合わせる。 */
+/** 工場間で送るプラ箱1つ。送る側で計量して出荷し、受け入れ側で投入前に量って突き合わせる。 */
 export interface Shipment {
   id: string;
   /** 箱に書く番号（例: 本社工場-1002-03） */
@@ -179,16 +179,16 @@ export interface Shipment {
   toFactory: string;
   /** 出荷日（送る側の記録日） */
   shipDate: string;
-  /** スクラップの種類（ポリ箱ごとに分けて送る） */
+  /** スクラップの種類（プラ箱ごとに分けて送る） */
   hinshu: string;
   /**
-   * 出荷重量 kg。送る側はポリ箱ごと量るので、ふつうはポリ箱込みの重さ（＝ grossWeight）。
+   * 出荷重量 kg。送る側はプラ箱ごと量るので、ふつうはプラ箱込みの重さ（＝ grossWeight）。
    * 2026-10-02〜04 の試行版で登録した分だけ、送る側で出したスクラップ重量が入っている。
    */
   weight: number;
-  /** ポリ箱ごと量った重さ kg（出荷重量）。導入直後の登録分は null */
+  /** プラ箱ごと量った重さ kg（出荷重量）。導入直後の登録分は null */
   grossWeight: number | null;
-  /** 送る側で量ったポリ箱の重さ kg。試行版の登録分だけ。いまは受け入れ側で量る */
+  /** 送る側で量ったプラ箱の重さ kg。試行版の登録分だけ。いまは受け入れ側で量る */
   tareWeight: number | null;
   shippedBy: string;
   note: string;
@@ -198,7 +198,7 @@ export interface Shipment {
     date: string;
     /** 受け入れ側で量った重量（スクラップ箱への投入重量）kg */
     weight: number;
-    /** 受け入れ側で、空けたあとに量ったポリ箱の重さ kg。未入力は null */
+    /** 受け入れ側で、空けたあとに量ったプラ箱の重さ kg。未入力は null */
     polyTare: number | null;
     scaleName: string;
     kirokusha: string;
@@ -389,9 +389,9 @@ export interface ScalePhotoResult extends ScaleReadResponse {
 /**
  * 送る側と受け入れ側の、突き合わせる重さの組。未処理は null。
  *
- * 送る側はポリ箱ごと量って出荷し、受け入れ側はスクラップ箱へ空けた重量（投入重量）と、
- * 空になったポリ箱の重さを量る。投入重量 ＋ ポリ箱 ＝ 出荷重量（ポリ箱込み）になるはず。
- * 受け入れ側のポリ箱の重さが無い記録（試行版の登録分）は、スクラップ重量どうしで比べる。
+ * 送る側はプラ箱ごと量って出荷し、受け入れ側はスクラップ箱へ空けた重量（投入重量）と、
+ * 空になったプラ箱の重さを量る。投入重量 ＋ プラ箱 ＝ 出荷重量（プラ箱込み）になるはず。
+ * 受け入れ側のプラ箱の重さが無い記録（試行版の登録分）は、スクラップ重量どうしで比べる。
  */
 export function shipmentPair(sh: Shipment): { sent: number; received: number; withBox: boolean } | null {
   if (!sh.received) return null;
@@ -406,7 +406,7 @@ export function shipmentPair(sh: Shipment): { sent: number; received: number; wi
 }
 
 /**
- * ポリ箱の重量差（受け入れ側 − 送る側）。未処理は null。
+ * プラ箱の重量差（受け入れ側 − 送る側）。未処理は null。
  * 両方で量っているので、差が大きければ量り間違い・取り違え・こぼれを疑う。
  */
 export function shipmentGap(sh: Shipment): number | null {
@@ -422,7 +422,7 @@ export function shipmentGapLarge(sh: Shipment): boolean {
   return Math.abs(p.received - p.sent) > Math.max(1, p.sent * 0.03);
 }
 
-/** 受け入れ側でポリ箱の重さを量る必要がある箱か（送る側がポリ箱込みだけを量った箱）。 */
+/** 受け入れ側でプラ箱の重さを量る必要がある箱か（送る側がプラ箱込みだけを量った箱）。 */
 export function shipmentNeedsPolyTare(sh: Shipment): boolean {
   return sh.tareWeight === null && sh.grossWeight !== null;
 }

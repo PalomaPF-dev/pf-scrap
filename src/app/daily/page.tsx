@@ -56,7 +56,7 @@ export default async function DailyPage({
   let myWorkplace: string;
   let affiliation: string | null;
   let bom: DailyBom;
-  // 他工場から届くポリ箱（この工場が受け入れ側のとき）。未処理の箱と、この日に処理済みの箱
+  // 他工場から届くプラ箱（この工場が受け入れ側のとき）。未処理の箱と、この日に処理済みの箱
   let shipFrom: string[] = [];
   let shipments: Shipment[] = [];
   try {
@@ -121,7 +121,7 @@ export default async function DailyPage({
   // 記録者は「所属（部署／工場 職場）＋氏名」。保存時にサーバーでも同じ規則で組み立てる。
   const recorder = [affiliation, session.userName].filter(Boolean).join(" ");
   // 当日の記録スクラップ合計（理論値との突合に使う）
-  // 他工場から届いたポリ箱の分は、送った工場の理論と比べるので除く
+  // 他工場から届いたプラ箱の分は、送った工場の理論と比べるので除く
   const dayTotal = (record?.entries ?? [])
     .filter((e) => !e.originFactory || e.originFactory === factory)
     .reduce((t, e) => t + e.weight, 0);

@@ -460,27 +460,27 @@ export async function saveDailyRecordAction(input: {
       .filter(Boolean);
     const reads = await getScaleReads(s.companyId, readIds);
 
-    // ===== 他工場から届いたポリ箱 =====
-    // ポリ箱を処理した明細は、送った工場のスクラップとして照合に回る。
-    // 1つのポリ箱は1回しか処理できない（別の日・別の明細で処理済みなら弾く）。
+    // ===== 他工場から届いたプラ箱 =====
+    // プラ箱を処理した明細は、送った工場のスクラップとして照合に回る。
+    // 1つのプラ箱は1回しか処理できない（別の日・別の明細で処理済みなら弾く）。
     const shipmentIds = (Array.isArray(input.entries) ? input.entries : [])
       .map((e) => asStr(e.shipmentId ?? "", 50))
       .filter(Boolean);
     if (new Set(shipmentIds).size !== shipmentIds.length) {
-      return fail("同じポリ箱を2回記録しています。");
+      return fail("同じプラ箱を2回記録しています。");
     }
     const shipments = new Map<string, Shipment>();
     for (const id of shipmentIds) {
       const sh = await getShipment(s.companyId, id);
-      if (!sh) return fail("ポリ箱が見つかりません。画面を再読み込みしてください。");
+      if (!sh) return fail("プラ箱が見つかりません。画面を再読み込みしてください。");
       if (sh.toFactory !== factory) {
-        return fail(`ポリ箱「${sh.boxNo}」の送り先は ${sh.toFactory} です。`);
+        return fail(`プラ箱「${sh.boxNo}」の送り先は ${sh.toFactory} です。`);
       }
       shipments.set(id, sh);
     }
     const usedElsewhere = await shipmentsUsedElsewhere(s.companyId, shipmentIds, prev?.id ?? null);
     for (const id of usedElsewhere) {
-      return fail(`ポリ箱「${shipments.get(id)?.boxNo ?? id}」は別の日の記録で処理済みです。`);
+      return fail(`プラ箱「${shipments.get(id)?.boxNo ?? id}」は別の日の記録で処理済みです。`);
     }
 
     // 記録者の表示名。「大口工場 内胴 大口太郎」のように所属を前に付ける。
@@ -527,21 +527,21 @@ export async function saveDailyRecordAction(input: {
       }
       if (!kindNames.includes(kind)) kind = kindNames[0] ?? SCALE_KIND_LIST[0];
 
-      // ポリ箱は種類ごとに分けて送られてくる。違う種類の箱に入れたら止める。
+      // プラ箱は種類ごとに分けて送られてくる。違う種類の箱に入れたら止める。
       const shipmentId = asStr(e.shipmentId ?? "", 50) || null;
       const shipment = shipmentId ? shipments.get(shipmentId)! : null;
       if (shipment && shipment.hinshu !== kind) {
         return fail(
-          `ポリ箱「${shipment.boxNo}」は ${shipment.hinshu} です。${kind} の箱（${scaleName}）には記録できません。`
+          `プラ箱「${shipment.boxNo}」は ${shipment.hinshu} です。${kind} の箱（${scaleName}）には記録できません。`
         );
       }
-      // 空けたあとのポリ箱の重さ。送る側はポリ箱込みで量っているので、これが無いと突き合わせられない。
+      // 空けたあとのプラ箱の重さ。送る側はプラ箱込みで量っているので、これが無いと突き合わせられない。
       const polyTare = shipment ? toNumOrNull(e.polyTare) : null;
       if (shipment && polyTare === null && shipmentNeedsPolyTare(shipment)) {
-        return fail(`ポリ箱「${shipment.boxNo}」の重さ（空けたあと）を量って入力してください。`);
+        return fail(`プラ箱「${shipment.boxNo}」の重さ（空けたあと）を量って入力してください。`);
       }
       if (polyTare !== null && (polyTare < 0 || (shipment?.grossWeight != null && polyTare >= shipment.grossWeight))) {
-        return fail(`ポリ箱「${shipment!.boxNo}」の重さ ${polyTare} kg が正しくありません。量り直してください。`);
+        return fail(`プラ箱「${shipment!.boxNo}」の重さ ${polyTare} kg が正しくありません。量り直してください。`);
       }
 
       const bagId = asStr(e.bagId ?? "", 50) || null;
@@ -613,7 +613,7 @@ export async function saveDailyRecordAction(input: {
         kikai: asStr(e.kikai, 50),
         zairyo: asStr(e.zairyo, 50),
         kotei: asStr(e.kotei, 50),
-        // 発生元はポリ箱からだけ決める（画面から任意の工場名を入れさせない）
+        // 発生元はプラ箱からだけ決める（画面から任意の工場名を入れさせない）
         originFactory: shipment ? shipment.fromFactory : "",
         shipmentId,
         polyTare,
@@ -2368,7 +2368,7 @@ export async function importDailyExcelAction(input: {
   }
 }
 
-// ===== 工場間のポリ箱送付 =====
+// ===== 工場間のプラ箱送付 =====
 
 function revalidateShipmentPages() {
   for (const p of ["/shipments", "/daily", "/dashboard", "/settings"]) revalidatePath(p);
@@ -2416,15 +2416,15 @@ async function shippingFactory(
 }
 
 /**
- * ポリ箱を出荷として登録する（送る側でポリ箱ごと量った重量）。箱に書く番号を返す。
- * ポリ箱の重さは受け入れ側が、スクラップを空けたあとに量る。
+ * プラ箱を出荷として登録する（送る側でプラ箱ごと量った重量）。箱に書く番号を返す。
+ * プラ箱の重さは受け入れ側が、スクラップを空けたあとに量る。
  * 出荷日は既定で当日。前日分を翌朝まとめて登録することもあるので、過去日は受け付ける。
  */
 export async function createShipmentAction(input: {
   factory: string;
   shipDate: string;
   hinshu: string;
-  /** ポリ箱ごと量った重さ（出荷重量） */
+  /** プラ箱ごと量った重さ（出荷重量） */
   grossWeight: unknown;
   note?: string;
 }): Promise<ActionResult & { boxNo?: string }> {
@@ -2457,25 +2457,25 @@ export async function createShipmentAction(input: {
     return {
       ok: true,
       boxNo: sh.boxNo,
-      message: `${gross} kg（ポリ箱込み）で出荷を登録しました。ポリ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
+      message: `${gross} kg（プラ箱込み）で出荷を登録しました。プラ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
     };
   } catch (e) {
     return fail((e as Error).message);
   }
 }
 
-/** 出荷重量（ポリ箱込み）を確かめる。正しければ数値、おかしければ理由の文字列。 */
+/** 出荷重量（プラ箱込み）を確かめる。正しければ数値、おかしければ理由の文字列。 */
 function grossWeight(raw: unknown): number | string {
   const gross = toNumOrNull(raw);
-  if (gross === null || !(gross > 0)) return "出荷重量（ポリ箱込み）を入力してください。";
+  if (gross === null || !(gross > 0)) return "出荷重量（プラ箱込み）を入力してください。";
   if (gross > 1000) return "重量が大きすぎます（1,000 kg まで）。単位を確認してください。";
   return Math.round(gross * 1000) / 1000;
 }
 
 /**
- * 試行版（送る側でポリ箱も量っていた）の登録分を直すときの確認。
- * 総重量（ポリ箱込み）とポリ箱の重さから、スクラップ重量を出す。
- * ポリ箱は空のときに事前に量っておく運用。
+ * 試行版（送る側でプラ箱も量っていた）の登録分を直すときの確認。
+ * 総重量（プラ箱込み）とプラ箱の重さから、スクラップ重量を出す。
+ * プラ箱は空のときに事前に量っておく運用。
  */
 function shipWeights(
   grossRaw: unknown,
@@ -2483,38 +2483,38 @@ function shipWeights(
 ): { error: string } | { gross: number; tare: number; net: number } {
   const gross = toNumOrNull(grossRaw);
   const tare = toNumOrNull(tareRaw);
-  if (gross === null || !(gross > 0)) return { error: "総重量（ポリ箱込み）を入力してください。" };
-  if (tare === null || tare < 0) return { error: "ポリ箱の重さ（空の重さ）を入力してください。" };
+  if (gross === null || !(gross > 0)) return { error: "総重量（プラ箱込み）を入力してください。" };
+  if (tare === null || tare < 0) return { error: "プラ箱の重さ（空の重さ）を入力してください。" };
   if (gross > 1000) return { error: "総重量が大きすぎます（1,000 kg まで）。単位を確認してください。" };
   const net = Math.round((gross - tare) * 1000) / 1000;
   if (!(net > 0)) {
-    return { error: `総重量 ${gross} kg がポリ箱の重さ ${tare} kg 以下です。値を確認してください。` };
+    return { error: `総重量 ${gross} kg がプラ箱の重さ ${tare} kg 以下です。値を確認してください。` };
   }
   return { gross: Math.round(gross * 1000) / 1000, tare: Math.round(tare * 1000) / 1000, net };
 }
 
-/** 送った側の人か管理者だけが、そのポリ箱を直せる。 */
+/** 送った側の人か管理者だけが、そのプラ箱を直せる。 */
 async function assertCanEditShipment(
   s: Awaited<ReturnType<typeof requireEntitledSession>>,
   id: string
 ): Promise<{ error: string } | { shipment: Shipment }> {
   const sh = await getShipment(s.companyId, asStr(id, 50));
-  if (!sh) return { error: "ポリ箱が見つかりません。" };
+  if (!sh) return { error: "プラ箱が見つかりません。" };
   const restriction = await getFactoryRestriction(s);
   if (s.role !== "admin" && restriction.restricted && restriction.factory !== sh.fromFactory) {
     return { error: `送った工場（${sh.fromFactory}）の人だけが直せます。` };
   }
   if (sh.received) {
-    return { error: `ポリ箱「${sh.boxNo}」は ${sh.toFactory} で処理済みのため直せません。` };
+    return { error: `プラ箱「${sh.boxNo}」は ${sh.toFactory} で処理済みのため直せません。` };
   }
   return { shipment: sh };
 }
 
-/** 未処理のポリ箱の重量・種類を直す。 */
+/** 未処理のプラ箱の重量・種類を直す。 */
 export async function updateShipmentAction(input: {
   id: string;
   hinshu: string;
-  /** 総重量（ポリ箱込み）とポリ箱の重さ。導入直後の登録分（総重量なし）は weight を直す */
+  /** 総重量（プラ箱込み）とプラ箱の重さ。導入直後の登録分（総重量なし）は weight を直す */
   grossWeight?: unknown;
   tareWeight?: unknown;
   weight?: unknown;
@@ -2529,7 +2529,7 @@ export async function updateShipmentAction(input: {
     if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
     let patch: { grossWeight: number | null; tareWeight: number | null; weight: number };
     if (input.tareWeight !== undefined) {
-      // 試行版の登録分（送る側でポリ箱も量っていた）
+      // 試行版の登録分（送る側でプラ箱も量っていた）
       const w = shipWeights(input.grossWeight, input.tareWeight);
       if ("error" in w) return fail(w.error);
       patch = { grossWeight: w.gross, tareWeight: w.tare, weight: w.net };
@@ -2549,13 +2549,13 @@ export async function updateShipmentAction(input: {
     });
     if (!ok) return fail("処理済みになったため直せませんでした。");
     revalidateShipmentPages();
-    return { ok: true, message: `ポリ箱「${r.shipment.boxNo}」を直しました。` };
+    return { ok: true, message: `プラ箱「${r.shipment.boxNo}」を直しました。` };
   } catch (e) {
     return fail((e as Error).message);
   }
 }
 
-/** 未処理のポリ箱を取り消す（送らなかった・二重に登録した）。 */
+/** 未処理のプラ箱を取り消す（送らなかった・二重に登録した）。 */
 export async function deleteShipmentAction(id: string): Promise<ActionResult> {
   try {
     const s = await requireEntitledSession();
@@ -2564,7 +2564,7 @@ export async function deleteShipmentAction(id: string): Promise<ActionResult> {
     const ok = await deleteShipment(s.companyId, r.shipment.id);
     if (!ok) return fail("処理済みになったため取り消せませんでした。");
     revalidateShipmentPages();
-    return { ok: true, message: `ポリ箱「${r.shipment.boxNo}」を取り消しました。` };
+    return { ok: true, message: `プラ箱「${r.shipment.boxNo}」を取り消しました。` };
   } catch (e) {
     return fail((e as Error).message);
   }

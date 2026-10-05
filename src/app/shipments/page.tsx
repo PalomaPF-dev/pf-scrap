@@ -23,10 +23,10 @@ import ShipmentPanel from "@/components/ShipmentPanel";
 export const dynamic = "force-dynamic";
 
 /**
- * ポリ箱（工場間）。
+ * プラ箱（工場間）。
  *
- * 本社工場・第二工場などはスクラップを種類ごとにポリ箱へ入れ、量ってから大口工場へ送る。
- * 大口工場は日次記録でそのポリ箱を選んで自工場のスクラップ箱へ投入する（投入前に量る）。
+ * 本社工場・第二工場などはスクラップを種類ごとにプラ箱へ入れ、量ってから大口工場へ送る。
+ * 大口工場は日次記録でそのプラ箱を選んで自工場のスクラップ箱へ投入する（投入前に量る）。
  * この画面は、送る側の「出荷の登録」と、両方で量った重量の突き合わせ・処理漏れの確認を受け持つ。
  */
 export default async function ShipmentsPage({
@@ -47,7 +47,7 @@ export default async function ShipmentsPage({
   let canOperate = false;
   let myFactory: string | null = null;
   try {
-    // 所属工場の人は、自工場が送ったポリ箱だけ直せる（サーバー側でも同じ判定）
+    // 所属工場の人は、自工場が送ったプラ箱だけ直せる（サーバー側でも同じ判定）
     myFactory = (await getFactoryRestriction(session)).factory;
     const view = await getFactoryView(session);
     factoryLocked = view.restricted;
@@ -63,7 +63,7 @@ export default async function ShipmentsPage({
     console.error("[shipments]", e);
     return (
       <div className="p-4 sm:p-6">
-        <PageHeader title="ポリ箱（工場間）" />
+        <PageHeader title="プラ箱（工場間）" />
         <DbErrorState />
       </div>
     );
@@ -77,8 +77,8 @@ export default async function ShipmentsPage({
   return (
     <div className="p-4 sm:p-6">
       <PageHeader
-        title="ポリ箱（工場間）"
-        description="他工場へ送るスクラップをポリ箱ごとに量って出荷し、受け入れた工場で量った重量と突き合わせます"
+        title="プラ箱（工場間）"
+        description="他工場へ送るスクラップをプラ箱ごとに量って出荷し、受け入れた工場で量った重量と突き合わせます"
       />
 
       <div className="mb-3 flex flex-wrap items-center gap-2 sm:mb-4 sm:gap-3">
@@ -89,7 +89,7 @@ export default async function ShipmentsPage({
           className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
         >
           <FileDown className="h-4 w-4" />
-          ポリ箱の一覧CSV
+          プラ箱の一覧CSV
         </a>
       </div>
 

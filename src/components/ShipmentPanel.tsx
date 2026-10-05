@@ -25,8 +25,8 @@ function daysBetween(from: string, to: string): number {
 }
 
 /**
- * ポリ箱の出荷登録（送る側）と、出荷・処理の突き合わせ一覧。
- * 受け入れ側の処理は日次記録で行う（スクラップ箱へ投入するときにポリ箱を選ぶ）。
+ * プラ箱の出荷登録（送る側）と、出荷・処理の突き合わせ一覧。
+ * 受け入れ側の処理は日次記録で行う（スクラップ箱へ投入するときにプラ箱を選ぶ）。
  */
 export default function ShipmentPanel({
   factory,
@@ -56,7 +56,7 @@ export default function ShipmentPanel({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [hinshu, setHinshu] = useState(kinds[0] ?? "");
-  // 出荷重量はポリ箱ごと量った重さ。ポリ箱の重さは受け入れ側が、空けたあとに量る。
+  // 出荷重量はプラ箱ごと量った重さ。プラ箱の重さは受け入れ側が、空けたあとに量る。
   const [gross, setGross] = useState("");
   const grossN = toNumOrNull(gross);
   const [shipDate, setShipDate] = useState(today);
@@ -116,25 +116,25 @@ export default function ShipmentPanel({
         if (res.ok) router.refresh();
       });
     if (sh.grossWeight !== null && sh.tareWeight !== null) {
-      // 試行版の登録分（送る側でポリ箱も量っていた）
-      const g = prompt(`ポリ箱「${sh.boxNo}」の総重量 kg（ポリ箱込み）`, String(sh.grossWeight));
+      // 試行版の登録分（送る側でプラ箱も量っていた）
+      const g = prompt(`プラ箱「${sh.boxNo}」の総重量 kg（プラ箱込み）`, String(sh.grossWeight));
       if (g === null) return;
-      const t = prompt(`ポリ箱「${sh.boxNo}」のポリ箱の重さ kg`, String(sh.tareWeight));
+      const t = prompt(`プラ箱「${sh.boxNo}」のプラ箱の重さ kg`, String(sh.tareWeight));
       if (t === null) return;
       run({ grossWeight: g, tareWeight: t });
     } else if (sh.grossWeight !== null) {
-      const g = prompt(`ポリ箱「${sh.boxNo}」の出荷重量 kg（ポリ箱込み・${sh.hinshu}）`, String(sh.grossWeight));
+      const g = prompt(`プラ箱「${sh.boxNo}」の出荷重量 kg（プラ箱込み・${sh.hinshu}）`, String(sh.grossWeight));
       if (g === null) return;
       run({ grossWeight: g });
     } else {
-      const v = prompt(`ポリ箱「${sh.boxNo}」の重量 kg（${sh.hinshu}）`, String(sh.weight));
+      const v = prompt(`プラ箱「${sh.boxNo}」の重量 kg（${sh.hinshu}）`, String(sh.weight));
       if (v === null) return;
       run({ weight: v });
     }
   }
 
   function remove(sh: Shipment) {
-    if (!confirm(`ポリ箱「${sh.boxNo}」（${sh.hinshu} ${sh.weight} kg）の出荷を取り消しますか?`)) return;
+    if (!confirm(`プラ箱「${sh.boxNo}」（${sh.hinshu} ${sh.weight} kg）の出荷を取り消しますか?`)) return;
     startTransition(async () => {
       const res = await deleteShipmentAction(sh.id);
       setListMsg({ ok: res.ok, text: res.message ?? "" });
@@ -153,7 +153,7 @@ export default function ShipmentPanel({
       shippedN: shipped.length,
       shippedKg: shipped.reduce((t, sh) => t + sh.weight, 0),
       doneN: done.length,
-      // 突き合わせる重さどうしで足す（ポリ箱込みの出荷 ↔ 投入重量＋ポリ箱）
+      // 突き合わせる重さどうしで足す（プラ箱込みの出荷 ↔ 投入重量＋プラ箱）
       doneShipKg: done.reduce((t, sh) => t + (shipmentPair(sh)?.sent ?? 0), 0),
       doneRecvKg: done.reduce((t, sh) => t + (shipmentPair(sh)?.received ?? 0), 0),
       openN: open.length,
@@ -169,10 +169,10 @@ export default function ShipmentPanel({
       {shipTo ? (
         <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
           <h2 className="mb-1 text-base font-bold text-[#333333]">
-            ポリ箱を出荷する（{factory} → {shipTo}）
+            プラ箱を出荷する（{factory} → {shipTo}）
           </h2>
           <p className="mb-3 text-xs text-[#707070]">
-            ポリ箱は種類ごとに分け、1箱ずつ量って登録してください。登録すると箱に書く番号が出ます。
+            プラ箱は種類ごとに分け、1箱ずつ量って登録してください。登録すると箱に書く番号が出ます。
           </p>
 
           <div className="space-y-3">
@@ -200,7 +200,7 @@ export default function ShipmentPanel({
 
             <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-[#707070]">
-                出荷重量 kg（スクラップを入れたポリ箱ごと量る）
+                出荷重量 kg（スクラップを入れたプラ箱ごと量る）
                 <input
                   type="number"
                   inputMode="decimal"
@@ -208,7 +208,7 @@ export default function ShipmentPanel({
                   min="0"
                   value={gross}
                   onChange={(e) => setGross(e.target.value)}
-                  aria-label="出荷重量 kg（ポリ箱込み）"
+                  aria-label="出荷重量 kg（プラ箱込み）"
                   className={`${input} text-right tabular-nums`}
                 />
               </label>
@@ -224,8 +224,8 @@ export default function ShipmentPanel({
               />
             </div>
             <p className="-mt-1 text-xs text-[#909090]">
-              ポリ箱の重さは量らなくて構いません。受け入れ側でスクラップを空けたあとに量り、
-              「投入したスクラップ ＋ ポリ箱 ＝ この出荷重量」で突き合わせます。
+              プラ箱の重さは量らなくて構いません。受け入れ側でスクラップを空けたあとに量り、
+              「投入したスクラップ ＋ プラ箱 ＝ この出荷重量」で突き合わせます。
             </p>
 
             <div className="grid gap-3 sm:grid-cols-2">
@@ -264,7 +264,7 @@ export default function ShipmentPanel({
 
             {boxNo && (
               <div className="rounded-2xl border-4 border-[#b4632c] bg-[#faf6ef] px-4 py-4 text-center">
-                <p className="text-sm font-bold text-[#707070]">ポリ箱に書く番号</p>
+                <p className="text-sm font-bold text-[#707070]">プラ箱に書く番号</p>
                 <p className="mt-1 break-all text-3xl font-extrabold tracking-wide text-[#b4632c] sm:text-4xl">
                   {boxNo}
                 </p>
@@ -276,8 +276,8 @@ export default function ShipmentPanel({
       ) : factory ? (
         receivesFrom.length > 0 ? (
           <p className="rounded-xl bg-[#f7f7f5] px-4 py-3 text-sm text-[#555555]">
-            {factory} は {receivesFrom.join("・")} からポリ箱を受け入れます。届いたポリ箱は
-            <strong>日次記録</strong>で、スクラップ箱へ投入するときに「他工場から届いたポリ箱」を選んで記録してください。
+            {factory} は {receivesFrom.join("・")} からプラ箱を受け入れます。届いたプラ箱は
+            <strong>日次記録</strong>で、スクラップ箱へ投入するときに「他工場から届いたプラ箱」を選んで記録してください。
           </p>
         ) : null
       ) : (
@@ -310,17 +310,17 @@ export default function ShipmentPanel({
 
       {/* 一覧 */}
       <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-        <h2 className="mb-1 text-base font-bold text-[#333333] sm:text-sm">ポリ箱の一覧</h2>
+        <h2 className="mb-1 text-base font-bold text-[#333333] sm:text-sm">プラ箱の一覧</h2>
         <p className="mb-3 text-xs text-[#909090]">
-          この月に出荷・処理したポリ箱と、まだ処理していないポリ箱（月に関係なく先頭）を表示しています。
-          出荷重量は送った工場でポリ箱ごと量った重さ、受入計は「投入したスクラップ ＋ 空けたあとのポリ箱」、差は「受入計 − 出荷重量」です。
+          この月に出荷・処理したプラ箱と、まだ処理していないプラ箱（月に関係なく先頭）を表示しています。
+          出荷重量は送った工場でプラ箱ごと量った重さ、受入計は「投入したスクラップ ＋ 空けたあとのプラ箱」、差は「受入計 − 出荷重量」です。
         </p>
         {listMsg && <ResultBanner msg={listMsg} className="mb-3" />}
 
         {/* モバイル: カード */}
         <ul className="space-y-2 sm:hidden">
           {shipments.length === 0 && (
-            <li className="rounded-xl bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">ポリ箱はありません</li>
+            <li className="rounded-xl bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">プラ箱はありません</li>
           )}
           {shipments.map((sh) => {
             const gap = shipmentGap(sh);
@@ -340,14 +340,14 @@ export default function ShipmentPanel({
                 <div className="mt-1 text-sm tabular-nums">
                   出荷 {fmt(p?.sent ?? sh.grossWeight ?? sh.weight)} kg
                   {sh.grossWeight !== null && sh.tareWeight === null && (
-                    <span className="text-xs text-[#909090]">（ポリ箱込み）</span>
+                    <span className="text-xs text-[#909090]">（プラ箱込み）</span>
                   )}
                   {sh.received && p && (
                     <>
                       {" → "}受入 {fmt(p.received)} kg
                       {p.withBox && (
                         <span className="text-xs text-[#909090]">
-                          （スクラップ {fmt(sh.received.weight)} ＋ ポリ箱 {fmt(sh.received.polyTare)}）
+                          （スクラップ {fmt(sh.received.weight)} ＋ プラ箱 {fmt(sh.received.polyTare)}）
                         </span>
                       )}
                       <span className={`ml-1 font-bold ${large ? "text-[#dc000c]" : "text-[#555555]"}`}>
@@ -392,14 +392,14 @@ export default function ShipmentPanel({
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr>
-                <th className={th}>ポリ箱番号</th>
+                <th className={th}>プラ箱番号</th>
                 <th className={th}>出荷日</th>
                 <th className={th}>送り元 → 送り先</th>
                 <th className={th}>種類</th>
                 <th className={`${th} text-right`}>出荷重量(kg)</th>
                 <th className={th}>処理日</th>
                 <th className={`${th} text-right`}>投入重量(kg)</th>
-                <th className={`${th} text-right`}>ポリ箱(kg)</th>
+                <th className={`${th} text-right`}>プラ箱(kg)</th>
                 <th className={`${th} text-right`}>受入計(kg)</th>
                 <th className={`${th} text-right`}>差</th>
                 <th className={th}>状態</th>
@@ -410,7 +410,7 @@ export default function ShipmentPanel({
               {shipments.length === 0 && (
                 <tr>
                   <td className={td} colSpan={12}>
-                    ポリ箱はありません
+                    プラ箱はありません
                   </td>
                 </tr>
               )}

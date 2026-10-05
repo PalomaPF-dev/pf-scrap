@@ -318,7 +318,7 @@ export interface MonthlySummary {
   procureCoverage: { entered: number; inMonth: number; used: boolean } | null;
   /**
    * total … 発生元の工場で数えた日次記録（理論との照合用）
-   * processed … この工場の箱で量った分（売却との突合用）。incoming/outgoing は工場間のポリ箱
+   * processed … この工場の箱で量った分（売却との突合用）。incoming/outgoing は工場間のプラ箱
    */
   daily: {
     total: number;
@@ -329,7 +329,7 @@ export interface MonthlySummary {
     outgoing: number;
   };
   baikyaku: number | null;
-  /** 売却のうち自工場分（他工場から届いたポリ箱の分を除く）。理論との比較に使う */
+  /** 売却のうち自工場分（他工場から届いたプラ箱の分を除く）。理論との比較に使う */
   baikyakuOwn: number | null;
   diff6: number | null;
   rate6: number | null;

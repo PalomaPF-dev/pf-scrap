@@ -1154,10 +1154,10 @@ export async function listBagEntriesByMonth(
     SELECT b.bag_no, b.status, b.factory, b.scale_name,
            r.record_date, e.jikoku, e.hinshu, e.cum_before, e.cum_after, e.weight,
            e.kirokusha, e.ijo,
-           -- 他工場から届いたポリ箱は職場の代わりに「送った工場 ポリ箱 番号」
+           -- 他工場から届いたプラ箱は職場の代わりに「送った工場 プラ箱 番号」
            CASE WHEN e.shipment_id IS NOT NULL
-             THEN COALESCE((SELECT 'ポリ箱 ' || sh.box_no FROM scrap_shipments sh
-                            WHERE sh.id = e.shipment_id), 'ポリ箱')
+             THEN COALESCE((SELECT 'プラ箱 ' || sh.box_no FROM scrap_shipments sh
+                            WHERE sh.id = e.shipment_id), 'プラ箱')
              ELSE e.busho END AS busho
     FROM scrap_bags b
     JOIN scrap_daily_entries e ON e.bag_id = b.id
@@ -1542,9 +1542,9 @@ export async function listDailyAgg(
 /**
  * 日次記録の月合計。
  *
- * 工場間でポリ箱を送る運用（本社工場 → 大口工場など）があるため、2つの数え方を持つ。
+ * 工場間でプラ箱を送る運用（本社工場 → 大口工場など）があるため、2つの数え方を持つ。
  * - total / byKind … 発生元の工場で数える（理論スクラップとの照合用）。
- *     他工場から届いたポリ箱は送った工場の分。月は出荷日で数える（生産した月に合わせる）。
+ *     他工場から届いたプラ箱は送った工場の分。月は出荷日で数える（生産した月に合わせる）。
  * - processed … その工場のスクラップ箱で量った分（売却との突合用。売却は処理した工場で行う）。
  * - incoming … processed のうち、他工場から届いた分
  * - outgoing … total のうち、他工場で量った分（送った側から見た「送って処理された量」）
@@ -2707,9 +2707,9 @@ export async function listWorkplaceAgg(
   const sql = getSql();
   const rows = await sql`
     SELECT r.factory,
-      -- 他工場から届いたポリ箱は「送った工場（ポリ箱）」を1つの職場のように数える
+      -- 他工場から届いたプラ箱は「送った工場（プラ箱）」を1つの職場のように数える
       CASE WHEN e.origin_factory <> '' AND e.origin_factory <> r.factory
-        THEN e.origin_factory || '（ポリ箱）' ELSE e.busho END AS workplace,
+        THEN e.origin_factory || '（プラ箱）' ELSE e.busho END AS workplace,
       e.hinshu, SUM(e.weight) AS w, COUNT(*)::int AS n
     FROM scrap_daily_entries e
     JOIN scrap_daily_records r ON r.id = e.record_id
@@ -2871,7 +2871,7 @@ export async function deleteWorkplace(
   return "deleted";
 }
 
-// ===== 工場間のポリ箱送付 =====
+// ===== 工場間のプラ箱送付 =====
 
 /** どの工場がどこへスクラップを送るか。送らない工場は含まない。 */
 export async function listShipRoutes(
@@ -2929,7 +2929,7 @@ function mapShipment(r: any): Shipment {
   };
 }
 
-/** ポリ箱を、受け入れ側の処理記録（日次記録の明細）と一緒に引く。 */
+/** プラ箱を、受け入れ側の処理記録（日次記録の明細）と一緒に引く。 */
 async function queryShipments(
   companyId: string,
   q: {
@@ -2979,7 +2979,7 @@ export async function getShipment(companyId: string, id: string): Promise<Shipme
 }
 
 /**
- * ポリ箱の一覧。factory を送った側か受け入れた側に持つもの（null＝全工場）。
+ * プラ箱の一覧。factory を送った側か受け入れた側に持つもの（null＝全工場）。
  * 未処理のものは月に関係なく必ず含め、先頭に並べる（処理し忘れを見落とさないため）。
  */
 export async function listShipments(
@@ -2989,14 +2989,14 @@ export async function listShipments(
   return queryShipments(companyId, { factory: opts.factory, ym: opts.ym });
 }
 
-/** 受け入れ側でまだ処理していないポリ箱（日次記録で選ぶ候補）。古い順。 */
+/** 受け入れ側でまだ処理していないプラ箱（日次記録で選ぶ候補）。古い順。 */
 export async function listPendingShipments(companyId: string, toFactory: string): Promise<Shipment[]> {
   const list = await queryShipments(companyId, { toFactory, pendingOnly: true });
   return list.reverse();
 }
 
 /**
- * ポリ箱を出荷として登録し、箱に書く番号を振る（送った工場-月日-連番）。
+ * プラ箱を出荷として登録し、箱に書く番号を振る（送った工場-月日-連番）。
  * 番号は消した箱の番号を使い回さないよう、その日の最大の連番の次にする。
  */
 export async function createShipment(
@@ -3006,9 +3006,9 @@ export async function createShipment(
     toFactory: string;
     shipDate: string;
     hinshu: string;
-    /** ポリ箱ごと量った重さ（出荷重量） */
+    /** プラ箱ごと量った重さ（出荷重量） */
     grossWeight: number;
-    /** 送る側で量ったポリ箱の重さ。いまの運用では量らない（null） */
+    /** 送る側で量ったプラ箱の重さ。いまの運用では量らない（null） */
     tareWeight: number | null;
     shippedBy: string;
     note: string;
@@ -3017,7 +3017,7 @@ export async function createShipment(
   await ensureSchema();
   const sql = getSql();
   const prefix = `${x.fromFactory}-${x.shipDate.slice(5, 7)}${x.shipDate.slice(8, 10)}-`;
-  // 出荷重量はポリ箱込み。送る側でポリ箱を量ったとき（試行版）だけスクラップ重量にする
+  // 出荷重量はプラ箱込み。送る側でプラ箱を量ったとき（試行版）だけスクラップ重量にする
   const weight =
     x.tareWeight !== null
       ? Math.round((x.grossWeight - x.tareWeight) * 1000) / 1000
@@ -3047,12 +3047,12 @@ export async function createShipment(
       if (sh) return sh;
     }
   }
-  throw new Error("ポリ箱の番号を振れませんでした。もう一度お試しください。");
+  throw new Error("プラ箱の番号を振れませんでした。もう一度お試しください。");
 }
 
 /**
- * 未処理のポリ箱の重量・種類・メモを直す（処理済みは直せない）。
- * 総重量とポリ箱の重さがあればスクラップ重量はそこから出し直す。
+ * 未処理のプラ箱の重量・種類・メモを直す（処理済みは直せない）。
+ * 総重量とプラ箱の重さがあればスクラップ重量はそこから出し直す。
  */
 export async function updateShipment(
   companyId: string,
@@ -3081,7 +3081,7 @@ export async function updateShipment(
   return rows.length > 0;
 }
 
-/** 未処理のポリ箱を取り消す（処理済みは消せない）。 */
+/** 未処理のプラ箱を取り消す（処理済みは消せない）。 */
 export async function deleteShipment(companyId: string, id: string): Promise<boolean> {
   await ensureSchema();
   const sql = getSql();
@@ -3093,7 +3093,7 @@ export async function deleteShipment(companyId: string, id: string): Promise<boo
   return rows.length > 0;
 }
 
-/** 指定したポリ箱のうち、別の日次記録（exceptRecordId 以外）で処理済みのもの。 */
+/** 指定したプラ箱のうち、別の日次記録（exceptRecordId 以外）で処理済みのもの。 */
 export async function shipmentsUsedElsewhere(
   companyId: string,
   ids: string[],

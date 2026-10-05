@@ -516,9 +516,9 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`);
   await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'portal'`);
 
-  // ===== 工場間のポリ箱送付（2026-10） =====
-  // 本社工場・第二工場などはスクラップをポリ箱に入れて毎日大口工場へ送り、
-  // 大口のスクラップ箱で処理（投入・売却）する。送る側でポリ箱ごとに計量して出荷し、
+  // ===== 工場間のプラ箱送付（2026-10） =====
+  // 本社工場・第二工場などはスクラップをプラ箱に入れて毎日大口工場へ送り、
+  // 大口のスクラップ箱で処理（投入・売却）する。送る側でプラ箱ごとに計量して出荷し、
   // 大口でも投入前に量って突き合わせる。
   //
   // 送り先（どの工場がどこへ送るか）。送らない工場は行が無い＝自工場で処理。
@@ -530,7 +530,7 @@ async function buildSchema(): Promise<void> {
       updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (company_id, from_factory)
     )`);
-  // ポリ箱1つ＝1行。box_no は箱に書く番号（例: 本社工場-1002-03）。
+  // プラ箱1つ＝1行。box_no は箱に書く番号（例: 本社工場-1002-03）。
   // 処理済みかどうかは持たない。日次記録の明細（shipment_id）から引く。
   // 明細は保存のたびに入れ直すので、状態を別に持つと食い違うため。
   await safeDdl(() => sql`
@@ -548,19 +548,19 @@ async function buildSchema(): Promise<void> {
       created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (company_id, box_no)
     )`);
-  // 送る側は空のポリ箱を先に量っておき、ポリ箱ごと量った総重量から差し引いて
+  // 送る側は空のプラ箱を先に量っておき、プラ箱ごと量った総重量から差し引いて
   // スクラップ重量（weight）を出す。両方残して、後から計算を確かめられるようにする。
   // 2026-10 の導入直後に登録した分は NULL（weight だけ）。
   await safeDdl(() => sql`ALTER TABLE scrap_shipments ADD COLUMN IF NOT EXISTS gross_weight NUMERIC`);
   await safeDdl(() => sql`ALTER TABLE scrap_shipments ADD COLUMN IF NOT EXISTS tare_weight NUMERIC`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_to_idx ON scrap_shipments(company_id, to_factory, ship_date)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_from_idx ON scrap_shipments(company_id, from_factory, ship_date)`);
-  // 明細の発生元工場（空＝記録した工場）と、処理したポリ箱。
-  // 1つのポリ箱を2回処理しないよう、ポリ箱は明細1件にしか結べない。
+  // 明細の発生元工場（空＝記録した工場）と、処理したプラ箱。
+  // 1つのプラ箱を2回処理しないよう、プラ箱は明細1件にしか結べない。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS origin_factory TEXT NOT NULL DEFAULT ''`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS shipment_id UUID`);
-  // 受け入れ側で、スクラップ箱へ空けたあとに量ったポリ箱の重さ（2026-10）。
-  // 送る側はポリ箱ごと量って出荷するので、投入重量 ＋ これ ＝ 出荷重量 で突き合わせる。
+  // 受け入れ側で、スクラップ箱へ空けたあとに量ったプラ箱の重さ（2026-10）。
+  // 送る側はプラ箱ごと量って出荷するので、投入重量 ＋ これ ＝ 出荷重量 で突き合わせる。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS poly_tare NUMERIC`);
   await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_daily_entries_shipment_uidx ON scrap_daily_entries(shipment_id) WHERE shipment_id IS NOT NULL`);
 }

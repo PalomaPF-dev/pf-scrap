@@ -2062,10 +2062,26 @@ export async function addAdjustmentAction(input: {
   }
 }
 
+/**
+ * 在庫補正の削除（管理者のみ。画面でも削除ボタンは管理者にだけ出す）。
+ * 所属工場の人は、その工場の補正だけ消せる。
+ */
 export async function deleteAdjustmentAction(id: string): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
-    await deleteAdjustment(s.companyId, asStr(id, 50));
+    const s = await requireAdminSession();
+    const restriction = await getFactoryRestriction(s);
+    const deleted = await deleteAdjustment(
+      s.companyId,
+      asStr(id, 50),
+      restriction.restricted ? restriction.factory : null
+    );
+    if (deleted === 0) {
+      return fail(
+        restriction.restricted
+          ? `所属工場（${restriction.factory}）の在庫補正のみ削除できます。`
+          : "削除する在庫補正が見つかりませんでした。"
+      );
+    }
     revalidatePath("/procurement");
     revalidatePath("/");
     revalidatePath("/dashboard");
@@ -2076,7 +2092,8 @@ export async function deleteAdjustmentAction(id: string): Promise<ActionResult> 
 }
 
 /**
- * 月初在庫アンカー（棚卸で確定した月初在庫）の保存（管理者のみ）。
+ * 月初在庫アンカー（棚卸で確定した月初在庫）の保存（管理者のみ。画面でも管理者にだけ出す）。
+ * 所属工場の人は、その工場の月初在庫だけ保存できる。
  * 空欄はアンカー無し＝前月からの理論ロールで自動計算される。
  */
 export async function saveMonthlyAnchorAction(input: {
@@ -2087,10 +2104,14 @@ export async function saveMonthlyAnchorAction(input: {
   zaikoSonota: unknown;
 }): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
+    const s = await requireAdminSession();
     if (!isYmStr(input.ym)) return fail("年月が正しくありません。");
     const factory = asStr(input.factory, 50);
     if (!factory) return fail("工場を選択してください。");
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）のデータのみ入力できます。`);
+    }
     const prev = await getMonthlyInput(s.companyId, input.ym, factory);
     await saveMonthlyInput(s.companyId, {
       ym: input.ym,
@@ -2113,24 +2134,31 @@ export async function saveMonthlyAnchorAction(input: {
 }
 
 /**
- * 月次データのCSV一括取込（過去データ移行用・管理者のみ）。
+ * 月次データのCSV一括取込（過去データ移行用・管理者のみ。画面でも「月次取込」は管理者にだけ出す）。
  * 列: 年月, 工場, 月初在庫_銅条, 月初在庫_銅管, 月初在庫_その他,
  *     購入_銅条, 購入_銅管, 購入_その他, 売却数量（1行目ヘッダー可）。
+ * 所属工場の人は、日次の調達入力のCSV取込と同じく、所属工場の行だけ取り込む（他工場の行は飛ばして件数を返す）。
  */
 export async function importMonthlyCsvAction(
   rows: Record<string, unknown>[]
 ): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
+    const s = await requireAdminSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 1000) return fail("一度に取込できるのは1,000行までです。");
+    const restriction = await getFactoryRestriction(s);
     let count = 0;
     let bad = 0;
+    let otherFactory = 0;
     for (const r of rows) {
       const ym = normYm(r.ym);
       const factory = asStr(r.factory, 50);
       if (!ym || !factory) {
         bad++;
+        continue;
+      }
+      if (restriction.restricted && factory !== restriction.factory) {
+        otherFactory++;
         continue;
       }
       await saveMonthlyInput(s.companyId, {
@@ -2149,7 +2177,10 @@ export async function importMonthlyCsvAction(
     revalidatePath("/procurement");
     revalidatePath("/");
     revalidatePath("/dashboard");
-    return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行）` };
+    const skipped = otherFactory
+      ? `、所属工場（${restriction.factory}）以外のため対象外: ${otherFactory}行`
+      : "";
+    return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行${skipped}）` };
   } catch (e) {
     return fail((e as Error).message);
   }

@@ -2439,10 +2439,23 @@ export async function addAdjustment(
     VALUES (${companyId}, ${adj.adate}, ${adj.factory}, ${adj.kubun}, ${adj.amount}, ${adj.reason}, ${adj.recordedBy})`;
 }
 
-export async function deleteAdjustment(companyId: string, id: string): Promise<void> {
+/**
+ * 在庫補正の削除。factory を渡すとその工場の補正だけ消す（所属工場の人の範囲制限）。
+ * 消した件数を返す（0 = 該当なし、または範囲外）。
+ */
+export async function deleteAdjustment(
+  companyId: string,
+  id: string,
+  factory: string | null
+): Promise<number> {
   await ensureSchema();
   const sql = getSql();
-  await sql`DELETE FROM scrap_inventory_adjustments WHERE company_id = ${companyId} AND id = ${id}`;
+  const rows = await sql`
+    DELETE FROM scrap_inventory_adjustments
+    WHERE company_id = ${companyId} AND id = ${id}
+      AND (${factory}::text IS NULL OR factory = ${factory})
+    RETURNING 1`;
+  return rows.length;
 }
 
 /** 対象月の在庫補正の区分別合計。factory null で全社。 */

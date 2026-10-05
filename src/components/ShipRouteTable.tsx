@@ -8,10 +8,10 @@ const input =
   "h-10 rounded-lg border border-[#e5e5e5] bg-white px-3 text-base focus:border-[#b4632c] focus:outline-none sm:text-sm";
 
 /**
- * 工場間のスクラップ送付（どの工場がどこへポリ箱を送るか）。
+ * 工場間のスクラップ送付（どの工場がどこへプラ箱を送るか）。
  *
- * 送る工場は「ポリ箱（工場間）」で出荷を登録でき、送り先の工場は日次記録で
- * 届いたポリ箱を選んで投入できるようになる。送り先で投入した分は、照合では
+ * 送る工場は「プラ箱（工場間）」で出荷を登録でき、送り先の工場は日次記録で
+ * 届いたプラ箱を選んで投入できるようになる。送り先で投入した分は、照合では
  * 送った工場のスクラップとして数え、売却との突合は送り先（処理した工場）で数える。
  */
 export default function ShipRouteTable({
@@ -40,10 +40,10 @@ export default function ShipRouteTable({
 
   return (
     <section className="mt-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-      <h2 className="text-base font-bold text-[#333333] sm:text-sm">工場間のスクラップ送付（ポリ箱）</h2>
+      <h2 className="text-base font-bold text-[#333333] sm:text-sm">工場間のスクラップ送付（プラ箱）</h2>
       <p className="mt-1 text-xs text-[#909090]">
-        自工場で処理せず、ポリ箱で他工場へ送る工場は送り先を選んでください。送る工場は「ポリ箱（工場間）」で
-        1箱ずつ量って出荷を登録し、送り先は日次記録で届いたポリ箱を選んで投入します。照合ダッシュボードでは、
+        自工場で処理せず、プラ箱で他工場へ送る工場は送り先を選んでください。送る工場は「プラ箱（工場間）」で
+        1箱ずつ量って出荷を登録し、送り先は日次記録で届いたプラ箱を選んで投入します。照合ダッシュボードでは、
         送り先で投入した分を送った工場のスクラップとして数えます（売却との突合は送り先で数えます）。
       </p>
 
@@ -84,7 +84,7 @@ export default function ShipRouteTable({
                     .filter((x) => x !== f)
                     .map((x) => (
                       <option key={x} value={x}>
-                        {x} へポリ箱で送る
+                        {x} へプラ箱で送る
                       </option>
                     ))}
                 </select>

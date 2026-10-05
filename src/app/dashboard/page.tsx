@@ -72,7 +72,7 @@ export default async function DashboardPage({
 
   const g = s.perKubun["全体"];
   const dailyTotal = s.daily.total;
-  // 売却と比べるのは、この工場の箱で量った量（他工場から届いたポリ箱を含む）
+  // 売却と比べるのは、この工場の箱で量った量（他工場から届いたプラ箱を含む）
   const processed = s.daily.processed;
   // 差異5%超は要確認としてハイライトする
   const warn6 =
@@ -204,11 +204,11 @@ export default async function DashboardPage({
               </tr>
               {s.daily.incoming > 0 && (
                 <tr>
-                  <th className={`${th} font-normal`}>　うち他工場から届いたポリ箱</th>
+                  <th className={`${th} font-normal`}>　うち他工場から届いたプラ箱</th>
                   <td className={tdNum}>{fmt(s.daily.incoming)} kg</td>
                   <td className={td}>
                     <Link href={`/shipments?ym=${ym}`} className="text-xs underline">
-                      ポリ箱の一覧
+                      プラ箱の一覧
                     </Link>
                   </td>
                 </tr>
@@ -244,7 +244,7 @@ export default async function DashboardPage({
               </tr>
               {s.daily.incoming > 0 && s.baikyakuOwn !== null && (
                 <tr>
-                  <th className={`${th} font-normal`}>売却のうち自工場分（他工場のポリ箱を除く）</th>
+                  <th className={`${th} font-normal`}>売却のうち自工場分（他工場のプラ箱を除く）</th>
                   <td className={tdNum}>{fmt(s.baikyakuOwn)} kg</td>
                   <td className={td}></td>
                 </tr>

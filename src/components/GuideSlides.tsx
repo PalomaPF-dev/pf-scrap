@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, X, ZoomIn } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, X, ZoomIn } from "lucide-react";
 
 /**
  * スライドに添える実画面のキャプチャ（public/guide/ に置く）。
@@ -20,6 +20,75 @@ export interface GuideShot {
   pc?: boolean;
 }
 
+/**
+ * 「画面の見方」に出す見た目の手がかり。画面と同じ色の札・ボタンの形で見出しを出し、
+ * 説明の文字だけで画面のどこの話かを探させない（色はアプリの各画面と揃える）。
+ */
+export type GuideTone =
+  /** 青の塗り … 重量計を撮って読み取る操作 */
+  | "read"
+  /** オレンジの塗り … 記録する・登録する（その画面の主な操作） */
+  | "action"
+  /** 緑の塗り … 承認する */
+  | "approve"
+  /** 白地に灰色の枠 … 補助の操作（CSV・やめる など） */
+  | "sub"
+  /** 白地にオレンジの枠 … 袋を交換する・締め値を直す */
+  | "subAccent"
+  /** 白地に赤の枠 … 取り消す・戻す */
+  | "danger"
+  /** 黒の塗り … 選んでいる選択肢（職場・どこのスクラップか） */
+  | "selected"
+  /** 状態の札: 承認済み・処理済（緑） */
+  | "ok"
+  /** 状態の札: 承認待ち・申請中・未処理（黄） */
+  | "wait"
+  /** 状態の札: 差し戻し・要確認（赤） */
+  | "ng"
+  /** 状態の札: 下書き（灰） */
+  | "draft"
+  /** 状態の札: 記録中の袋（オレンジ） */
+  | "open"
+  /** AI読取の印（青） */
+  | "ai"
+  /** 他工場から届いたプラ箱の印（青） */
+  | "poly"
+  /** 赤字の注意・赤くなる数字 */
+  | "alert";
+
+const TONE_CLASS: Record<GuideTone, string> = {
+  read: "rounded-lg bg-[#0b5ca8] px-2.5 py-1 text-white",
+  action: "rounded-lg bg-[#b4632c] px-2.5 py-1 text-white",
+  approve: "rounded-lg bg-[#2f6b2f] px-2.5 py-1 text-white",
+  sub: "rounded-lg border border-[#cfcac3] bg-white px-2.5 py-0.5 text-[#555555]",
+  subAccent: "rounded-lg border border-[#b4632c] bg-white px-2.5 py-0.5 text-[#b4632c]",
+  danger: "rounded-lg border border-[#dc000c] bg-white px-2.5 py-0.5 text-[#dc000c]",
+  selected: "rounded-lg bg-[#333333] px-2.5 py-1 text-white",
+  ok: "rounded-md bg-[#eef4ee] px-2 py-0.5 text-[#2f6b2f]",
+  wait: "rounded-md bg-[#fff3e0] px-2 py-0.5 text-[#a15c00]",
+  ng: "rounded-md bg-[#fdecea] px-2 py-0.5 text-[#dc000c]",
+  draft: "rounded-md bg-[#eeeeee] px-2 py-0.5 text-[#555555]",
+  open: "rounded-md bg-[#faf6ef] px-2 py-0.5 text-[#b4632c]",
+  ai: "rounded-md bg-[#eef1f4] px-2 py-0.5 text-[#0b5ca8]",
+  poly: "rounded-md bg-[#e8f0f8] px-2 py-0.5 text-[#0b5ca8]",
+  alert: "text-[#dc000c]",
+};
+
+/**
+ * 画面の部品1つ分の説明（入力欄・ボタン・表示・札・色）。
+ * 意味と「いつ使うか／押すと何が起きるか／誰に出るか／できない条件」を1〜2文で書く。
+ * 文言は必ず実際の画面（コード）と揃える。画面を変えたらここも直す。
+ */
+export interface GuidePart {
+  /**
+   * 見出し。画面の文言そのものは「」で囲む（例「投入完了として記録する」）。
+   * tone を付けたときは画面と同じ札・ボタンの形で出すので「」は付けない。
+   */
+  label: string;
+  tone?: GuideTone;
+  text: string;
+}
+
 /** スライド1枚分の中身。ページ側でデータとして書く。 */
 export interface GuideSlide {
   /** 見出しの上に出す小さなラベル（例「日次記録 ①」） */
@@ -36,6 +105,11 @@ export interface GuideSlide {
    * 2枚のときは手順の順に並べる（例: カメラ画面 → 読み取ったあとの画面）。
    */
   shots?: GuideShot[];
+  /**
+   * 画面の見方（各部の意味）。手順（points）を読んだあとに、画面のどこが何かを
+   * 確かめたい人向け。スマホで長くならないよう、開閉できる欄にまとめて出す。
+   */
+  parts?: GuidePart[];
 }
 
 /** 画像の表示上の幅（CSS px）。スマホ画面は2倍で撮っているので半分にする */
@@ -127,6 +201,54 @@ function Zoom({ shot, onClose }: { shot: GuideShot; onClose: () => void }) {
 }
 
 /**
+ * 画面の見方（各部の意味）。開閉できる欄に、見出し（画面の文言・札の形）と説明を並べる。
+ * 開いた状態は送っても保つ（1枚ずつ開き直させない）。
+ */
+function Parts({
+  parts,
+  open,
+  onToggle,
+}: {
+  parts: GuidePart[];
+  open: boolean;
+  onToggle: (open: boolean) => void;
+}) {
+  return (
+    <details
+      open={open}
+      onToggle={(e) => onToggle(e.currentTarget.open)}
+      className="group mt-5 rounded-xl border border-[#e5e5e5] bg-[#fafaf8]"
+    >
+      <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5 text-sm font-bold text-[#333333] [&::-webkit-details-marker]:hidden">
+        <span>
+          画面の見方
+          <span className="ml-1.5 text-xs font-normal text-[#707070]">
+            ボタン・表示の意味（{parts.length}項目）
+          </span>
+        </span>
+        <ChevronDown className="h-5 w-5 shrink-0 text-[#b4632c] transition-transform group-open:rotate-180" />
+      </summary>
+      <dl className="divide-y divide-[#eeeeee] border-t border-[#e5e5e5] px-4">
+        {parts.map((pt, n) => (
+          <div key={n} className="py-2.5">
+            <dt className="text-sm font-bold leading-relaxed text-[#333333]">
+              {pt.tone ? (
+                <span className={`inline-block text-[13px] font-bold ${TONE_CLASS[pt.tone]}`}>
+                  {pt.label}
+                </span>
+              ) : (
+                pt.label
+              )}
+            </dt>
+            <dd className="mt-1 text-sm leading-relaxed text-[#555555]">{pt.text}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+/**
  * 使い方ガイド（スライド送り）。
  *
  * 現場はスマホで見るので、1画面に1つのことだけを置く。
@@ -136,6 +258,8 @@ function Zoom({ shot, onClose }: { shot: GuideShot; onClose: () => void }) {
 export default function GuideSlides({ slides }: { slides: GuideSlide[] }) {
   const [i, setI] = useState(0);
   const [zoom, setZoom] = useState<GuideShot | null>(null);
+  // 「画面の見方」を開いているか。スライドを送っても開いたまま（閉じたまま）にする
+  const [partsOpen, setPartsOpen] = useState(false);
   const last = slides.length - 1;
 
   const go = useCallback(
@@ -219,6 +343,10 @@ export default function GuideSlides({ slides }: { slides: GuideSlide[] }) {
             <p className="mt-5 rounded-lg bg-[#fdecea] px-3 py-2.5 text-sm text-[#dc000c]">
               {s.caution}
             </p>
+          )}
+
+          {s.parts && s.parts.length > 0 && (
+            <Parts parts={s.parts} open={partsOpen} onToggle={setPartsOpen} />
           )}
         </div>
 

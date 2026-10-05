@@ -2134,24 +2134,31 @@ export async function saveMonthlyAnchorAction(input: {
 }
 
 /**
- * 月次データのCSV一括取込（過去データ移行用・管理者のみ）。
+ * 月次データのCSV一括取込（過去データ移行用・管理者のみ。画面でも「月次取込」は管理者にだけ出す）。
  * 列: 年月, 工場, 月初在庫_銅条, 月初在庫_銅管, 月初在庫_その他,
  *     購入_銅条, 購入_銅管, 購入_その他, 売却数量（1行目ヘッダー可）。
+ * 所属工場の人は、日次の調達入力のCSV取込と同じく、所属工場の行だけ取り込む（他工場の行は飛ばして件数を返す）。
  */
 export async function importMonthlyCsvAction(
   rows: Record<string, unknown>[]
 ): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
+    const s = await requireAdminSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 1000) return fail("一度に取込できるのは1,000行までです。");
+    const restriction = await getFactoryRestriction(s);
     let count = 0;
     let bad = 0;
+    let otherFactory = 0;
     for (const r of rows) {
       const ym = normYm(r.ym);
       const factory = asStr(r.factory, 50);
       if (!ym || !factory) {
         bad++;
+        continue;
+      }
+      if (restriction.restricted && factory !== restriction.factory) {
+        otherFactory++;
         continue;
       }
       await saveMonthlyInput(s.companyId, {
@@ -2170,7 +2177,10 @@ export async function importMonthlyCsvAction(
     revalidatePath("/procurement");
     revalidatePath("/");
     revalidatePath("/dashboard");
-    return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行）` };
+    const skipped = otherFactory
+      ? `、所属工場（${restriction.factory}）以外のため対象外: ${otherFactory}行`
+      : "";
+    return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行${skipped}）` };
   } catch (e) {
     return fail((e as Error).message);
   }

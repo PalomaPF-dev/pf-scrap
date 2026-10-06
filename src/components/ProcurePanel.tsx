@@ -267,7 +267,7 @@ export default function ProcurePanel({
       note: hasHeader && iNote >= 0 ? String(r[iNote] ?? "").trim() : "",
     }));
     startTransition(async () => {
-      const res = await importProcureCsvAction(records);
+      const res = await importProcureCsvAction(records, ym);
       setMessage({ ok: res.ok, text: res.message ?? "" });
       if (res.ok) router.refresh();
     });
@@ -359,7 +359,7 @@ export default function ProcurePanel({
             CSV出力
           </button>
           <span className="text-xs text-[#909090]">
-            入力者: {userName}（自動記録） ／ 取込の列（Excel/CSVどちらでも可）: 日付, 工場, 購入_銅条, 購入_銅管, 購入_その他, 売却数量, 備考
+            入力者: {userName}（自動記録） ／ 取込の列（Excel/CSVどちらでも可）: 日付, 工場, 購入_銅条, 購入_銅管, 購入_その他, 売却数量, 備考（日付は 2026/9/1 でも 9月1日 でも可。年が無いときは表示中の月に近い年）
           </span>
         </div>
         {message && (

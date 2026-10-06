@@ -1984,7 +1984,9 @@ export async function saveProcureDaysAction(input: {
  * 列: 日付, 工場, 購入_銅条, 購入_銅管, 購入_その他, 売却数量, 備考（1行目ヘッダー可）。
  */
 export async function importProcureCsvAction(
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[],
+  /** 取り込んだ画面の対象月 'YYYY-MM'。年の無い日付（9月1日など）の年を決めるのに使う */
+  baseYm?: string
 ): Promise<ActionResult> {
   try {
     const s = await requireOperationsSession();
@@ -1992,16 +1994,18 @@ export async function importProcureCsvAction(
     if (rows.length > 5000) return fail("一度に取込できるのは5,000行までです。");
     const restriction = await getFactoryRestriction(s);
     const clean: Omit<ProcureDay, "recordedBy">[] = [];
-    let bad = 0;
-    for (const r of rows) {
-      const pdate = normDateStr(r.pdate);
+    // 読めなかった行は理由ごとに数え、最初の例を添えて返す（何を直せばよいか分かるように）
+    const badDate: string[] = [];
+    const badFactory: string[] = [];
+    for (const [i, r] of rows.entries()) {
+      const pdate = normDateStr(r.pdate, isYmStr(baseYm) ? baseYm : undefined);
       const factory = asStr(r.factory, 50);
-      if (!pdate || !factory) {
-        bad++;
+      if (!pdate) {
+        badDate.push(`${i + 2}行目「${asStr(r.pdate, 30)}」`);
         continue;
       }
-      if (restriction.restricted && factory !== restriction.factory) {
-        bad++;
+      if (!factory || (restriction.restricted && factory !== restriction.factory)) {
+        badFactory.push(`${i + 2}行目「${factory}」`);
         continue;
       }
       clean.push({
@@ -2014,11 +2018,29 @@ export async function importProcureCsvAction(
         note: asStr(r.note, 500),
       });
     }
+    const problems = [
+      badDate.length
+        ? `日付が読めない ${badDate.length}行（例: ${badDate[0]}。2026/9/1 または 9月1日 の形にしてください）`
+        : "",
+      badFactory.length
+        ? `工場が${restriction.restricted ? `所属工場（${restriction.factory}）と違う` : "空欄の"} ${badFactory.length}行（例: ${badFactory[0]}）`
+        : "",
+    ].filter(Boolean);
+    if (clean.length === 0) {
+      return fail(`取り込める行がありませんでした。${problems.join("、")}。`);
+    }
     const count = await upsertProcureDays(s.companyId, clean, s.userName || s.loginId || "");
     revalidatePath("/procurement");
     revalidatePath("/");
     revalidatePath("/dashboard");
-    return { ok: true, message: `取込完了: ${count}日分（読取不可・対象外: ${bad}行）` };
+    // どの月に入ったかを出す（画面の月と違う月のデータだと、取り込んでも画面に出ないため）
+    const months = [...new Set(clean.map((c) => c.pdate.slice(0, 7)))]
+      .sort()
+      .map((m) => `${Number(m.slice(0, 4))}年${Number(m.slice(5, 7))}月`);
+    return {
+      ok: true,
+      message: `取込完了: ${months.join("・")}の${count}日分${problems.length ? `（取り込めなかった行: ${problems.join("、")}）` : ""}`,
+    };
   } catch (e) {
     return fail((e as Error).message);
   }

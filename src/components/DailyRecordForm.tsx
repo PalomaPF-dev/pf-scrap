@@ -1,15 +1,17 @@
 "use client";
 
-import { useCallback, useMemo, useState, useSyncExternalStore, useTransition } from "react";
+import { Fragment, useCallback, useMemo, useState, useSyncExternalStore, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   CheckCircle2,
   PackagePlus,
+  Pencil,
   Plus,
   QrCode,
   Save,
   Sparkles,
   Stamp,
+  Trash2,
   Truck,
   Undo2,
 } from "lucide-react";
@@ -117,6 +119,42 @@ function entryReason(e: EntryDraft): string {
  */
 function entryOrigin(e: EntryDraft): string {
   return [e.kikai, e.zairyo, e.kotei].filter(Boolean).join(" / ");
+}
+
+/**
+ * 同じ累積で繋がる次の明細の位置（無ければ -1）。
+ * 袋がある明細は同じ袋、袋管理より前の明細は同じ重量計で繋がる（サーバーの照合と同じ）。
+ */
+function nextInChain(list: EntryDraft[], i: number): number {
+  const e = list[i];
+  for (let j = i + 1; j < list.length; j++) {
+    const n = list[j];
+    if (e.bagId ? n.bagId === e.bagId : !n.bagId && n.scaleId === e.scaleId) return j;
+  }
+  return -1;
+}
+
+/**
+ * 前の明細を直した・取り消したことで、次の明細の投入前が前の投入後と合わなくなったら、
+ * その旨を訂正理由に入れる（サーバーは理由の無い食い違いを保存させないため）。
+ * AI読取の投入前は読取値と照合されるので触らない。既に理由がある行もそのまま。
+ */
+function noteChainBreak(list: EntryDraft[], j: number, expected: string, note: string) {
+  if (j < 0) return;
+  const n = list[j];
+  if (n.cumBeforeReadId || n.cumBeforeReason) return;
+  if (toNumOrNull(n.cumBefore) === toNumOrNull(expected)) return;
+  list[j] = { ...n, cumBeforeReason: note.slice(0, 200) };
+}
+
+/** 備考に残す履歴の日時（例: 10/6 16:40）。 */
+function stampNow(): string {
+  const day = new Date().toLocaleDateString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    month: "numeric",
+    day: "numeric",
+  });
+  return `${day} ${nowTime()}`;
 }
 
 /** 端末の保存（localStorage）の変化を購読する。別タブで選び直したときにも追従する。 */
@@ -299,7 +337,8 @@ export default function DailyRecordForm({
   const [tonyuKanryo, setTonyuKanryo] = useState(initial?.tonyuKanryo ?? false);
   const [biko, setBiko] = useState(initial?.biko ?? "");
   const [message, setMessage] = useState<PanelMessage | null>(null);
-  // どこまで保存したか。行の削除は無いので「先頭から savedCount 件までが保存済み」。
+  // どこまで保存したか。「先頭から savedCount 件までが保存済み」。
+  // 行を直す・取り消すときは保存できてから画面に反映するので、この前提は崩れない。
   // 締めの合計は保存済みの明細から出すため、未保存があるうちは袋を締めさせない。
   const [savedCount, setSavedCount] = useState(initial?.entries.length ?? 0);
   // 読み取り・記録の結果は2でも3でも出るので、同じ見た目を両方に置く。
@@ -307,6 +346,12 @@ export default function DailyRecordForm({
   const messageBanner = message ? <ResultBanner msg={message} className="mt-3" /> : null;
   // 終礼集計の入力（責任者・回収箱測定値・備考など）を触ったか。保存ボタンの強調に使う
   const [fieldsDirty, setFieldsDirty] = useState(false);
+
+  // ===== 記録済みの行を直す・取り消す =====
+  // 開いている行の位置と入力中の値。モバイルのカードとPCの表で同じ値を使う。
+  const [fixIndex, setFixIndex] = useState<number | null>(null);
+  const [fixDraft, setFixDraft] = useState({ before: "", after: "", polyTare: "", reason: "" });
+  const [fixMessage, setFixMessage] = useState<PanelMessage | null>(null);
 
   // ===== 箱（重量計）選択 =====
   const [selectedScale, setSelectedScale] = useState<Scale | null>(null);
@@ -823,6 +868,124 @@ export default function DailyRecordForm({
     });
   }
 
+  function openFix(i: number) {
+    const e = entries[i];
+    setFixIndex(i);
+    setFixDraft({ before: e.cumBefore, after: e.cumAfter, polyTare: e.polyTare, reason: "" });
+    setFixMessage(null);
+  }
+
+  /** 明細の要約（備考に残す履歴用）。例: 10:32 銅ダライ 12→24.3 kg（12.3 kg） プラ箱 本社工場-1005-01 */
+  function entrySummary(e: EntryDraft): string {
+    const sh = e.shipmentId ? shipmentById.get(e.shipmentId) : undefined;
+    return [
+      e.jikoku,
+      e.kind,
+      `${fmt(toNumOrNull(e.cumBefore))}→${fmt(toNumOrNull(e.cumAfter))} kg（${fmt(entryWeight(e))} kg）`,
+      e.busho,
+      sh ? `プラ箱 ${sh.boxNo}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  /**
+   * 直した・取り消した明細を保存する。保存できたときだけ画面に反映し、
+   * 元の値は備考に履歴として残す（明細からは消えるため、誰がいつ何を変えたかを残す）。
+   */
+  function commitFix(next: EntryDraft[], log: string, doneTitle: string) {
+    const nextBiko = [biko.trim(), log].filter(Boolean).join("\n");
+    setFixMessage(null);
+    startTransition(async () => {
+      const res = await saveDailyRecordAction({ ...buildPayload(next), biko: nextBiko });
+      if (res.ok) {
+        setEntries(next);
+        setBiko(nextBiko);
+        setSavedCount(next.length);
+        setFieldsDirty(false);
+        setFixIndex(null);
+        setFixMessage({ ok: true, title: doneTitle, text: res.message ?? "" });
+        router.refresh();
+      } else {
+        setFixMessage({ ok: false, title: "保存できませんでした", text: res.message ?? "" });
+      }
+    });
+  }
+
+  /** 記録済みの行の表示値（とプラ箱の重さ）を直す。 */
+  function fixEntry() {
+    if (fixIndex === null) return;
+    const e = entries[fixIndex];
+    const reason = fixDraft.reason.trim();
+    const b = toNumOrNull(fixDraft.before);
+    const a = toNumOrNull(fixDraft.after);
+    const sh = e.shipmentId ? shipmentById.get(e.shipmentId) : undefined;
+    const fail = (text: string) => setFixMessage({ ok: false, title: "直せません", text });
+    if (b === null || a === null) return fail("投入前と投入後の表示値を入力してください。");
+    if (a < b) return fail("投入後の表示値が投入前より小さくなっています。");
+    const tare = toNumOrNull(fixDraft.polyTare);
+    if (sh && shipmentNeedsPolyTare(sh) && tare === null) {
+      return fail(`プラ箱「${sh.boxNo}」の重さ（空けたあと）を入力してください。`);
+    }
+    const beforeChanged = b !== toNumOrNull(e.cumBefore);
+    const afterChanged = a !== toNumOrNull(e.cumAfter);
+    const tareChanged = Boolean(sh) && tare !== toNumOrNull(e.polyTare);
+    if (!beforeChanged && !afterChanged && !tareChanged) return fail("値が変わっていません。");
+    if (!reason) return fail("直す理由を入力してください（例: 投入後の読み間違い）。");
+
+    const fixed: EntryDraft = {
+      ...e,
+      cumBefore: String(b),
+      cumAfter: String(a),
+      cumBeforeReason: beforeChanged ? reason.slice(0, 200) : e.cumBeforeReason,
+      cumAfterReason: afterChanged ? reason.slice(0, 200) : e.cumAfterReason,
+      polyTare: sh ? (tare === null ? "" : String(tare)) : e.polyTare,
+    };
+    const next = [...entries];
+    next[fixIndex] = fixed;
+    if (afterChanged) {
+      noteChainBreak(next, nextInChain(next, fixIndex), fixed.cumAfter, `前の記録（${e.jikoku}）の投入後を訂正したため`);
+    }
+    const changes = [
+      beforeChanged ? `投入前 ${fmt(toNumOrNull(e.cumBefore))}→${fmt(b)}` : "",
+      afterChanged ? `投入後 ${fmt(toNumOrNull(e.cumAfter))}→${fmt(a)}` : "",
+      tareChanged ? `プラ箱の重さ ${fmt(toNumOrNull(e.polyTare))}→${fmt(tare)}` : "",
+    ].filter(Boolean);
+    commitFix(
+      next,
+      `【訂正 ${stampNow()} ${userName}】${entrySummary(e)}：${changes.join("、")}。理由: ${reason}`,
+      `${e.jikoku} の記録を直しました`
+    );
+  }
+
+  /** 記録済みの行を取り消す（明細から外す）。プラ箱の行なら、そのプラ箱は未処理に戻る。 */
+  function deleteEntry() {
+    if (fixIndex === null) return;
+    const e = entries[fixIndex];
+    const reason = fixDraft.reason.trim();
+    if (!reason) {
+      setFixMessage({
+        ok: false,
+        title: "取り消せません",
+        text: "取り消す理由を入力してください（例: 重量の入力ミスのため入れ直す）。",
+      });
+      return;
+    }
+    const sh = e.shipmentId ? shipmentById.get(e.shipmentId) : undefined;
+    if (!confirm(`${e.jikoku} ${e.kind} ${fmt(entryWeight(e))} kg の記録を取り消します。よろしいですか？`)) return;
+    const j = nextInChain(entries, fixIndex);
+    const next = entries.filter((_, k) => k !== fixIndex);
+    // 取り消した行の投入前が、次の行の本来の投入前になる
+    noteChainBreak(next, j < 0 ? -1 : j - 1, e.cumBefore, `前の記録（${e.jikoku}）を取り消したため`);
+    commitFix(
+      next,
+      `【取り消し ${stampNow()} ${userName}】${entrySummary(e)}。理由: ${reason}`,
+      sh
+        ? `${e.jikoku} の記録を取り消しました（プラ箱「${sh.boxNo}」は未処理に戻りました）`
+        : `${e.jikoku} の記録を取り消しました`
+    );
+  }
+
   function approve() {
     startTransition(async () => {
       const res = await approveDailyRecordAction(date, factory);
@@ -839,6 +1002,104 @@ export default function DailyRecordForm({
       setMessage({ ok: res.ok, text: res.message ?? "" });
       if (res.ok) router.refresh();
     });
+  }
+
+  /** 記録済みの行を直す・取り消す欄（開いている行の下に出す）。 */
+  function fixPanel(e: EntryDraft) {
+    const legacy = e.gross !== "" || e.tare !== "";
+    const sh = e.shipmentId ? shipmentById.get(e.shipmentId) : undefined;
+    const set = (k: keyof typeof fixDraft) => (ev: React.ChangeEvent<HTMLInputElement>) =>
+      setFixDraft((d) => ({ ...d, [k]: ev.target.value }));
+    return (
+      <div className="mt-2 space-y-3 rounded-xl border border-[#b4632c] bg-[#fff8f2] p-3 text-left text-sm whitespace-normal">
+        <p className="font-bold text-[#333333]">
+          {e.jikoku} {e.kind} {fmt(entryWeight(e))} kg の記録を直す・取り消す
+        </p>
+        {!legacy && (
+          <div className="grid grid-cols-2 gap-2 sm:max-w-md">
+            <label className="flex flex-col gap-1 text-xs text-[#707070]">
+              投入前の表示値(kg)
+              <input type="number" inputMode="decimal" step="0.1" value={fixDraft.before} onChange={set("before")} className={numInput} />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-[#707070]">
+              投入後の表示値(kg)
+              <input type="number" inputMode="decimal" step="0.1" value={fixDraft.after} onChange={set("after")} className={numInput} />
+            </label>
+            {sh && (
+              <label className="col-span-2 flex flex-col gap-1 text-xs text-[#707070]">
+                空けたあとのプラ箱の重さ(kg)
+                <input type="number" inputMode="decimal" step="0.1" value={fixDraft.polyTare} onChange={set("polyTare")} className={numInput} />
+              </label>
+            )}
+          </div>
+        )}
+        <label className="flex flex-col gap-1 text-xs text-[#707070] sm:max-w-md">
+          理由（必須）
+          <input
+            type="text"
+            value={fixDraft.reason}
+            onChange={set("reason")}
+            className={input}
+            placeholder="例: 投入後の読み間違い／入力ミスのため入れ直す"
+          />
+        </label>
+        <p className="text-xs text-[#707070]">
+          元の値・理由・直した人は備考に残ります。
+          {sh && `取り消すと、プラ箱「${sh.boxNo}」は未処理に戻り、選び直して記録できます。`}
+        </p>
+        {fixMessage && !fixMessage.ok && <ResultBanner msg={fixMessage} />}
+        <div className="flex flex-wrap gap-2">
+          {!legacy && (
+            <button
+              type="button"
+              onClick={fixEntry}
+              disabled={pending}
+              className="inline-flex h-11 items-center gap-1.5 rounded-lg bg-[#b4632c] px-4 font-bold text-white disabled:opacity-50 sm:h-10"
+            >
+              <Pencil className="h-4 w-4" />
+              この値に直す
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={deleteEntry}
+            disabled={pending}
+            className="inline-flex h-11 items-center gap-1.5 rounded-lg border border-[#dc000c] bg-white px-4 font-bold text-[#dc000c] disabled:opacity-50 sm:h-10"
+          >
+            <Trash2 className="h-4 w-4" />
+            この記録を取り消す
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setFixIndex(null);
+              setFixMessage(null);
+            }}
+            disabled={pending}
+            className="h-11 rounded-lg px-3 text-[#707070] sm:h-10"
+          >
+            やめる
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /** 行の「直す・取り消す」ボタン。編集できる日だけ出す。 */
+  function fixButton(i: number) {
+    if (locked) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => (fixIndex === i ? setFixIndex(null) : openFix(i))}
+        disabled={pending}
+        aria-expanded={fixIndex === i}
+        className="inline-flex items-center gap-1 rounded-md border border-[#e5e5e5] bg-white px-2 py-1 text-xs font-bold text-[#555555] hover:border-[#b4632c] disabled:opacity-50"
+      >
+        <Pencil className="h-3 w-3" />
+        直す・取り消す
+      </button>
+    );
   }
 
   // 一覧選択用。種類ごとにまとめ、種類マスタの並び順で出す（マスタに無い種類は末尾）
@@ -1537,6 +1798,7 @@ export default function DailyRecordForm({
           </span>
         </div>
 
+        {fixMessage?.ok && <ResultBanner msg={fixMessage} className="mb-3" />}
         {entries.length === 0 ? (
           <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
             まだ投入記録がありません。
@@ -1577,8 +1839,12 @@ export default function DailyRecordForm({
                         )}
                         {e.ijo && <div className="mt-0.5 text-xs text-[#dc000c]">異常: {e.ijo}</div>}
                       </div>
-                      <span className="shrink-0 text-lg font-bold tabular-nums">{fmt(w)}</span>
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        <span className="text-lg font-bold tabular-nums">{fmt(w)}</span>
+                        {fixButton(i)}
+                      </div>
                     </div>
+                    {fixIndex === i && fixPanel(e)}
                   </li>
                 );
               })}
@@ -1600,6 +1866,7 @@ export default function DailyRecordForm({
                     <th className={th}>訂正理由</th>
                     <th className={th}>記録者</th>
                     <th className={th}>異常</th>
+                    {!locked && <th className={th}></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -1611,7 +1878,8 @@ export default function DailyRecordForm({
                     // AI読取のIDが残っている＝機械が読んだ値が元になっている
                     const aiUsed = Boolean(e.cumBeforeReadId) || Boolean(e.cumAfterReadId);
                     return (
-                      <tr key={i}>
+                      <Fragment key={i}>
+                      <tr>
                         <td className={td}>{e.jikoku}</td>
                         <td className={td}>{(e.bagId && bagNoById.get(e.bagId)) || ""}</td>
                         <td className={td}>
@@ -1641,7 +1909,16 @@ export default function DailyRecordForm({
                         <td className={`${td} ${reason ? "text-[#a15c00]" : ""}`}>{reason}</td>
                         <td className={td}>{e.kirokusha}</td>
                         <td className={td}>{e.ijo}</td>
+                        {!locked && <td className={td}>{fixButton(i)}</td>}
                       </tr>
+                      {fixIndex === i && (
+                        <tr>
+                          <td colSpan={12} className="border border-[#e5e5e5] px-2 pb-2">
+                            {fixPanel(e)}
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </tbody>

@@ -56,10 +56,32 @@ export function normYm(s: unknown): string | null {
   return null;
 }
 
-/** 2026/8/5, 2026-08-05, Excelのシリアル日付表示等を 'YYYY-MM-DD' に正規化。失敗時 null。 */
-export function normDateStr(s: unknown): string | null {
+/**
+ * 2026/8/5, 2026-08-05, Excelのシリアル日付表示等を 'YYYY-MM-DD' に正規化。失敗時 null。
+ * baseYm（'YYYY-MM'）を渡すと、年の無い「9月1日」「9/1」も読む。Excelで「m月d日」表示の
+ * 列をCSVに保存すると年が落ちるため。年は baseYm に最も近い月になる年を採る
+ * （1月の画面で「12月28日」なら前年）。
+ */
+export function normDateStr(s: unknown, baseYm?: string): string | null {
   if (s === null || s === undefined) return null;
   const t = String(s).trim();
+  const md = baseYm && isYmStr(baseYm) ? t.match(/^(\d{1,2})[/\-月](\d{1,2})日?$/) : null;
+  if (md) {
+    const mo = Number(md[1]);
+    const d = Number(md[2]);
+    const base = Number(baseYm!.slice(0, 4)) * 12 + Number(baseYm!.slice(5, 7)) - 1;
+    const y = [-1, 0, 1]
+      .map((k) => Number(baseYm!.slice(0, 4)) + k)
+      .reduce((a, b) =>
+        Math.abs(b * 12 + mo - 1 - base) < Math.abs(a * 12 + mo - 1 - base) ? b : a
+      );
+    // 実在する日付だけ通す（9月31日などは読めない扱い）
+    const dt = new Date(Date.UTC(y, mo - 1, d));
+    if (mo >= 1 && mo <= 12 && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d) {
+      return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+    return null;
+  }
   const m = t.match(/^(\d{4})[/\-年](\d{1,2})[/\-月](\d{1,2})日?/);
   if (m) {
     const y = Number(m[1]);

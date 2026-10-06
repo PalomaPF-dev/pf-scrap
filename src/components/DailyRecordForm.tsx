@@ -958,9 +958,12 @@ export default function DailyRecordForm({
     );
   }
 
-  /** 記録済みの行を取り消す（明細から外す）。プラ箱の行なら、そのプラ箱は未処理に戻る。 */
+  /**
+   * 記録済みの行を取り消す（明細から外す）。プラ箱の行なら、そのプラ箱は未処理に戻る。
+   * 取り消しは管理者だけ（サーバーでも止める）。
+   */
   function deleteEntry() {
-    if (fixIndex === null) return;
+    if (fixIndex === null || !isAdmin) return;
     const e = entries[fixIndex];
     const reason = fixDraft.reason.trim();
     if (!reason) {
@@ -1013,7 +1016,7 @@ export default function DailyRecordForm({
     return (
       <div className="mt-2 space-y-3 rounded-xl border border-[#b4632c] bg-[#fff8f2] p-3 text-left text-sm whitespace-normal">
         <p className="font-bold text-[#333333]">
-          {e.jikoku} {e.kind} {fmt(entryWeight(e))} kg の記録を直す・取り消す
+          {e.jikoku} {e.kind} {fmt(entryWeight(e))} kg の記録を{isAdmin ? "直す・取り消す" : "直す"}
         </p>
         {!legacy && (
           <div className="grid grid-cols-2 gap-2 sm:max-w-md">
@@ -1045,7 +1048,9 @@ export default function DailyRecordForm({
         </label>
         <p className="text-xs text-[#707070]">
           元の値・理由・直した人は備考に残ります。
-          {sh && `取り消すと、プラ箱「${sh.boxNo}」は未処理に戻り、選び直して記録できます。`}
+          {isAdmin
+            ? sh && `取り消すと、プラ箱「${sh.boxNo}」は未処理に戻り、選び直して記録できます。`
+            : "記録を取り消すときは、管理者に連絡してください。"}
         </p>
         {fixMessage && !fixMessage.ok && <ResultBanner msg={fixMessage} />}
         <div className="flex flex-wrap gap-2">
@@ -1060,15 +1065,17 @@ export default function DailyRecordForm({
               この値に直す
             </button>
           )}
-          <button
-            type="button"
-            onClick={deleteEntry}
-            disabled={pending}
-            className="inline-flex h-11 items-center gap-1.5 rounded-lg border border-[#dc000c] bg-white px-4 font-bold text-[#dc000c] disabled:opacity-50 sm:h-10"
-          >
-            <Trash2 className="h-4 w-4" />
-            この記録を取り消す
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={deleteEntry}
+              disabled={pending}
+              className="inline-flex h-11 items-center gap-1.5 rounded-lg border border-[#dc000c] bg-white px-4 font-bold text-[#dc000c] disabled:opacity-50 sm:h-10"
+            >
+              <Trash2 className="h-4 w-4" />
+              この記録を取り消す
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -1085,9 +1092,14 @@ export default function DailyRecordForm({
     );
   }
 
-  /** 行の「直す・取り消す」ボタン。編集できる日だけ出す。 */
+  /**
+   * 行の「直す・取り消す」ボタン。編集できる日だけ出す。取り消しは管理者だけなので、
+   * それ以外の人には「直す」だけ（直す値の無い旧様式の行には出さない）。
+   */
   function fixButton(i: number) {
     if (locked) return null;
+    const e = entries[i];
+    if (!isAdmin && (e.gross !== "" || e.tare !== "")) return null;
     return (
       <button
         type="button"
@@ -1097,7 +1109,7 @@ export default function DailyRecordForm({
         className="inline-flex items-center gap-1 rounded-md border border-[#e5e5e5] bg-white px-2 py-1 text-xs font-bold text-[#555555] hover:border-[#b4632c] disabled:opacity-50"
       >
         <Pencil className="h-3 w-3" />
-        直す・取り消す
+        {isAdmin ? "直す・取り消す" : "直す"}
       </button>
     );
   }

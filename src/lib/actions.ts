@@ -400,6 +400,27 @@ export async function saveDailyRecordAction(input: {
     if (lockMsg) return fail(lockMsg);
 
     const prev = await getDailyRecord(s.companyId, input.recordDate, factory);
+    // 記録済みの明細の取り消しは管理者だけ。明細は一式で置き換えるので、保存済みの
+    // 明細がすべて今回の明細に残っているかで確かめる（値の訂正は誰でもできる）。
+    if (!isAdmin && prev) {
+      const keyOf = (e: Record<string, unknown>) =>
+        [e.jikoku, e.scaleId || e.scaleName, e.bagId, e.shipmentId, e.kirokusha]
+          .map((v) => asStr(v ?? "", 200))
+          .join("|");
+      const incoming = new Map<string, number>();
+      for (const e of Array.isArray(input.entries) ? input.entries : []) {
+        const k = keyOf(e);
+        incoming.set(k, (incoming.get(k) ?? 0) + 1);
+      }
+      for (const e of prev.entries) {
+        const k = keyOf(e as unknown as Record<string, unknown>);
+        const n = incoming.get(k) ?? 0;
+        if (n === 0) {
+          return fail("記録の取り消しは管理者のみできます。管理者に連絡してください。");
+        }
+        incoming.set(k, n - 1);
+      }
+    }
     // 種類は設定マスタにあるものだけ通す。過去の記録に残っている種類名は
     // そのまま活かしたいので、無効なものも含めた全件で判定する。
     const kindNames = (await listScrapKinds(s.companyId)).map((k) => k.name);

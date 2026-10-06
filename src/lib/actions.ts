@@ -599,7 +599,8 @@ export async function saveDailyRecordAction(input: {
         cumAfter,
         // 機械の値のままなら理由は残さない（上書きした行だけ理由が入る）
         cumBeforeReason: beforeCorrected ? cumBeforeReason : "",
-        cumAfterReason: afterCorrected ? cumAfterReason : "",
+        // 手入力の投入後（AI読取なし）は、記録後に直したときの理由をそのまま残す
+        cumAfterReason: afterCorrected || !afterAi ? cumAfterReason : "",
         cumBeforeReadId,
         cumAfterReadId,
         bagId,
@@ -638,7 +639,11 @@ export async function saveDailyRecordAction(input: {
     });
     // 締め済みの袋の合計を取り直す。承認済みの中身が変わっていたら承認を外す
     // （管理者が確認した数字と違うものを、承認済みのままにしない）。
-    const revoked = await syncClosedBagTotals(s.companyId, [...bags.keys()]);
+    // 取り消した明細の袋（今回の明細に1件も残っていない袋）も取り直す。
+    const revoked = await syncClosedBagTotals(s.companyId, [
+      ...bags.keys(),
+      ...(prev?.entries ?? []).map((e) => e.bagId ?? ""),
+    ]);
     revalidatePath("/daily");
     revalidatePath("/");
     revalidatePath("/dashboard");

@@ -1,6 +1,24 @@
 import { NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 
+/**
+ * ポータルの署名を照合する鍵（優先順）。
+ * ポータルは PF_SSO_KEY（未設定なら PF_PROVISION_KEY）で SSO／一括ログアウト用のトークンに署名する。
+ * アプリ連携の共有シークレット（PF_PROVISION_KEY。約20アプリと人事連携が持つ）から
+ * ログインの鍵を分けるため、こちらも PF_SSO_KEY を優先して照合する。
+ * 移行期間（PORTAL_KEY_FALLBACK_UNTIL まで）は PF_SSO_KEY で合わなければ PF_PROVISION_KEY でも照合する
+ * （ポータルと各アプリで環境変数の設定・再デプロイの順序を問わないため）。
+ * 期限を過ぎると PF_SSO_KEY だけになる。PF_SSO_KEY を設定していないアプリは従来どおり PF_PROVISION_KEY。
+ */
+const PORTAL_KEY_FALLBACK_UNTIL = Date.parse("2026-11-01T00:00:00+09:00");
+function portalSigningKeys(): string[] {
+  const sso = (process.env.PF_SSO_KEY || "").trim();
+  const prov = (process.env.PF_PROVISION_KEY || "").trim();
+  if (!sso) return prov ? [prov] : [];
+  if (prov && prov !== sso && Date.now() < PORTAL_KEY_FALLBACK_UNTIL) return [sso, prov];
+  return [sso];
+}
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -11,7 +29,7 @@ export const dynamic = "force-dynamic";
  * 各アプリのセッションは残ってしまう。そこでポータルのログアウト時に、非表示 iframe で
  * 各アプリのこのエンドポイントを呼び、アプリ側の Cookie をアプリ自身に破棄させる。
  *
- * トークンは SSO と同じ形式（PF_PROVISION_KEY による HMAC-SHA256・短命）。
+ * トークンは SSO と同じ形式（PF_SSO_KEY（未設定なら PF_PROVISION_KEY）による HMAC-SHA256・短命・purpose:"logout"）。
  * 署名を必須にしているのは、任意のサイトから <img> 等で勝手にログアウトさせられないようにするため。
  */
 
@@ -27,13 +45,13 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 /** トークンを検証する（SSO と同じ署名方式。app 一致と有効期限を確認）。 */
-function verifyToken(token: string, key: string): boolean {
+function verifyToken(token: string, keys: string[]): boolean {
   const dot = token.lastIndexOf(".");
   if (dot <= 0 || dot === token.length - 1) return false;
   const payload = token.slice(0, dot);
   const sig = token.slice(dot + 1);
-  const expected = createHmac("sha256", key).update(payload).digest("hex");
-  if (!safeEqual(sig, expected)) return false;
+  // どれか1つの鍵で署名が合えばよい（鍵の移行期間は2つ）
+  if (!keys.some((key) => safeEqual(sig, createHmac("sha256", key).update(payload).digest("hex")))) return false;
   let data: unknown;
   try {
     data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
@@ -43,6 +61,8 @@ function verifyToken(token: string, key: string): boolean {
   if (typeof data !== "object" || data === null) return false;
   const { app, exp } = data as { app?: unknown; exp?: unknown };
   if (app !== APP_KEY) return false;
+  // 用途の確認。SSO 用のトークン（purpose:"sso"）ではログアウトさせない
+  if ((data as { purpose?: unknown }).purpose !== "logout") return false;
   return typeof exp === "number" && exp > Date.now();
 }
 
@@ -72,9 +92,9 @@ function clearSessionCookies(req: Request, res: NextResponse): number {
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  const key = process.env.PF_PROVISION_KEY;
+  const keys = portalSigningKeys();
   const token = url.searchParams.get("token");
-  if (!key || !token || !verifyToken(token, key)) {
+  if (keys.length === 0 || !token || !verifyToken(token, keys)) {
     // 失敗しても理由は返さない（ポータル側は結果を見ずに次へ進む）
     return new NextResponse(null, { status: 204 });
   }

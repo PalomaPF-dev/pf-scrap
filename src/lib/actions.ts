@@ -7,14 +7,31 @@ import {
   requireAdminSession,
   requireOperationsSession,
   getFactoryRestriction,
+  getFactoryView,
 } from "./session";
 import {
   addAdjustment,
+  addFactory,
+  addWorkplace,
+  clearBagStart,
+  deleteFactory,
+  deleteWorkplace,
+  setFactoryActive,
+  setWorkplaceActive,
+  closeBag,
+  correctBagClose,
   deleteAdjustment,
+  deleteEmptyBag,
   deleteDailyRecord,
+  bulkImportFirstArticles,
   deleteFirstArticle,
+  deleteFirstArticles,
+  findItemsByZuban,
   deleteItem,
   deleteScale,
+  getBagById,
+  getBagChainSeeds,
+  getBagStart,
   getDailyRecord,
   getDailyStatus,
   getItemById,
@@ -22,12 +39,20 @@ import {
   getScaleById,
   getScaleReads,
   getScaleByQr,
+  importDailyRecord,
+  listScales,
   countScrapKindUsage,
   deleteScrapKind,
   getScrapKindById,
   KUBUN_LIST,
   listItems,
+  listOpenBags,
   listScrapKinds,
+  openBag,
+  reopenBag,
+  setBagApproval,
+  setBagStart,
+  syncClosedBagTotals,
   upsertScrapKind,
   SCALE_KIND_LIST,
   saveDailyRecord,
@@ -35,6 +60,10 @@ import {
   updateDailyStatus,
   updateFirstArticleStatus,
   upsertFirstArticle,
+  addMissingItemsFromMcframe,
+  bulkUpsertFirstArticles,
+  listFactoryOptions,
+  listItemRefs,
   upsertItem,
   bulkUpsertItems,
   upsertMcframeQty,
@@ -42,14 +71,25 @@ import {
   upsertProcureDays,
   upsertScale,
   type DailyEntry,
+  type ScrapBag,
   type McframeDayRow,
   type McframeQtyRow,
   type ProcureDay,
   type Scale,
   type ScrapItem,
 } from "./db";
+import {
+  createShipment,
+  deleteShipment,
+  getShipment,
+  listShipRoutes,
+  setShipRoute,
+  shipmentsUsedElsewhere,
+  updateShipment,
+  type Shipment,
+} from "./db";
 import { isDateStr, isYmStr, normDateStr, normYm, todayStr, toNum, toNumOrNull } from "./format";
-import { parseItemRef } from "./scrapTypes";
+import { parseItemRef, shipmentNeedsPolyTare } from "./scrapTypes";
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; message: string };
 
@@ -248,6 +288,8 @@ export async function saveScaleAction(input: {
   capacity?: unknown;
   /** 目量（最小表示単位） kg。空欄可 */
   division?: unknown;
+  /** 袋を交換する目安 kg。空欄なら既定値 */
+  bagTargetKg?: unknown;
 }): Promise<ActionResult> {
   try {
     const s = await requireOperationsSession();
@@ -273,6 +315,8 @@ export async function saveScaleAction(input: {
       // 未入力は null のまま（AI読取で何も仮定しない）。0や負の値は未入力と同じ扱い。
       capacity: positiveOrNull(input.capacity),
       division: positiveOrNull(input.division),
+      // 袋の交換の目安。未入力は既定値（BAG_TARGET_KG）を使う
+      bagTargetKg: positiveOrNull(input.bagTargetKg),
     });
     revalidatePath("/scales");
     revalidatePath("/daily");
@@ -356,6 +400,27 @@ export async function saveDailyRecordAction(input: {
     if (lockMsg) return fail(lockMsg);
 
     const prev = await getDailyRecord(s.companyId, input.recordDate, factory);
+    // 記録済みの明細の取り消しは管理者だけ。明細は一式で置き換えるので、保存済みの
+    // 明細がすべて今回の明細に残っているかで確かめる（値の訂正は誰でもできる）。
+    if (!isAdmin && prev) {
+      const keyOf = (e: Record<string, unknown>) =>
+        [e.jikoku, e.scaleId || e.scaleName, e.bagId, e.shipmentId, e.kirokusha]
+          .map((v) => asStr(v ?? "", 200))
+          .join("|");
+      const incoming = new Map<string, number>();
+      for (const e of Array.isArray(input.entries) ? input.entries : []) {
+        const k = keyOf(e);
+        incoming.set(k, (incoming.get(k) ?? 0) + 1);
+      }
+      for (const e of prev.entries) {
+        const k = keyOf(e as unknown as Record<string, unknown>);
+        const n = incoming.get(k) ?? 0;
+        if (n === 0) {
+          return fail("記録の取り消しは管理者のみできます。管理者に連絡してください。");
+        }
+        incoming.set(k, n - 1);
+      }
+    }
     // 種類は設定マスタにあるものだけ通す。過去の記録に残っている種類名は
     // そのまま活かしたいので、無効なものも含めた全件で判定する。
     const kindNames = (await listScrapKinds(s.companyId)).map((k) => k.name);
@@ -370,8 +435,44 @@ export async function saveDailyRecordAction(input: {
         if (n !== null && asStr(k, 50)) kaishiCum[asStr(k, 50)] = n;
       }
     }
-    // 累積の連携チェック用。箱ごとに「次に入るはずの投入前累積」を持ち回る。
+    // ===== 袋（スクラップ袋） =====
+    // 明細は「その投入が入った袋」を持つ（袋管理より前の明細は null のまま）。
+    const bagIds = (Array.isArray(input.entries) ? input.entries : [])
+      .map((e) => asStr(e.bagId ?? "", 50))
+      .filter(Boolean);
+    const bags = new Map<string, ScrapBag>();
+    for (const id of new Set(bagIds)) {
+      const bag = await getBagById(s.companyId, id);
+      if (!bag) return fail("袋が見つかりません。画面を再読み込みしてください。");
+      if (bag.factory !== factory) {
+        return fail(`袋「${bag.bagNo}」は別の工場（${bag.factory}）のものです。`);
+      }
+      bags.set(id, bag);
+    }
+    // 締め済みの袋に新しい投入は足せない。締めた時点の数字が後から変わってしまうため。
+    // 既にその袋で保存されている件数を超えたら「足した」と判断する。
+    const storedPerBag = new Map<string, number>();
+    for (const e of prev?.entries ?? []) {
+      if (e.bagId) storedPerBag.set(e.bagId, (storedPerBag.get(e.bagId) ?? 0) + 1);
+    }
+    const incomingPerBag = new Map<string, number>();
+    for (const id of bagIds) incomingPerBag.set(id, (incomingPerBag.get(id) ?? 0) + 1);
+    for (const [id, n] of incomingPerBag) {
+      const bag = bags.get(id);
+      if (bag && bag.status !== "open" && n > (storedPerBag.get(id) ?? 0)) {
+        return fail(
+          `袋「${bag.bagNo}」は締め済みです。新しい投入は、いま記録中の袋に記録してください。`
+        );
+      }
+    }
+
+    // 累積の連携チェック用。「次に入るはずの投入前の表示値」を持ち回る。
+    // 袋がある明細は袋ごと（袋を交換すると表示値が 0 に戻るので、重量計では繋がらない）。
+    // 袋管理より前の明細は、従来どおり重量計ごと（キーは scaleId）。
     const expectedCum = new Map<string, number>(Object.entries(kaishiCum));
+    // 日をまたいだ袋は前日の最後の投入後を引き継ぐ。まだ投入が無ければ袋の開始値。
+    const bagSeeds = await getBagChainSeeds(s.companyId, [...bags.keys()], prev?.id ?? null);
+    for (const [id, bag] of bags) expectedCum.set(id, bagSeeds.get(id) ?? bag.startCum);
 
     // AI読取の値（サーバー側のログ）。採用値がこれと違うときだけ訂正理由を求める。
     // ログはクライアントから書き換えられないので、これが「機械が読んだ事実」になる。
@@ -379,6 +480,29 @@ export async function saveDailyRecordAction(input: {
       .flatMap((e) => [asStr(e.cumBeforeReadId ?? "", 50), asStr(e.cumAfterReadId ?? "", 50)])
       .filter(Boolean);
     const reads = await getScaleReads(s.companyId, readIds);
+
+    // ===== 他工場から届いたプラ箱 =====
+    // プラ箱を処理した明細は、送った工場のスクラップとして照合に回る。
+    // 1つのプラ箱は1回しか処理できない（別の日・別の明細で処理済みなら弾く）。
+    const shipmentIds = (Array.isArray(input.entries) ? input.entries : [])
+      .map((e) => asStr(e.shipmentId ?? "", 50))
+      .filter(Boolean);
+    if (new Set(shipmentIds).size !== shipmentIds.length) {
+      return fail("同じプラ箱を2回記録しています。");
+    }
+    const shipments = new Map<string, Shipment>();
+    for (const id of shipmentIds) {
+      const sh = await getShipment(s.companyId, id);
+      if (!sh) return fail("プラ箱が見つかりません。画面を再読み込みしてください。");
+      if (sh.toFactory !== factory) {
+        return fail(`プラ箱「${sh.boxNo}」の送り先は ${sh.toFactory} です。`);
+      }
+      shipments.set(id, sh);
+    }
+    const usedElsewhere = await shipmentsUsedElsewhere(s.companyId, shipmentIds, prev?.id ?? null);
+    for (const id of usedElsewhere) {
+      return fail(`プラ箱「${shipments.get(id)?.boxNo ?? id}」は別の日の記録で処理済みです。`);
+    }
 
     // 記録者の表示名。「大口工場 内胴 大口太郎」のように所属を前に付ける。
     const affiliation = await getUserAffiliation(s.userId);
@@ -424,7 +548,25 @@ export async function saveDailyRecordAction(input: {
       }
       if (!kindNames.includes(kind)) kind = kindNames[0] ?? SCALE_KIND_LIST[0];
 
-      const cumKey = scaleId ?? scaleName;
+      // プラ箱は種類ごとに分けて送られてくる。違う種類の箱に入れたら止める。
+      const shipmentId = asStr(e.shipmentId ?? "", 50) || null;
+      const shipment = shipmentId ? shipments.get(shipmentId)! : null;
+      if (shipment && shipment.hinshu !== kind) {
+        return fail(
+          `プラ箱「${shipment.boxNo}」は ${shipment.hinshu} です。${kind} の箱（${scaleName}）には記録できません。`
+        );
+      }
+      // 空けたあとのプラ箱の重さ。送る側はプラ箱込みで量っているので、これが無いと突き合わせられない。
+      const polyTare = shipment ? toNumOrNull(e.polyTare) : null;
+      if (shipment && polyTare === null && shipmentNeedsPolyTare(shipment)) {
+        return fail(`プラ箱「${shipment.boxNo}」の重さ（空けたあと）を量って入力してください。`);
+      }
+      if (polyTare !== null && (polyTare < 0 || (shipment?.grossWeight != null && polyTare >= shipment.grossWeight))) {
+        return fail(`プラ箱「${shipment!.boxNo}」の重さ ${polyTare} kg が正しくありません。量り直してください。`);
+      }
+
+      const bagId = asStr(e.bagId ?? "", 50) || null;
+      const cumKey = bagId ?? scaleId ?? scaleName;
       const cumBeforeReadId = asStr(e.cumBeforeReadId ?? "", 50) || null;
       const cumAfterReadId = asStr(e.cumAfterReadId ?? "", 50) || null;
       const cumBeforeReason = asStr(e.cumBeforeReason, 200);
@@ -478,13 +620,25 @@ export async function saveDailyRecordAction(input: {
         cumAfter,
         // 機械の値のままなら理由は残さない（上書きした行だけ理由が入る）
         cumBeforeReason: beforeCorrected ? cumBeforeReason : "",
-        cumAfterReason: afterCorrected ? cumAfterReason : "",
+        // 手入力の投入後（AI読取なし）は、記録後に直したときの理由をそのまま残す
+        cumAfterReason: afterCorrected || !afterAi ? cumAfterReason : "",
         cumBeforeReadId,
         cumAfterReadId,
+        bagId,
         // 記録者は「所属（工場 職場）＋氏名」。ログインユーザーから毎回サーバーで組み立てる。
         // 既存行は元の記録者をそのまま残す（誰が入れたかを後から書き換えない）。
         kirokusha: asStr(e.kirokusha, 120) || recorder,
         ijo: asStr(e.ijo),
+        // Excelから取り込んだ行が持つ発生元（部署・機械・品種・工程）。
+        // 新しい画面では入力しないが、編集して保存し直しても消えないように持ち回る。
+        busho: asStr(e.busho, 50),
+        kikai: asStr(e.kikai, 50),
+        zairyo: asStr(e.zairyo, 50),
+        kotei: asStr(e.kotei, 50),
+        // 発生元はプラ箱からだけ決める（画面から任意の工場名を入れさせない）
+        originFactory: shipment ? shipment.fromFactory : "",
+        shipmentId,
+        polyTare,
       });
     }
     await saveDailyRecord(s.companyId, {
@@ -504,10 +658,22 @@ export async function saveDailyRecordAction(input: {
       updatedBy: s.loginId ?? s.userName,
       entries,
     });
+    // 締め済みの袋の合計を取り直す。承認済みの中身が変わっていたら承認を外す
+    // （管理者が確認した数字と違うものを、承認済みのままにしない）。
+    // 取り消した明細の袋（今回の明細に1件も残っていない袋）も取り直す。
+    const revoked = await syncClosedBagTotals(s.companyId, [
+      ...bags.keys(),
+      ...(prev?.entries ?? []).map((e) => e.bagId ?? ""),
+    ]);
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
+    if (shipments.size > 0 || prev?.entries.some((e) => e.shipmentId)) revalidatePath("/shipments");
     const total = entries.reduce((t, e) => t + e.weight, 0);
-    return { ok: true, message: `保存しました（当日合計 ${total.toFixed(1)} kg）。` };
+    const revokedMsg = revoked.length
+      ? `（袋 ${revoked.map((b) => b.bagNo).join("・")} は中身が変わったため承認を外しました。再度承認してください）`
+      : "";
+    return { ok: true, message: `保存しました（当日合計 ${total.toFixed(1)} kg）。${revokedMsg}` };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -602,6 +768,482 @@ export async function rejectDailyRecordAction(
   }
 }
 
+// ===== スクラップ袋（交換までを1区切りにする） =====
+
+/**
+ * 同じ重量計で袋を二重に開こうとしたときは、DB の部分ユニーク索引が弾く。
+ * 現場に出るのは「袋が二重になっている」ことなので、そう読める文言に直す。
+ */
+function bagErrorMessage(e: unknown): string {
+  const code = (e as { code?: string; sourceError?: { code?: string } })?.code
+    ?? (e as { sourceError?: { code?: string } })?.sourceError?.code;
+  if (code === "23505") {
+    return "この重量計では別の袋が記録中です。画面を再読み込みして、記録中の袋を確認してください。";
+  }
+  return (e as Error).message;
+}
+
+/** 記録者・承認者の表示名（所属＋氏名）。日次記録と同じ規則で残す。 */
+async function actorName(s: {
+  userId: string;
+  userName?: string | null;
+  loginId?: string | null;
+}): Promise<string> {
+  const affiliation = await getUserAffiliation(s.userId);
+  return [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" ");
+}
+
+/**
+ * 袋を開く（新しいカゴ＋袋をセットしたとき）。
+ * 通常は風袋引きして 0kg を確認してから始めるので開始の表示値は 0。
+ * 使いかけの袋から記録を始めるときだけ、その時点の表示値を入れる。
+ */
+export async function openBagAction(input: {
+  factory: string;
+  scaleId: string;
+  date: string;
+  startCum: unknown;
+  /** 風袋引きして 0kg を確認したか（開始が 0 のときは必須） */
+  taraOk: boolean;
+  note: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    if (!isDateStr(input.date)) return fail("日付が正しくありません。");
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を入力してください。");
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）の袋のみ開始できます。`);
+    }
+    const scale = await getScaleById(s.companyId, asStr(input.scaleId, 50));
+    if (!scale) return fail("重量計が見つかりません。一覧から選び直してください。");
+    const open = await listOpenBags(s.companyId, factory);
+    if (open.some((b) => b.scaleId === scale.id)) {
+      return fail(
+        `「${scale.name}」にはすでに記録中の袋があります。交換するときは「袋を交換する」から締めてください。`
+      );
+    }
+    // 袋運用の開始日より前の日付には袋を作らない。
+    // その期間は従来どおり日単位の記録として残す（過去を袋で塗り替えない）。
+    const bagStart = await getBagStart(s.companyId, factory);
+    const effectiveStart = bagStart.startOn ?? todayStr();
+    if (input.date < effectiveStart) {
+      return fail(
+        `${effectiveStart} から袋単位の管理を始めています。それより前の ${input.date} は日単位の記録なので、袋は開けません。`
+      );
+    }
+    const startCum = toNum(input.startCum);
+    if (startCum < 0) return fail("開始の表示値は 0 以上で入力してください。");
+    if (startCum === 0 && !input.taraOk) {
+      return fail(
+        "風袋引きして 0kg を確認してから開始してください。0kg でない場合は、その表示値を入力してください。"
+      );
+    }
+    const bag = await openBag(s.companyId, {
+      factory,
+      scaleId: scale.id,
+      scaleName: scale.name,
+      kind: scale.kind,
+      openedOn: input.date,
+      openedBy: await actorName(s),
+      startCum,
+      note: asStr(input.note, 500),
+    });
+    revalidatePath("/daily");
+    return {
+      ok: true,
+      message: `袋 ${bag.bagNo} を開始しました（開始の表示値 ${startCum.toFixed(1)} kg）。`,
+    };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/**
+ * 袋を締める（＝交換する）。カゴを降ろす前の表示値がこの袋の重量になる。
+ * 続けて次の袋を開くところまでを1回の操作にする（現場の交換と同じ順番）。
+ */
+export async function closeBagAction(input: {
+  bagId: string;
+  date: string;
+  closeCum: unknown;
+  closeCumReadId: string | null;
+  closeCumReason: string;
+  note: string;
+  /** 続けて次の袋を開くか（新しいカゴを載せて風袋引きした直後） */
+  openNext: boolean;
+  taraOk: boolean;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    if (!isDateStr(input.date)) return fail("日付が正しくありません。");
+    const bag = await getBagById(s.companyId, asStr(input.bagId, 50));
+    if (!bag) return fail("袋が見つかりません。画面を再読み込みしてください。");
+    if (bag.status !== "open") return fail(`袋 ${bag.bagNo} はすでに締められています。`);
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && bag.factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）の袋のみ締められます。`);
+    }
+    if (input.date < bag.openedOn) {
+      return fail(`袋 ${bag.bagNo} は ${bag.openedOn} に開いています。それより前の日付では締められません。`);
+    }
+    const closeCum = toNumOrNull(input.closeCum);
+    if (closeCum === null) {
+      return fail("交換直前の表示値がありません。カゴを降ろす前に読み取るか、手入力してください。");
+    }
+    if (closeCum < bag.startCum) {
+      return fail(
+        `交換直前の表示値（${closeCum} kg）が、この袋の開始の表示値（${bag.startCum} kg）より小さくなっています。読み取りを確認してください。`
+      );
+    }
+
+    // AI読取の値を人が変えたときは理由を残す（明細の訂正と同じ規則）。
+    // 読取ログはサーバーしか書けないので、これが「機械が読んだ事実」になる。
+    const readId = asStr(input.closeCumReadId ?? "", 50) || null;
+    const reason = asStr(input.closeCumReason, 200);
+    if (readId) {
+      const reads = await getScaleReads(s.companyId, [readId]);
+      const ai = reads.get(readId);
+      if (
+        ai?.value !== undefined &&
+        ai.value !== null &&
+        Math.abs(closeCum - ai.value) > 0.0005 &&
+        !reason
+      ) {
+        return fail(
+          `交換直前の表示値がAI読取値 ${ai.value} kg と違います。訂正する場合は理由を入力してください。`
+        );
+      }
+    }
+
+    const who = await actorName(s);
+    const ok = await closeBag(s.companyId, bag.id, {
+      closedOn: input.date,
+      closedBy: who,
+      closeCum,
+      closeCumReadId: readId,
+      closeCumReason: reason,
+      // 締めた時点の明細合計。保存済みの明細から取る（未保存の投入は含まれない）
+      totalWeight: bag.runningTotal,
+      note: asStr(input.note, 500),
+    });
+    if (!ok) return fail("袋を締められませんでした。画面を再読み込みしてください。");
+
+    const weight = Math.round((closeCum - bag.startCum) * 1000) / 1000;
+    const gap = Math.round((weight - bag.runningTotal) * 1000) / 1000;
+    let message =
+      `袋 ${bag.bagNo} を締めました。この袋は ${weight.toFixed(1)} kg でした` +
+      `（記録した投入の合計 ${bag.runningTotal.toFixed(1)} kg`;
+    message += Math.abs(gap) > 0.0005 ? `／差 ${gap.toFixed(1)} kg）。` : "）。";
+
+    if (input.openNext) {
+      if (!input.taraOk) {
+        return {
+          ok: true,
+          message:
+            message +
+            " 次の袋は開いていません。新しいカゴを載せて風袋引きし、0kg を確認してから「袋を開始する」を押してください。",
+        };
+      }
+      if (!bag.scaleId) return { ok: true, message };
+      const next = await openBag(s.companyId, {
+        factory: bag.factory,
+        scaleId: bag.scaleId,
+        scaleName: bag.scaleName,
+        kind: bag.kind,
+        openedOn: input.date,
+        openedBy: who,
+        startCum: 0,
+        note: "",
+      });
+      message += ` 続けて袋 ${next.bagNo} を開始しました。`;
+    }
+    revalidatePath("/daily");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
+    return { ok: true, message };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/** 袋の締めを承認（管理者のみ）。1日に複数回、袋ごとに確認する。 */
+export async function approveBagAction(bagId: string): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const bag = await getBagById(s.companyId, asStr(bagId, 50));
+    if (!bag) return fail("袋が見つかりません。");
+    if (bag.status === "open") return fail("まだ締められていない袋は承認できません。");
+    if (bag.status === "approved") return fail(`袋 ${bag.bagNo} はすでに承認されています。`);
+    await setBagApproval(s.companyId, bag.id, {
+      status: "approved",
+      approvedBy: (await actorName(s)) || "承認者",
+    });
+    revalidatePath("/daily");
+    revalidatePath("/summary");
+    return { ok: true, message: `袋 ${bag.bagNo} を承認しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 締めの表示値を直す（管理者のみ）。袋は締めたまま数字だけ入れ直す。
+ * 交換すると次の袋が開くので、記録中に戻さずに直せる経路が要る
+ * （読み違い・撮り直しの訂正はこちらが本筋）。
+ */
+export async function correctBagCloseAction(input: {
+  bagId: string;
+  closeCum: unknown;
+  reason: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const bag = await getBagById(s.companyId, asStr(input.bagId, 50));
+    if (!bag) return fail("袋が見つかりません。");
+    if (bag.status === "open") {
+      return fail("この袋は記録中です。締めるときに表示値を入力してください。");
+    }
+    const closeCum = toNumOrNull(input.closeCum);
+    if (closeCum === null) return fail("直したあとの表示値を入力してください。");
+    if (closeCum < bag.startCum) {
+      return fail(
+        `表示値（${closeCum} kg）が、この袋の開始の表示値（${bag.startCum} kg）より小さくなっています。`
+      );
+    }
+    const reason = asStr(input.reason, 200);
+    if (!reason) return fail("訂正理由を入力してください（記録として残ります）。");
+    const ok = await correctBagClose(s.companyId, bag.id, { closeCum, reason });
+    if (!ok) return fail("締め値を直せませんでした。画面を再読み込みしてください。");
+    const weight = Math.round((closeCum - bag.startCum) * 1000) / 1000;
+    revalidatePath("/daily");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
+    return {
+      ok: true,
+      message:
+        `袋 ${bag.bagNo} の締め値を ${closeCum.toFixed(1)} kg に直しました` +
+        `（この袋は ${weight.toFixed(1)} kg）。` +
+        (bag.status === "approved" ? " 数字が変わったので承認待ちに戻しました。" : ""),
+    };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+/**
+ * 締めの取り消し（管理者のみ）。締めたのが間違いだった袋を記録中へ戻し、
+ * 続けてその袋に投入できるようにする。
+ *
+ * 交換のときは次の袋が自動で開くので、そのままでは「1台の重量計に記録中の袋は1つ」に
+ * 引っかかって戻せない。次の袋にまだ投入が1件も無ければ、交換で開いただけの袋なので
+ * 消してから戻す。すでに投入があるなら戻せないので、締め値の訂正へ案内する。
+ */
+export async function reopenBagAction(bagId: string): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const bag = await getBagById(s.companyId, asStr(bagId, 50));
+    if (!bag) return fail("袋が見つかりません。");
+    if (bag.status === "open") return fail("この袋は記録中です。");
+
+    let removed = "";
+    if (bag.scaleId) {
+      const open = (await listOpenBags(s.companyId, bag.factory)).find(
+        (b) => b.scaleId === bag.scaleId
+      );
+      if (open) {
+        if (open.entryCount > 0) {
+          return fail(
+            `次の袋 ${open.bagNo} に投入が ${open.entryCount} 件記録されているため、記録中に戻せません（1台の重量計に記録中の袋は1つまで）。締め値の数字だけを直す場合は「締め値を直す」を使ってください。`
+          );
+        }
+        if (!(await deleteEmptyBag(s.companyId, open.id))) {
+          return fail("次の袋を戻せませんでした。画面を再読み込みしてください。");
+        }
+        removed = open.bagNo;
+      }
+    }
+
+    const ok = await reopenBag(s.companyId, bag.id);
+    if (!ok) return fail("締めを取り消せませんでした。画面を再読み込みしてください。");
+    revalidatePath("/daily");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
+    return {
+      ok: true,
+      message:
+        `袋 ${bag.bagNo} を記録中に戻しました。` +
+        (removed ? `交換で開いた袋 ${removed}（投入なし）は取り消しました。` : ""),
+    };
+  } catch (e) {
+    return fail(bagErrorMessage(e));
+  }
+}
+
+// ===== 工場・職場マスタ（生産管理部・調達部のメンバーと管理者） =====
+
+/** 工場・職場の候補を使うすべての画面を取り直す。 */
+function revalidateFactoryPages() {
+  for (const p of ["/settings", "/daily", "/summary", "/bags", "/scales", "/first", "/items", "/procurement", "/"]) {
+    revalidatePath(p);
+  }
+}
+
+/** 工場を追加する（ポータルに無い工場や、ポータルの配信を待たずに使いたいとき）。 */
+export async function addFactoryAction(name: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const n = asStr(name, 50);
+    if (!n) return fail("工場名を入力してください。");
+    const r = await addFactory(s.companyId, n);
+    if (r === "exists") return fail(`「${n}」はすでにあります。`);
+    revalidateFactoryPages();
+    return {
+      ok: true,
+      message: r === "restored" ? `「${n}」を使うに戻しました。` : `「${n}」を追加しました。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 工場を使う/使わないにする。使わないにした工場は、日次記録・集計などの工場の
+ * 候補から外れる（記録そのものは消えない）。
+ */
+export async function setFactoryActiveAction(name: string, active: boolean): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const n = asStr(name, 50);
+    if (!n) return fail("工場が指定されていません。");
+    await setFactoryActive(s.companyId, n, Boolean(active));
+    revalidateFactoryPages();
+    return {
+      ok: true,
+      message: active
+        ? `「${n}」を使うにしました。工場の候補に出ます。`
+        : `「${n}」を使わないにしました。工場の候補から外れます（記録は消えません）。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 工場を削除する。手で追加した・記録で使われていない工場だけ消せる。 */
+export async function deleteFactoryAction(name: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const n = asStr(name, 50);
+    const r = await deleteFactory(s.companyId, n);
+    if (r === "portal") {
+      return fail(
+        `「${n}」はポータルから配信されている工場なので削除できません（消しても次の配信で戻ります）。「使わない」にすると候補から外れます。`
+      );
+    }
+    if (r === "used") {
+      return fail(`「${n}」は記録で使われているので削除できません。「使わない」にすると候補から外れます。`);
+    }
+    if (r === "missing") return fail("工場が見つかりません。画面を再読み込みしてください。");
+    revalidateFactoryPages();
+    return { ok: true, message: `「${n}」を削除しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 職場を追加する（工場の下に置く）。 */
+export async function addWorkplaceAction(factoryName: string, name: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const f = asStr(factoryName, 50);
+    const n = asStr(name, 50);
+    if (!f) return fail("工場が指定されていません。");
+    if (!n) return fail("職場名を入力してください。");
+    const r = await addWorkplace(s.companyId, f, n);
+    if (r === "exists") return fail(`${f} に「${n}」はすでにあります。`);
+    revalidateFactoryPages();
+    return {
+      ok: true,
+      message: r === "restored" ? `${f} の「${n}」を使うに戻しました。` : `${f} に「${n}」を追加しました。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+export async function setWorkplaceActiveAction(code: string, active: boolean): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const ok = await setWorkplaceActive(s.companyId, asStr(code, 60), Boolean(active));
+    if (!ok) return fail("職場が見つかりません。画面を再読み込みしてください。");
+    revalidateFactoryPages();
+    return { ok: true, message: active ? "職場を使うにしました。" : "職場を使わないにしました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 職場を削除する。手で追加した職場だけ消せる。 */
+export async function deleteWorkplaceAction(code: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const r = await deleteWorkplace(s.companyId, asStr(code, 60));
+    if (r === "portal") {
+      return fail(
+        "ポータルから配信されている職場なので削除できません（消しても次の配信で戻ります）。「使わない」にしてください。"
+      );
+    }
+    if (r === "missing") return fail("職場が見つかりません。画面を再読み込みしてください。");
+    revalidateFactoryPages();
+    return { ok: true, message: "職場を削除しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 袋運用の開始日を決める（生産管理部・調達部のメンバーと管理者）。
+ * この日から袋単位、それより前は従来どおり日単位の記録として扱う。
+ * 空文字を渡すと設定を消し、「最初に袋を開いた日」からの推定に戻る。
+ */
+export async function saveBagStartAction(input: {
+  factory: string;
+  startOn: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const factory = asStr(input.factory, 50);
+    if (!factory) return fail("工場を選んでください。");
+    const startOn = asStr(input.startOn, 10);
+    if (!startOn) {
+      await clearBagStart(s.companyId, factory);
+      revalidatePath("/settings");
+      revalidatePath("/daily");
+      revalidatePath("/summary");
+      revalidatePath("/bags");
+      return { ok: true, message: `${factory} の開始日の設定を消しました（記録から推定します）。` };
+    }
+    if (!isDateStr(startOn)) return fail("開始日は年月日で入力してください。");
+    await setBagStart(
+      s.companyId,
+      factory,
+      startOn,
+      [await getUserAffiliation(s.userId), s.userName || s.loginId || ""].filter(Boolean).join(" ")
+    );
+    revalidatePath("/settings");
+    revalidatePath("/daily");
+    revalidatePath("/summary");
+    revalidatePath("/bags");
+    return {
+      ok: true,
+      message: `${factory} は ${startOn} から袋単位の管理になります（それより前は日単位の記録のままです）。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
 /** 日次記録の削除（管理者のみ）。 */
 export async function deleteDailyRecordAction(
   recordDate: string,
@@ -613,6 +1255,7 @@ export async function deleteDailyRecordAction(
     await deleteDailyRecord(s.companyId, recordDate, asStr(factory, 50));
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "削除しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -691,9 +1334,14 @@ export async function saveFirstArticleAction(input: {
   hinmokuCD: string;
   kakunoCD: string;
   weight: unknown;
+  /** 画面で選んでいた工場。測定履歴はこの工場に出す */
+  factory?: string;
 }): Promise<ActionResult> {
   try {
     const s = await requireEntitledSession();
+    // 工場が固定されている人（所属工場・上部で選んだ工場）は、その工場として残す
+    const view = await getFactoryView(s);
+    const factory = view.restricted && view.factory ? view.factory : asStr(input.factory ?? "", 50);
     const hinmokuCD = asStr(input.hinmokuCD, 50);
     const kakunoCD = asStr(input.kakunoCD, 50);
     if (!hinmokuCD || !kakunoCD) return fail("品目を選択してください。");
@@ -706,9 +1354,11 @@ export async function saveFirstArticleAction(input: {
       kakunoCD,
       weight,
       sokuteisha: s.userName || s.loginId || "",
+      factory,
     });
     revalidatePath("/first");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return {
       ok: true,
       message: `登録し、管理者へ申請しました（${measuredOn} / ${weight} kg）。承認後に計算へ反映されます。`,
@@ -718,17 +1368,83 @@ export async function saveFirstArticleAction(input: {
   }
 }
 
+/**
+ * 初品測定の削除（管理者のみ）。
+ * 承認済みの測定値を消すと完成重量の計算が理論値へ戻るため、日次記録の削除と同じ扱いにする。
+ * 測り直しは同じ日に登録し直せば上書きされる（削除は要らない）。
+ */
 export async function deleteFirstArticleAction(
   measuredOn: string,
   hinmokuCD: string,
   kakunoCD: string
 ): Promise<ActionResult> {
   try {
-    const s = await requireEntitledSession();
+    const s = await requireAdminSession();
     if (!isDateStr(measuredOn)) return fail("日付が正しくありません。");
-    await deleteFirstArticle(s.companyId, measuredOn, asStr(hinmokuCD, 50), asStr(kakunoCD, 50));
+    const hinmoku = asStr(hinmokuCD, 50);
+    const kakuno = asStr(kakunoCD, 50);
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted) {
+      const refs = await listItemRefs(s.companyId, [hinmoku]);
+      const ref = refs.find((r) => r.kakunoCD === kakuno);
+      // 工場が分からない品目（マスター未登録）は、取り違えを避けるため触らせない
+      if (!ref || (ref.factory && ref.factory !== restriction.factory)) {
+        return fail(`所属工場（${restriction.factory}）の品目のみ削除できます。`);
+      }
+    }
+    await deleteFirstArticle(s.companyId, measuredOn, hinmoku, kakuno);
     revalidatePath("/first");
+    revalidatePath("/mcframe");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "削除しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 初品測定のまとめて削除（一覧画面。管理者のみ）。
+ * 所属工場の人は、その工場の記録（登録時の工場、または品目マスターの工場が一致）だけ消せる。
+ */
+export async function deleteFirstArticlesAction(
+  keys: { measuredOn?: unknown; hinmokuCD?: unknown; kakunoCD?: unknown }[]
+): Promise<ActionResult & { deleted?: number }> {
+  try {
+    const s = await requireAdminSession();
+    const list = (Array.isArray(keys) ? keys : [])
+      .map((k) => ({
+        measuredOn: String(k.measuredOn ?? ""),
+        hinmokuCD: asStr(k.hinmokuCD, 50),
+        kakunoCD: asStr(k.kakunoCD, 50),
+      }))
+      .filter((k) => isDateStr(k.measuredOn) && k.hinmokuCD);
+    if (list.length === 0) return fail("削除する記録がありません。");
+    if (list.length > 1000) return fail("一度に削除できるのは1,000件までです。");
+    const restriction = await getFactoryRestriction(s);
+    const deleted = await deleteFirstArticles(
+      s.companyId,
+      list,
+      restriction.restricted ? restriction.factory : null
+    );
+    revalidatePath("/first");
+    revalidatePath("/first-list");
+    revalidatePath("/mcframe");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
+    if (deleted === 0) {
+      return fail(
+        restriction.restricted
+          ? `所属工場（${restriction.factory}）の記録ではないため削除できませんでした。`
+          : "削除できる記録がありませんでした。"
+      );
+    }
+    const skipped = list.length - deleted;
+    return {
+      ok: true,
+      deleted,
+      message: `${deleted}件を削除しました。${skipped ? `（${skipped}件は所属工場の記録ではないため残しました）` : ""}`,
+    };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -749,6 +1465,7 @@ export async function approveFirstArticleAction(
     });
     revalidatePath("/first");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "承認しました。計算に反映されます。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -772,7 +1489,356 @@ export async function rejectFirstArticleAction(
     });
     revalidatePath("/first");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "差し戻しました。" };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/**
+ * 初品測定のExcel/CSV一括取込（過去分の移行用・管理者のみ）。
+ * 現場のブックは1件ずつ承認して回せる量ではないので、取り込んだ時点で承認済みにする
+ * （＝取込操作そのものが管理者による一括承認）。
+ *
+ * 桁ズレの直し方: 品目マスターの完成重量(理論) →（無ければ）構成重量 →（無ければ）
+ * その品目の測定値の中央値、を基準に、10のべき乗ぶんズレていて基準に十分近づく値だけ直す。
+ * 測定値どうしの中央値を基準にすると、同じ品目の記録がまとめて桁違いのとき
+ * （多数派が誤り）に逆へ直してしまうため、マスターを先に見る。
+ * 10のべき乗では説明できないズレは直さず「要確認」として件数を返す。
+ */
+export async function importFirstArticlesAction(input: {
+  factory?: string;
+  rows: {
+    hinmokuCD?: unknown;
+    kakunoCD?: unknown;
+    seizoBashoCD?: unknown;
+    measuredOn?: unknown;
+    weight?: unknown;
+  }[];
+}): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    const rows = Array.isArray(input?.rows) ? input.rows : [];
+    if (rows.length === 0) return fail("取込データがありません。");
+    // Server Action の本文上限（next.config.ts の bodySizeLimit）に収まる行数にする
+    if (rows.length > 20000) return fail("一度に取込できるのは20,000行までです。期間で分けて取り込んでください。");
+    let factory = asStr(input?.factory, 50);
+    // 日次記録のExcel取込と同じく、所属工場つきのユーザーは自工場だけ
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted) {
+      if (factory && factory !== restriction.factory) {
+        return fail(`所属工場（${restriction.factory}）にのみ取り込めます。`);
+      }
+      factory = restriction.factory!;
+    }
+
+    type Parsed = {
+      hinmokuCD: string;
+      kakunoHint: string;
+      seizoHint: string;
+      measuredOn: string;
+      weight: number;
+    };
+    const parsed: Parsed[] = [];
+    let bad = 0;
+    for (const r of rows) {
+      const hinmokuCD = asStr(r.hinmokuCD, 50);
+      const measuredOn = normDateStr(r.measuredOn);
+      const weight = toNum(r.weight);
+      if (!hinmokuCD || !measuredOn || weight <= 0) {
+        bad++;
+        continue;
+      }
+      parsed.push({
+        hinmokuCD,
+        kakunoHint: asStr(r.kakunoCD, 50),
+        seizoHint: asStr(r.seizoBashoCD, 50),
+        measuredOn,
+        weight,
+      });
+    }
+    if (parsed.length === 0) return fail("品目CD・測定日・実測重量を読み取れる行がありませんでした。");
+
+    // 品目マスターから格納場所CDを決める（同じ品目CDが複数の格納場所にあるときは工場で絞る）
+    const refs = await listItemRefs(s.companyId, [...new Set(parsed.map((p) => p.hinmokuCD))]);
+    const byCode = new Map<string, typeof refs>();
+    for (const ref of refs) {
+      const list = byCode.get(ref.hinmokuCD);
+      if (list) list.push(ref);
+      else byCode.set(ref.hinmokuCD, [ref]);
+    }
+    type Resolved = Parsed & { ref: (typeof refs)[number] };
+    const resolved: Resolved[] = [];
+    const unknownCodes = new Set<string>();
+    const ambiguousCodes = new Set<string>();
+    for (const p of parsed) {
+      let cand = byCode.get(p.hinmokuCD) ?? [];
+      if (cand.length === 0) {
+        unknownCodes.add(p.hinmokuCD);
+        continue;
+      }
+      const narrow = (list: typeof cand, f: (r: (typeof refs)[number]) => boolean) => {
+        const hit = list.filter(f);
+        return hit.length > 0 ? hit : list;
+      };
+      if (p.kakunoHint) cand = narrow(cand, (r) => r.kakunoCD === p.kakunoHint);
+      if (cand.length > 1 && p.seizoHint) cand = narrow(cand, (r) => r.seizoBashoCD === p.seizoHint);
+      if (cand.length > 1 && factory) cand = narrow(cand, (r) => r.factory === factory);
+      if (cand.length > 1) {
+        ambiguousCodes.add(p.hinmokuCD);
+        continue;
+      }
+      resolved.push({ ...p, ref: cand[0] });
+    }
+    if (resolved.length === 0) {
+      return fail(
+        `取り込める行がありませんでした。品目マスターに無い品目CD: ${[...unknownCodes].slice(0, 10).join(", ")}${unknownCodes.size > 10 ? " ほか" : ""}`
+      );
+    }
+
+    // 品目ごとの基準値（マスター優先、無ければ測定値の中央値）
+    const groups = new Map<string, Resolved[]>();
+    for (const r of resolved) {
+      const k = `${r.ref.hinmokuCD}\t${r.ref.kakunoCD}`;
+      const list = groups.get(k);
+      if (list) list.push(r);
+      else groups.set(k, [r]);
+    }
+    const median = (a: number[]) => {
+      const t = [...a].sort((x, y) => x - y);
+      return t[Math.floor(t.length / 2)] ?? 0;
+    };
+
+    const sokuteisha = `Excel取込${factory ? `（${factory}）` : ""}`;
+    const out: {
+      measuredOn: string;
+      hinmokuCD: string;
+      kakunoCD: string;
+      weight: number;
+      sokuteisha: string;
+      note: string;
+    }[] = [];
+    const fixed: string[] = [];
+    let fixedCount = 0;
+    const check: string[] = [];
+    let checkCount = 0;
+    for (const [, list] of groups) {
+      const ref = list[0].ref;
+      const anchor =
+        ref.kanseiJuryo > 0
+          ? ref.kanseiJuryo
+          : ref.koseiJuryo > 0
+            ? ref.koseiJuryo
+            : median(list.map((r) => r.weight));
+      for (const r of list) {
+        let weight = r.weight;
+        let note = "Excel取込";
+        if (anchor > 0) {
+          const k = Math.round(Math.log10(weight / anchor));
+          if (k !== 0 && Math.abs(k) <= 3) {
+            // 10で割った端数（0.017499999…）が残らないよう有効桁で丸める
+            const scaled = Number((weight / 10 ** k).toPrecision(10));
+            // 10のべき乗ぶん直して基準に十分近づくときだけ採用する
+            if (Math.abs(scaled / anchor - 1) <= 0.35) {
+              note = `Excel取込・桁補正 ${r.weight} → ${scaled}`;
+              if (fixedCount < 8) fixed.push(`${r.hinmokuCD} ${r.measuredOn} ${r.weight}→${scaled}`);
+              fixedCount++;
+              weight = scaled;
+            }
+          }
+          const gap = weight / anchor;
+          if (gap > 2 || gap < 0.5) {
+            if (checkCount < 8) check.push(`${r.hinmokuCD} ${r.measuredOn} ${weight}（理論${anchor}）`);
+            checkCount++;
+          }
+        }
+        out.push({
+          measuredOn: r.measuredOn,
+          hinmokuCD: ref.hinmokuCD,
+          kakunoCD: ref.kakunoCD,
+          weight,
+          sokuteisha,
+          note,
+        });
+      }
+    }
+    const count = await bulkUpsertFirstArticles(
+      s.companyId,
+      out,
+      s.userName || s.loginId || ""
+    );
+    revalidatePath("/first");
+    revalidatePath("/mcframe");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
+    const lines = [`取込完了: ${count}件を承認済みで登録しました。`];
+    if (fixedCount) {
+      lines.push(`桁補正 ${fixedCount}件（他の日の水準に合わせました）: ${fixed.join(" / ")}${fixedCount > fixed.length ? " ほか" : ""}`);
+    }
+    if (checkCount) {
+      lines.push(`要確認 ${checkCount}件（理論値と2倍以上ちがい、桁ズレでは説明できません。そのまま登録しています）: ${check.join(" / ")}${checkCount > check.length ? " ほか" : ""}`);
+    }
+    if (unknownCodes.size) {
+      lines.push(`品目マスターに無く取り込めなかった品目CD ${unknownCodes.size}件: ${[...unknownCodes].slice(0, 10).join(", ")}${unknownCodes.size > 10 ? " ほか" : ""}`);
+    }
+    if (ambiguousCodes.size) {
+      lines.push(`格納場所を特定できなかった品目CD ${ambiguousCodes.size}件（工場を選び直してください）: ${[...ambiguousCodes].slice(0, 10).join(", ")}`);
+    }
+    if (bad) lines.push(`読み取れなかった行 ${bad}件`);
+    return { ok: true, message: lines.join("\n") };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+// ===== ③' 品質チェックシート（PDF）取込（管理者のみ） =====
+
+/** チェックシートの図番に当たる品目の候補。 */
+export interface CheckSheetItemCandidate {
+  hinmokuCD: string;
+  kakunoCD: string;
+  kakunoMei: string;
+  hinmei: string;
+  kanseiJuryo: number;
+}
+
+/**
+ * チェックシートの図番 → 品目（品目CD×格納場所CD）の候補。
+ * 品目CDで一致しなければ子図番で探す。所属工場のあるユーザーは自工場の品目だけ。
+ */
+export async function resolveCheckSheetItemsAction(
+  zubans: string[],
+  factory?: string | null
+): Promise<Record<string, CheckSheetItemCandidate[]>> {
+  const s = await requireAdminSession();
+  const restriction = await getFactoryRestriction(s);
+  const f = restriction.restricted ? restriction.factory : asStr(factory ?? "", 50) || null;
+  const list = [...new Set((Array.isArray(zubans) ? zubans : []).map((z) => asStr(z, 50)).filter(Boolean))].slice(0, 2000);
+  const items = await findItemsByZuban(s.companyId, list, f);
+  const out: Record<string, CheckSheetItemCandidate[]> = {};
+  for (const z of list) {
+    const byCode = items.filter((it) => it.kanriZuban === z);
+    const hits = byCode.length ? byCode : items.filter((it) => it.koZuban === z);
+    const uniq = new Map<string, CheckSheetItemCandidate>();
+    for (const it of hits) {
+      const k = `${it.kanriZuban}\t${it.kakunoCD}`;
+      if (!uniq.has(k)) {
+        uniq.set(k, {
+          hinmokuCD: it.kanriZuban,
+          kakunoCD: it.kakunoCD,
+          kakunoMei: it.kakunoMei,
+          hinmei: it.hinmei,
+          kanseiJuryo: it.kanseiJuryo,
+        });
+      }
+    }
+    out[z] = [...uniq.values()];
+  }
+  return out;
+}
+
+/**
+ * 品質チェックシートから読み取った初品重量の一括登録（管理者のみ）。
+ * シートはG長確認済みのため、取り込んだ管理者の承認として登録し、そのまま計算に反映する。
+ * 同じ加工日×品目が複数あれば平均する（同じ日の再測定・工程違いのシート）。
+ */
+export async function importCheckSheetsAction(
+  rows: {
+    date?: unknown;
+    hinmokuCD?: unknown;
+    /** 品目マスターに無い図番は ''（図番のまま登録する） */
+    kakunoCD?: unknown;
+    weight?: unknown;
+    inspector?: unknown;
+    /** シートの品名（マスター未登録のとき備考に残す） */
+    hinmei?: unknown;
+  }[],
+  /** 画面で選んでいた工場。所属工場の人は所属工場で上書きされる */
+  factory?: string | null
+): Promise<ActionResult> {
+  try {
+    const s = await requireAdminSession();
+    if (!Array.isArray(rows) || rows.length === 0) return fail("登録するデータがありません。");
+    if (rows.length > 5000) return fail("一度に登録できるのは5,000件までです。");
+    const restriction = await getFactoryRestriction(s);
+    const recordFactory =
+      restriction.restricted && restriction.factory ? restriction.factory : asStr(factory ?? "", 50);
+    const refs = [...new Set(rows.map((r) => asStr(r.hinmokuCD, 50)).filter(Boolean))];
+    const known = await findItemsByZuban(
+      s.companyId,
+      refs,
+      restriction.restricted ? restriction.factory : null
+    );
+    const knownRefs = new Set(known.map((it) => `${it.kanriZuban}\t${it.kakunoCD}`));
+    const merged = new Map<
+      string,
+      {
+        measuredOn: string;
+        hinmokuCD: string;
+        kakunoCD: string;
+        sum: number;
+        n: number;
+        names: Set<string>;
+        /** マスター未登録（図番のまま登録）。品名を備考に残す */
+        unknown: boolean;
+        hinmei: string;
+      }
+    >();
+    let bad = 0;
+    for (const r of rows) {
+      const measuredOn = normDateStr(r.date);
+      const hinmokuCD = asStr(r.hinmokuCD, 50);
+      const kakunoCD = asStr(r.kakunoCD, 50);
+      const weight = toNum(r.weight);
+      // 品目マスターにある品目はその品目CD×格納場所CDで、無い図番は格納場所を空にして図番のまま登録する
+      // （マスターが後から整っても記録を失わないため。一覧では「マスター未登録」と出る）
+      const isKnown = knownRefs.has(`${hinmokuCD}\t${kakunoCD}`);
+      const unknown = !isKnown && kakunoCD === "" && hinmokuCD !== "";
+      if (!measuredOn || (!isKnown && !unknown) || !(weight > 0) || weight > 10000) {
+        bad++;
+        continue;
+      }
+      const k = `${measuredOn}\t${hinmokuCD}\t${kakunoCD}`;
+      const m =
+        merged.get(k) ??
+        { measuredOn, hinmokuCD, kakunoCD, sum: 0, n: 0, names: new Set<string>(), unknown, hinmei: "" };
+      m.sum += weight;
+      m.n++;
+      const name = asStr(r.inspector, 50);
+      if (name) m.names.add(name);
+      if (unknown && !m.hinmei) m.hinmei = asStr(r.hinmei, 100);
+      merged.set(k, m);
+    }
+    if (merged.size === 0) return fail("登録できる行がありませんでした。");
+    const approver = s.userName || s.loginId || "";
+    const unknownCount = [...merged.values()].filter((m) => m.unknown).length;
+    const count = await bulkImportFirstArticles(
+      s.companyId,
+      [...merged.values()].map((m) => ({
+        measuredOn: m.measuredOn,
+        hinmokuCD: m.hinmokuCD,
+        kakunoCD: m.kakunoCD,
+        weight: Math.round((m.sum / m.n) * 1e6) / 1e6,
+        sokuteisha: [...m.names].join("・") || "チェックシート取込",
+        factory: recordFactory,
+        note: m.unknown
+          ? `チェックシート取込（品目マスター未登録${m.hinmei ? ` / 品名 ${m.hinmei}` : ""}）`
+          : "チェックシート取込",
+      })),
+      `${approver}（チェックシート取込）`
+    );
+    revalidatePath("/first");
+    revalidatePath("/first-list");
+    revalidatePath("/quality");
+    revalidatePath("/");
+    return {
+      ok: true,
+      message:
+        `${count}件を登録しました（承認済みとして計算に反映）` +
+        (unknownCount ? ` / うち品目マスター未登録 ${unknownCount}件は図番のまま登録` : "") +
+        (bad ? ` / 対象外 ${bad}件` : ""),
+    };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -792,6 +1858,19 @@ export async function importMcframeAction(
     date?: unknown;
     ym?: unknown;
     qty?: unknown;
+  }[],
+  /**
+   * 実績に出てくる品目の情報（品目CD×格納場所CDで一意）。
+   * McFrameが正なので、品目マスターに無い品目はここから登録する
+   * （実績出力には重量が無いため、構成重量・完成重量は未設定のままになる）。
+   */
+  items?: {
+    hinmokuCD?: unknown;
+    kakunoCD?: unknown;
+    hinmei?: unknown;
+    kakunoMei?: unknown;
+    seizoBashoCD?: unknown;
+    seizoBashoMei?: unknown;
   }[]
 ): Promise<ActionResult> {
   try {
@@ -835,17 +1914,46 @@ export async function importMcframeAction(
     }
     const dayCount = days.size ? await upsertMcframeDays(s.companyId, [...days.values()]) : 0;
     const monthCount = months.size ? await upsertMcframeQty(s.companyId, [...months.values()]) : 0;
+    // 品目マスターに無い品目を登録する（McFrameの実績が正）
+    let added: { hinmokuCD: string; kakunoCD: string; hinmei: string }[] = [];
+    if (Array.isArray(items) && items.length > 0) {
+      const factories = await listFactoryOptions(s.companyId);
+      added = await addMissingItemsFromMcframe(
+        s.companyId,
+        items.slice(0, 20000).map((it) => ({
+          hinmokuCD: asStr(it.hinmokuCD, 50),
+          kakunoCD: asStr(it.kakunoCD, 50),
+          hinmei: asStr(it.hinmei, 200),
+          kakunoMei: asStr(it.kakunoMei, 200),
+          seizoBashoCD: asStr(it.seizoBashoCD, 50),
+          seizoBashoMei: asStr(it.seizoBashoMei, 200),
+        })),
+        factories
+      );
+      if (added.length > 0) revalidatePath("/items");
+    }
     revalidatePath("/mcframe");
     revalidatePath("/daily");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     const parts = [
       dayCount ? `日別 ${dayCount}件` : "",
       monthCount ? `月次 ${monthCount}件` : "",
     ].filter(Boolean);
-    return {
-      ok: true,
-      message: `取込完了: ${parts.join(" / ") || "0件"}（読取不可行: ${bad}件）`,
-    };
+    const lines = [`取込完了: ${parts.join(" / ") || "0件"}（読取不可行: ${bad}件）`];
+    if (added.length > 0) {
+      const sample = added
+        .slice(0, 8)
+        .map((a) => `${a.hinmokuCD}/${a.kakunoCD}${a.hinmei ? `（${a.hinmei}）` : ""}`)
+        .join(", ");
+      lines.push(
+        `品目マスターに無かった ${added.length}品目を登録しました（重量は未設定）: ${sample}${added.length > 8 ? " ほか" : ""}`
+      );
+      lines.push(
+        "実績には構成重量・完成重量が無いため、この品目の完成重量・理論スクラップは0のままです。品目マスターで重量を入れるか、McFrameの品目マスター出力を取り込んでください。"
+      );
+    }
+    return { ok: true, message: lines.join("\n") };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -890,6 +1998,7 @@ export async function saveProcureDaysAction(input: {
     const count = await upsertProcureDays(s.companyId, rows, s.userName || s.loginId || "");
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: `${count}日分を保存しました。` };
   } catch (e) {
     return fail((e as Error).message);
@@ -901,7 +2010,9 @@ export async function saveProcureDaysAction(input: {
  * 列: 日付, 工場, 購入_銅条, 購入_銅管, 購入_その他, 売却数量, 備考（1行目ヘッダー可）。
  */
 export async function importProcureCsvAction(
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[],
+  /** 取り込んだ画面の対象月 'YYYY-MM'。年の無い日付（9月1日など）の年を決めるのに使う */
+  baseYm?: string
 ): Promise<ActionResult> {
   try {
     const s = await requireOperationsSession();
@@ -909,16 +2020,18 @@ export async function importProcureCsvAction(
     if (rows.length > 5000) return fail("一度に取込できるのは5,000行までです。");
     const restriction = await getFactoryRestriction(s);
     const clean: Omit<ProcureDay, "recordedBy">[] = [];
-    let bad = 0;
-    for (const r of rows) {
-      const pdate = normDateStr(r.pdate);
+    // 読めなかった行は理由ごとに数え、最初の例を添えて返す（何を直せばよいか分かるように）
+    const badDate: string[] = [];
+    const badFactory: string[] = [];
+    for (const [i, r] of rows.entries()) {
+      const pdate = normDateStr(r.pdate, isYmStr(baseYm) ? baseYm : undefined);
       const factory = asStr(r.factory, 50);
-      if (!pdate || !factory) {
-        bad++;
+      if (!pdate) {
+        badDate.push(`${i + 2}行目「${asStr(r.pdate, 30)}」`);
         continue;
       }
-      if (restriction.restricted && factory !== restriction.factory) {
-        bad++;
+      if (!factory || (restriction.restricted && factory !== restriction.factory)) {
+        badFactory.push(`${i + 2}行目「${factory}」`);
         continue;
       }
       clean.push({
@@ -931,10 +2044,29 @@ export async function importProcureCsvAction(
         note: asStr(r.note, 500),
       });
     }
+    const problems = [
+      badDate.length
+        ? `日付が読めない ${badDate.length}行（例: ${badDate[0]}。2026/9/1 または 9月1日 の形にしてください）`
+        : "",
+      badFactory.length
+        ? `工場が${restriction.restricted ? `所属工場（${restriction.factory}）と違う` : "空欄の"} ${badFactory.length}行（例: ${badFactory[0]}）`
+        : "",
+    ].filter(Boolean);
+    if (clean.length === 0) {
+      return fail(`取り込める行がありませんでした。${problems.join("、")}。`);
+    }
     const count = await upsertProcureDays(s.companyId, clean, s.userName || s.loginId || "");
     revalidatePath("/procurement");
     revalidatePath("/");
-    return { ok: true, message: `取込完了: ${count}日分（読取不可・対象外: ${bad}行）` };
+    revalidatePath("/dashboard");
+    // どの月に入ったかを出す（画面の月と違う月のデータだと、取り込んでも画面に出ないため）
+    const months = [...new Set(clean.map((c) => c.pdate.slice(0, 7)))]
+      .sort()
+      .map((m) => `${Number(m.slice(0, 4))}年${Number(m.slice(5, 7))}月`);
+    return {
+      ok: true,
+      message: `取込完了: ${months.join("・")}の${count}日分${problems.length ? `（取り込めなかった行: ${problems.join("、")}）` : ""}`,
+    };
   } catch (e) {
     return fail((e as Error).message);
   }
@@ -971,18 +2103,36 @@ export async function addAdjustmentAction(input: {
     });
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "在庫補正を登録しました。" };
   } catch (e) {
     return fail((e as Error).message);
   }
 }
 
+/**
+ * 在庫補正の削除（管理者のみ。画面でも削除ボタンは管理者にだけ出す）。
+ * 所属工場の人は、その工場の補正だけ消せる。
+ */
 export async function deleteAdjustmentAction(id: string): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
-    await deleteAdjustment(s.companyId, asStr(id, 50));
+    const s = await requireAdminSession();
+    const restriction = await getFactoryRestriction(s);
+    const deleted = await deleteAdjustment(
+      s.companyId,
+      asStr(id, 50),
+      restriction.restricted ? restriction.factory : null
+    );
+    if (deleted === 0) {
+      return fail(
+        restriction.restricted
+          ? `所属工場（${restriction.factory}）の在庫補正のみ削除できます。`
+          : "削除する在庫補正が見つかりませんでした。"
+      );
+    }
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "削除しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -990,7 +2140,8 @@ export async function deleteAdjustmentAction(id: string): Promise<ActionResult> 
 }
 
 /**
- * 月初在庫アンカー（棚卸で確定した月初在庫）の保存（管理者のみ）。
+ * 月初在庫アンカー（棚卸で確定した月初在庫）の保存（管理者のみ。画面でも管理者にだけ出す）。
+ * 所属工場の人は、その工場の月初在庫だけ保存できる。
  * 空欄はアンカー無し＝前月からの理論ロールで自動計算される。
  */
 export async function saveMonthlyAnchorAction(input: {
@@ -1001,10 +2152,14 @@ export async function saveMonthlyAnchorAction(input: {
   zaikoSonota: unknown;
 }): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
+    const s = await requireAdminSession();
     if (!isYmStr(input.ym)) return fail("年月が正しくありません。");
     const factory = asStr(input.factory, 50);
     if (!factory) return fail("工場を選択してください。");
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return fail(`所属工場（${restriction.factory}）のデータのみ入力できます。`);
+    }
     const prev = await getMonthlyInput(s.companyId, input.ym, factory);
     await saveMonthlyInput(s.companyId, {
       ym: input.ym,
@@ -1019,6 +2174,7 @@ export async function saveMonthlyAnchorAction(input: {
     });
     revalidatePath("/procurement");
     revalidatePath("/");
+    revalidatePath("/dashboard");
     return { ok: true, message: "月初在庫（棚卸アンカー）を保存しました。" };
   } catch (e) {
     return fail((e as Error).message);
@@ -1026,24 +2182,31 @@ export async function saveMonthlyAnchorAction(input: {
 }
 
 /**
- * 月次データのCSV一括取込（過去データ移行用・管理者のみ）。
+ * 月次データのCSV一括取込（過去データ移行用・管理者のみ。画面でも「月次取込」は管理者にだけ出す）。
  * 列: 年月, 工場, 月初在庫_銅条, 月初在庫_銅管, 月初在庫_その他,
  *     購入_銅条, 購入_銅管, 購入_その他, 売却数量（1行目ヘッダー可）。
+ * 所属工場の人は、日次の調達入力のCSV取込と同じく、所属工場の行だけ取り込む（他工場の行は飛ばして件数を返す）。
  */
 export async function importMonthlyCsvAction(
   rows: Record<string, unknown>[]
 ): Promise<ActionResult> {
   try {
-    const s = await requireOperationsSession();
+    const s = await requireAdminSession();
     if (!Array.isArray(rows) || rows.length === 0) return fail("取込データがありません。");
     if (rows.length > 1000) return fail("一度に取込できるのは1,000行までです。");
+    const restriction = await getFactoryRestriction(s);
     let count = 0;
     let bad = 0;
+    let otherFactory = 0;
     for (const r of rows) {
       const ym = normYm(r.ym);
       const factory = asStr(r.factory, 50);
       if (!ym || !factory) {
         bad++;
+        continue;
+      }
+      if (restriction.restricted && factory !== restriction.factory) {
+        otherFactory++;
         continue;
       }
       await saveMonthlyInput(s.companyId, {
@@ -1061,7 +2224,426 @@ export async function importMonthlyCsvAction(
     }
     revalidatePath("/procurement");
     revalidatePath("/");
-    return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行）` };
+    revalidatePath("/dashboard");
+    const skipped = otherFactory
+      ? `、所属工場（${restriction.factory}）以外のため対象外: ${otherFactory}行`
+      : "";
+    return { ok: true, message: `月次データ取込完了: ${count}件（読取不可: ${bad}行${skipped}）` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+// ===== ① 日次記録: Excel（紙様式）の記録票の取込（生産管理部・調達部のメンバーと管理者のみ） =====
+
+/** 取込1回分の結果。日付ごとにどうなったかを画面に出す。 */
+export interface DailyImportResult {
+  ok: boolean;
+  message: string;
+  /** 取り込んだ日付 */
+  imported: string[];
+  /** 既に記録があるので飛ばした日付（上書きを選べば取り込める） */
+  skipped: string[];
+  failed: { date: string; message: string }[];
+  /** 取込のために新しく作った種類（設定 > スクラップ種類に追加される） */
+  createdKinds: string[];
+}
+
+const importFailed = (message: string): DailyImportResult => ({
+  ok: false,
+  message,
+  imported: [],
+  skipped: [],
+  failed: [],
+  createdKinds: [],
+});
+
+/**
+ * Excelの日次記録票（箱の種類ごとのブック）を、日付×工場の記録票として取り込む。
+ *
+ * - 明細の重量はサーバー側で計算し直す（投入重量−箱重量。片方しか無い行は送られてきた重量）
+ * - 累積（投入前/投入後）は箱ごとの積み上げで埋める（Excelの「累積」列と同じ考え方）
+ * - Excelに責任者のサインがある日は承認済みとして取り込む（承認者はサインの名前）
+ * - 既に記録がある日は既定で飛ばす。mode="overwrite" のときだけ置き換える
+ */
+export async function importDailyExcelAction(input: {
+  factory: string;
+  mode: "skip" | "overwrite";
+  /** Excelに責任者サインが無い日も承認済みにする（承認者は取込者）。過去分の一括移行用 */
+  approveAll?: boolean;
+  days: {
+    recordDate: string;
+    sekininsha?: string;
+    shonin?: string;
+    tonyuKanryo?: boolean;
+    hakoZanryo?: unknown;
+    kaishuSokuteichi?: unknown;
+    biko?: string;
+    entries: Record<string, unknown>[];
+  }[];
+}): Promise<DailyImportResult> {
+  try {
+    const s = await requireOperationsSession();
+    const factory = asStr(input.factory, 50);
+    if (!factory) return importFailed("取込先の工場を選んでください。");
+    // 所属工場のあるユーザーは自工場にしか取り込めない（サーバー側で必ず防ぐ）
+    const restriction = await getFactoryRestriction(s);
+    if (restriction.restricted && factory !== restriction.factory) {
+      return importFailed(`所属工場（${restriction.factory}）にのみ取り込めます。`);
+    }
+    const days = Array.isArray(input.days) ? input.days : [];
+    if (days.length === 0) return importFailed("取込データがありません。");
+    if (days.length > 40) return importFailed("一度に取込できるのは40日分までです。");
+
+    // 種類マスタに無い箱の種類（銅スクラップなど）は、取込のときに作る
+    const kinds = await listScrapKinds(s.companyId);
+    const kindNames = new Set(kinds.map((k) => k.name));
+    let nextSort = kinds.reduce((m, k) => Math.max(m, k.sort), 0);
+    const createdKinds: string[] = [];
+    for (const day of days) {
+      for (const e of day.entries ?? []) {
+        const kind = asStr(e.kind, 20);
+        if (!kind || kindNames.has(kind)) continue;
+        nextSort += 1;
+        await upsertScrapKind(s.companyId, { name: kind, sort: nextSort, active: true });
+        kindNames.add(kind);
+        createdKinds.push(kind);
+      }
+    }
+
+    // 箱（重量計）は、その種類の登録が1台だけのときに紐づける。
+    // 複数ある・未登録のときは種類だけ残す（後から画面で直せる）。
+    const scales = await listScales(s.companyId, { factory, activeOnly: true });
+    const scaleOfKind = new Map<string, Scale>();
+    for (const kind of kindNames) {
+      const hit = scales.filter((sc) => sc.kind === kind);
+      if (hit.length === 1) scaleOfKind.set(kind, hit[0]);
+    }
+
+    const imported: string[] = [];
+    const skipped: string[] = [];
+    const failed: { date: string; message: string }[] = [];
+
+    for (const day of days) {
+      const recordDate = normDateStr(day.recordDate);
+      if (!recordDate) {
+        failed.push({ date: asStr(day.recordDate, 20), message: "日付が読み取れません" });
+        continue;
+      }
+      const rows = Array.isArray(day.entries) ? day.entries : [];
+      if (rows.length === 0) {
+        failed.push({ date: recordDate, message: "明細がありません" });
+        continue;
+      }
+      if (rows.length > 300) {
+        failed.push({ date: recordDate, message: "1日の明細が300件を超えています" });
+        continue;
+      }
+      const prev = await getDailyRecord(s.companyId, recordDate, factory);
+      if (prev && prev.entries.length > 0 && input.mode !== "overwrite") {
+        skipped.push(recordDate);
+        continue;
+      }
+
+      // 箱ごとの累積（投入前＝それまでの合計、投入後＝投入後の合計）
+      const cum = new Map<string, number>();
+      const entries: DailyEntry[] = [];
+      for (const e of rows) {
+        const kindRaw = asStr(e.kind, 20);
+        const kind = kindNames.has(kindRaw) ? kindRaw : (kinds[0]?.name ?? SCALE_KIND_LIST[0]);
+        const gross = toNumOrNull(e.gross);
+        const tare = toNumOrNull(e.tare);
+        // 重量は必ずサーバーで決める。投入重量と箱重量が揃っていればその差、
+        // 片方しか無い行（実投入だけの記録）は送られてきた重量を使う。
+        const weight =
+          gross !== null && tare !== null
+            ? Math.round((gross - tare) * 1000) / 1000
+            : Math.round((toNumOrNull(e.weight) ?? 0) * 1000) / 1000;
+        if (!(weight > 0)) continue;
+        const before = cum.get(kind) ?? 0;
+        const after = Math.round((before + weight) * 1000) / 1000;
+        cum.set(kind, after);
+        const scale = scaleOfKind.get(kind) ?? null;
+        entries.push({
+          jikoku: asStr(e.jikoku, 10),
+          hinshu: kind,
+          scaleId: scale?.id ?? null,
+          scaleName: scale?.name ?? kind,
+          grossWeight: gross,
+          tareWeight: tare,
+          weight,
+          cumBefore: before,
+          cumAfter: after,
+          cumBeforeReason: "",
+          cumAfterReason: "",
+          cumBeforeReadId: null,
+          cumAfterReadId: null,
+          // Excelの期間は袋管理より前なので、袋には紐づけない（袋なし＝日単位の記録）
+          bagId: null,
+          kirokusha: asStr(e.kirokusha, 120),
+          ijo: asStr(e.ijo),
+          busho: asStr(e.busho, 50),
+          kikai: asStr(e.kikai, 50),
+          zairyo: asStr(e.zairyo, 50),
+          kotei: asStr(e.kotei, 50),
+        });
+      }
+      if (entries.length === 0) {
+        failed.push({ date: recordDate, message: "取り込める明細がありません" });
+        continue;
+      }
+
+      // Excelで責任者がサインしている日は、その時点で承認された記録として扱う。
+      // サインが無い日は下書き。approveAll のときだけ取込者の承認として扱う
+      const shonin = asStr(day.shonin, 50);
+      const approval = shonin
+        ? { status: "approved" as const, approvedBy: `${shonin}（Excel）` }
+        : input.approveAll
+          ? { status: "approved" as const, approvedBy: `${s.userName || s.loginId || ""}（Excel取込）` }
+          : { status: "draft" as const, approvedBy: "" };
+      try {
+        await importDailyRecord(
+          s.companyId,
+          {
+            recordDate,
+            factory,
+            sekininsha: asStr(day.sekininsha, 50),
+            zenjitsuOk: prev?.zenjitsuOk ?? false,
+            hakoZanryo: toNumOrNull(day.hakoZanryo) ?? 0,
+            kaishiCum: {},
+            kaishuSokuteichi: toNumOrNull(day.kaishuSokuteichi),
+            tonyuKanryo: Boolean(day.tonyuKanryo),
+            shonin,
+            biko: asStr(day.biko, 2000),
+            updatedBy: `${s.loginId ?? s.userName}（Excel取込）`,
+            entries,
+          },
+          approval
+        );
+        imported.push(recordDate);
+      } catch (e) {
+        failed.push({ date: recordDate, message: (e as Error).message });
+      }
+    }
+
+    revalidatePath("/daily");
+    revalidatePath("/summary");
+    revalidatePath("/");
+    revalidatePath("/dashboard");
+    const parts = [`取込 ${imported.length}日`];
+    if (skipped.length) parts.push(`既存のため飛ばし ${skipped.length}日`);
+    if (failed.length) parts.push(`エラー ${failed.length}日`);
+    if (createdKinds.length) parts.push(`種類を追加: ${createdKinds.join("・")}`);
+    return {
+      ok: failed.length === 0,
+      message: parts.join(" / "),
+      imported,
+      skipped,
+      failed,
+      createdKinds,
+    };
+  } catch (e) {
+    return importFailed((e as Error).message);
+  }
+}
+
+// ===== 工場間のプラ箱送付 =====
+
+function revalidateShipmentPages() {
+  for (const p of ["/shipments", "/daily", "/dashboard", "/settings"]) revalidatePath(p);
+}
+
+/**
+ * スクラップの送り先を設定する（生産管理部・調達部と管理者）。
+ * toFactory が空なら「自工場で処理」に戻す。
+ */
+export async function setShipRouteAction(fromFactory: string, toFactory: string): Promise<ActionResult> {
+  try {
+    const s = await requireOperationsSession();
+    const from = asStr(fromFactory, 50);
+    const to = asStr(toFactory, 50);
+    if (!from) return fail("工場が指定されていません。");
+    if (to === from) return fail("自工場には送れません。");
+    // 送り先がさらに別の工場へ送っていると、どこで処理したか分からなくなる
+    if (to) {
+      const routes = await listShipRoutes(s.companyId);
+      if (routes.some((r) => r.fromFactory === to)) {
+        return fail(`${to} は他の工場へ送る設定になっています。処理する工場を送り先にしてください。`);
+      }
+      if (routes.some((r) => r.toFactory === from)) {
+        return fail(`${from} は他の工場から受け入れています。受け入れている工場は送る側にできません。`);
+      }
+    }
+    await setShipRoute(s.companyId, from, to);
+    revalidateShipmentPages();
+    return {
+      ok: true,
+      message: to ? `${from} のスクラップは ${to} へ送る設定にしました。` : `${from} は自工場で処理する設定にしました。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 送る側の工場（所属工場の人は所属工場に固定）。 */
+async function shippingFactory(
+  s: Awaited<ReturnType<typeof requireEntitledSession>>,
+  requested: string
+): Promise<string> {
+  const view = await getFactoryView(s);
+  return view.restricted && view.factory ? view.factory : asStr(requested, 50);
+}
+
+/**
+ * プラ箱を出荷として登録する（送る側でプラ箱ごと量った重量）。箱に書く番号を返す。
+ * プラ箱の重さは受け入れ側が、スクラップを空けたあとに量る。
+ * 出荷日は既定で当日。前日分を翌朝まとめて登録することもあるので、過去日は受け付ける。
+ */
+export async function createShipmentAction(input: {
+  factory: string;
+  shipDate: string;
+  hinshu: string;
+  /** プラ箱ごと量った重さ（出荷重量） */
+  grossWeight: unknown;
+  note?: string;
+}): Promise<ActionResult & { boxNo?: string }> {
+  try {
+    const s = await requireEntitledSession();
+    const from = await shippingFactory(s, input.factory);
+    if (!from) return fail("工場を選んでください。");
+    const route = (await listShipRoutes(s.companyId)).find((r) => r.fromFactory === from);
+    if (!route) return fail(`${from} は送り先が設定されていません。設定画面で送り先を決めてください。`);
+    const shipDate = asStr(input.shipDate, 10);
+    if (!isDateStr(shipDate)) return fail("出荷日を入力してください。");
+    if (shipDate > todayStr()) return fail("出荷日に未来の日付は入れられません。");
+    const kinds = (await listScrapKinds(s.companyId)).filter((k) => k.active).map((k) => k.name);
+    const hinshu = asStr(input.hinshu, 20);
+    if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
+    const gross = grossWeight(input.grossWeight);
+    if (typeof gross === "string") return fail(gross);
+    const affiliation = await getUserAffiliation(s.userId);
+    const sh = await createShipment(s.companyId, {
+      fromFactory: from,
+      toFactory: route.toFactory,
+      shipDate,
+      hinshu,
+      grossWeight: gross,
+      tareWeight: null,
+      shippedBy: [affiliation, s.userName || s.loginId || ""].filter(Boolean).join(" "),
+      note: asStr(input.note ?? "", 200),
+    });
+    revalidateShipmentPages();
+    return {
+      ok: true,
+      boxNo: sh.boxNo,
+      message: `${gross} kg（プラ箱込み）で出荷を登録しました。プラ箱に「${sh.boxNo}」と書いて ${sh.toFactory} へ送ってください。`,
+    };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 出荷重量（プラ箱込み）を確かめる。正しければ数値、おかしければ理由の文字列。 */
+function grossWeight(raw: unknown): number | string {
+  const gross = toNumOrNull(raw);
+  if (gross === null || !(gross > 0)) return "出荷重量（プラ箱込み）を入力してください。";
+  if (gross > 1000) return "重量が大きすぎます（1,000 kg まで）。単位を確認してください。";
+  return Math.round(gross * 1000) / 1000;
+}
+
+/**
+ * 試行版（送る側でプラ箱も量っていた）の登録分を直すときの確認。
+ * 総重量（プラ箱込み）とプラ箱の重さから、スクラップ重量を出す。
+ * プラ箱は空のときに事前に量っておく運用。
+ */
+function shipWeights(
+  grossRaw: unknown,
+  tareRaw: unknown
+): { error: string } | { gross: number; tare: number; net: number } {
+  const gross = toNumOrNull(grossRaw);
+  const tare = toNumOrNull(tareRaw);
+  if (gross === null || !(gross > 0)) return { error: "総重量（プラ箱込み）を入力してください。" };
+  if (tare === null || tare < 0) return { error: "プラ箱の重さ（空の重さ）を入力してください。" };
+  if (gross > 1000) return { error: "総重量が大きすぎます（1,000 kg まで）。単位を確認してください。" };
+  const net = Math.round((gross - tare) * 1000) / 1000;
+  if (!(net > 0)) {
+    return { error: `総重量 ${gross} kg がプラ箱の重さ ${tare} kg 以下です。値を確認してください。` };
+  }
+  return { gross: Math.round(gross * 1000) / 1000, tare: Math.round(tare * 1000) / 1000, net };
+}
+
+/** 送った側の人か管理者だけが、そのプラ箱を直せる。 */
+async function assertCanEditShipment(
+  s: Awaited<ReturnType<typeof requireEntitledSession>>,
+  id: string
+): Promise<{ error: string } | { shipment: Shipment }> {
+  const sh = await getShipment(s.companyId, asStr(id, 50));
+  if (!sh) return { error: "プラ箱が見つかりません。" };
+  const restriction = await getFactoryRestriction(s);
+  if (s.role !== "admin" && restriction.restricted && restriction.factory !== sh.fromFactory) {
+    return { error: `送った工場（${sh.fromFactory}）の人だけが直せます。` };
+  }
+  if (sh.received) {
+    return { error: `プラ箱「${sh.boxNo}」は ${sh.toFactory} で処理済みのため直せません。` };
+  }
+  return { shipment: sh };
+}
+
+/** 未処理のプラ箱の重量・種類を直す。 */
+export async function updateShipmentAction(input: {
+  id: string;
+  hinshu: string;
+  /** 総重量（プラ箱込み）とプラ箱の重さ。導入直後の登録分（総重量なし）は weight を直す */
+  grossWeight?: unknown;
+  tareWeight?: unknown;
+  weight?: unknown;
+  note?: string;
+}): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    const r = await assertCanEditShipment(s, input.id);
+    if ("error" in r) return fail(r.error);
+    const kinds = (await listScrapKinds(s.companyId)).map((k) => k.name);
+    const hinshu = asStr(input.hinshu, 20);
+    if (!kinds.includes(hinshu)) return fail("スクラップの種類を選んでください。");
+    let patch: { grossWeight: number | null; tareWeight: number | null; weight: number };
+    if (input.tareWeight !== undefined) {
+      // 試行版の登録分（送る側でプラ箱も量っていた）
+      const w = shipWeights(input.grossWeight, input.tareWeight);
+      if ("error" in w) return fail(w.error);
+      patch = { grossWeight: w.gross, tareWeight: w.tare, weight: w.net };
+    } else if (input.grossWeight !== undefined) {
+      const gross = grossWeight(input.grossWeight);
+      if (typeof gross === "string") return fail(gross);
+      patch = { grossWeight: gross, tareWeight: null, weight: gross };
+    } else {
+      const weight = toNum(input.weight);
+      if (!(weight > 0) || weight > 1000) return fail("重量を正しく入力してください。");
+      patch = { grossWeight: null, tareWeight: null, weight: Math.round(weight * 1000) / 1000 };
+    }
+    const ok = await updateShipment(s.companyId, r.shipment.id, {
+      hinshu,
+      ...patch,
+      note: asStr(input.note ?? "", 200),
+    });
+    if (!ok) return fail("処理済みになったため直せませんでした。");
+    revalidateShipmentPages();
+    return { ok: true, message: `プラ箱「${r.shipment.boxNo}」を直しました。` };
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+}
+
+/** 未処理のプラ箱を取り消す（送らなかった・二重に登録した）。 */
+export async function deleteShipmentAction(id: string): Promise<ActionResult> {
+  try {
+    const s = await requireEntitledSession();
+    const r = await assertCanEditShipment(s, id);
+    if ("error" in r) return fail(r.error);
+    const ok = await deleteShipment(s.companyId, r.shipment.id);
+    if (!ok) return fail("処理済みになったため取り消せませんでした。");
+    revalidateShipmentPages();
+    return { ok: true, message: `プラ箱「${r.shipment.boxNo}」を取り消しました。` };
   } catch (e) {
     return fail((e as Error).message);
   }

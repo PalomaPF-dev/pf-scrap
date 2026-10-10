@@ -1,267 +1,275 @@
 import Link from "next/link";
-import { FileDown } from "lucide-react";
-import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
-import { monthlySummary, yearSummary, type KubunSummary } from "@/lib/calc";
-import { KUBUN_LIST } from "@/lib/db";
-import { fmt, fmtPct, isYmStr, thisMonthStr } from "@/lib/format";
+import { redirect } from "next/navigation";
+import { BookOpen, ChevronRight } from "lucide-react";
+import { requireEntitledSession, canUseOperations, getFactoryView } from "@/lib/session";
+import { DAILY_STATUS_LABEL, countPendingDaily, listDailyAgg, listFactoryOptions, type DailyAggRow } from "@/lib/db";
+import { fmt, normYm, thisMonthStr, todayStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
-import DbErrorState from "@/components/DbErrorState";
 import MonthNav from "@/components/MonthNav";
-import FactorySelect from "@/components/FactorySelect";
-import { listFactoryOptions } from "@/lib/db";
+import { MODULES, MODULE_GROUPS, usable, type AppModule } from "@/components/Modules";
 
 export const dynamic = "force-dynamic";
 
-const td = "border border-[#e5e5e5] px-2.5 py-1.5 whitespace-nowrap";
-const tdNum = `${td} text-right tabular-nums`;
-const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2.5 py-1.5 text-left font-semibold whitespace-nowrap";
-const thNum = `${th} text-right`;
-
-function MethodBadge({ method }: { method: KubunSummary["method"] }) {
-  if (!method) return null;
-  return (
-    <span
-      title={
-        method === "在庫法"
-          ? "月初在庫 + 購入重量 − 翌月月初在庫"
-          : "Σ(加工数 × 構成重量)。翌月の月初在庫が未入力のための代替計算"
-      }
-      className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${
-        method === "在庫法" ? "bg-[#eef4ee] text-[#2f6b2f]" : "bg-[#fff3e0] text-[#a15c00]"
-      }`}
-    >
-      {method}
-    </span>
-  );
+/** 状態バッジの色（日次記録・月間集計と同じ）。 */
+function statusClass(status: DailyAggRow["status"]): string {
+  return status === "approved"
+    ? "bg-[#eef4ee] text-[#2f6b2f]"
+    : status === "pending"
+      ? "bg-[#fff3e0] text-[#a15c00]"
+      : status === "rejected"
+        ? "bg-[#fdecea] text-[#dc000c]"
+        : "bg-[#eeeeee] text-[#555555]";
 }
 
-export default async function DashboardPage({
+/**
+ * ホーム。工場ごとの「その月の状況」（今日の記録・記録日数・合計・承認待ち）と、
+ * 用途別の機能一覧を出す。月は上の切替で変えられる（既定は今月）。
+ * 旧ホームの照合ダッシュボードは /dashboard へ移した。
+ */
+export default async function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ ym?: string; factory?: string }>;
+  searchParams: Promise<{ ym?: string; factory?: string; m?: string }>;
 }) {
-  const session = await requireEntitledSession();
+  // 旧ホーム（照合ダッシュボード）のブックマーク（/?ym=…）は、移転先へ送る
   const sp = await searchParams;
-  const ym = isYmStr(sp.ym) ? sp.ym : thisMonthStr();
-  const year = Number(ym.slice(0, 4));
-
-  let s, years, factoryOptions: string[], factory: string | null, factoryLocked: boolean;
-  try {
-    // 所属工場ユーザーは自工場に固定。未所属は 全社(合算)/工場 を切替可能
-    const restriction = await getFactoryRestriction(session);
-    factoryOptions = await listFactoryOptions(session.companyId);
-    factoryLocked = restriction.restricted;
-    factory = restriction.restricted
-      ? restriction.factory
-      : (sp.factory ?? "").trim() || null;
-    [s, years] = await Promise.all([
-      monthlySummary(session.companyId, ym, factory),
-      yearSummary(session.companyId, year, factory),
-    ]);
-  } catch (e) {
-    console.error("[dashboard]", e);
-    return (
-      <div className="p-4 sm:p-6">
-        <PageHeader title="照合ダッシュボード" />
-        <DbErrorState />
-      </div>
-    );
+  if (sp.ym || sp.factory) {
+    const q = new URLSearchParams();
+    if (sp.ym) q.set("ym", sp.ym);
+    if (sp.factory) q.set("factory", sp.factory);
+    redirect(`/dashboard?${q.toString()}`);
   }
 
-  const g = s.perKubun["全体"];
-  const dailyTotal = s.daily.total;
-  // 差異5%超は要確認としてハイライトする
-  const warn6 =
-    s.diff6 !== null && dailyTotal > 0 && Math.abs(s.diff6) / dailyTotal > 0.05;
-  const warn7 =
-    s.diff7sell !== null && g.scrapTheo ? Math.abs(s.diff7sell) / Math.abs(g.scrapTheo) > 0.05 : false;
+  const session = await requireEntitledSession();
+  // 使えない機能は出さない。判定はサイドバー・各画面の入口と同じ規則
+  const canOperate = await canUseOperations(session);
+  const isAdmin = session.role === "admin";
+
+  // 月の切替は ?m=（?ym= は旧ホームの転送に使っているので別名）
+  const ym = normYm(sp.m) ?? thisMonthStr();
+  const today = todayStr();
+  const isThisMonth = ym === thisMonthStr();
+  let status: {
+    /** 見られる工場（所属工場の人は1つ、全工場の人は候補＋記録のある工場） */
+    factories: string[];
+    rows: DailyAggRow[];
+    /** 工場ごとの承認待ち日数（全期間） */
+    pending: Record<string, number>;
+    locked: boolean;
+  } | null = null;
+  try {
+    const view = await getFactoryView(session);
+    const [rows, options] = await Promise.all([
+      listDailyAgg(session.companyId, ym, view.factory),
+      view.factory ? Promise.resolve([view.factory]) : listFactoryOptions(session.companyId),
+    ]);
+    const factories = [...options];
+    for (const r of rows) if (r.factory && !factories.includes(r.factory)) factories.push(r.factory);
+    const pendingList = await Promise.all(
+      factories.map((f) => countPendingDaily(session.companyId, f).then((n) => [f, n] as const))
+    );
+    status = { factories, rows, pending: Object.fromEntries(pendingList), locked: view.restricted };
+  } catch (e) {
+    // 状況が出せなくても、機能の案内は見せる
+    console.error("[home]", e);
+  }
+
+  const recorded = status ? status.rows.filter((r) => r.total > 0) : [];
+  const recent = [...recorded]
+    .sort((a, b) => b.recordDate.localeCompare(a.recordDate) || a.factory.localeCompare(b.factory))
+    .slice(0, 5);
+  const [y, mo] = ym.split("-");
+  const ymLabel = `${y}年${Number(mo)}月`;
 
   return (
     <div className="p-4 sm:p-6">
       <PageHeader
-        title="照合ダッシュボード"
-        description={`${session.companyName} スクラップ重量の突合（${factory ?? "全社合算"}）`}
+        title="スクラップの記録から照合まで"
+        description="現場で毎日スクラップの重量を記録し、McFrameの生産実績から出した理論スクラップ・売却量と突き合わせます。"
         action={
-          <>
-            {factoryLocked ? (
-              <span className="rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm">
-                {factory}
-              </span>
-            ) : (
-              <FactorySelect factory={factory ?? ""} options={factoryOptions} />
-            )}
-            <MonthNav ym={ym} />
-            <a
-              href={`/api/export?type=recon&year=${year}${factory ? `&factory=${encodeURIComponent(factory)}` : ""}`}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
-            >
-              <FileDown className="h-4 w-4" />
-              年間一覧CSV
-            </a>
-          </>
+          <Link
+            href={MODULES.guide.href}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
+          >
+            <BookOpen className="h-4 w-4" />
+            使い方を1画面ずつ見る
+          </Link>
         }
       />
 
-      {/* 月次サマリー（区分別） */}
-      <section className="mb-6 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-        <h2 className="mb-1 text-sm font-bold text-[#333333]">月次サマリー（区分別）</h2>
-        <p className="mb-3 text-xs text-[#909090]">
-          使用量 = 月初在庫 + 購入重量 − 翌月月初在庫（未入力時は構成重量ベース） / 理論スクラップ = 使用量 − 完成重量
-        </p>
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-sm">
-            <thead>
-              <tr>
-                <th className={th}>区分</th>
-                <th className={thNum}>月初在庫</th>
-                <th className={thNum}>購入重量</th>
-                <th className={thNum}>翌月月初在庫</th>
-                <th className={thNum}>使用量</th>
-                <th className={th}>算出</th>
-                <th className={thNum}>構成重量(参考)</th>
-                <th className={thNum}>完成重量</th>
-                <th className={thNum}>理論スクラップ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...KUBUN_LIST, "全体"].map((kb) => {
-                const r = s.perKubun[kb];
-                const usage = r.usageInv !== null ? r.usageInv : r.usageBom;
-                return (
-                  <tr key={kb} className={kb === "全体" ? "bg-[#faf6ef] font-semibold" : ""}>
-                    <td className={td}>{kb}</td>
-                    <td className={tdNum}>{fmt(r.zaiko)}</td>
-                    <td className={tdNum}>{fmt(r.konyu)}</td>
-                    <td className={tdNum}>{fmt(r.zaikoNext)}</td>
-                    <td className={tdNum}>{fmt(usage)}</td>
-                    <td className={td}>
-                      <MethodBadge method={r.method} />
-                    </td>
-                    <td className={tdNum}>{fmt(r.usageBom)}</td>
-                    <td className={tdNum}>{fmt(r.finished)}</td>
-                    <td className={`${tdNum} ${r.scrapTheo !== null && r.scrapTheo < 0 ? "text-[#dc000c]" : ""}`}>
-                      {fmt(r.scrapTheo)}
-                    </td>
+      {/* 工場ごとの月の状況 */}
+      {status && (
+        <section className="mb-6 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-bold text-[#333333]">{ymLabel}の状況（工場別）</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <MonthNav ym={ym} param="m" />
+              <Link href={`${MODULES.summary.href}?ym=${ym}`} className="text-xs text-[#b4632c] underline">
+                月間集計を見る
+              </Link>
+            </div>
+          </div>
+          {status.factories.length === 0 ? (
+            <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
+              工場がまだ登録されていません。設定の「工場・職場」で追加してください。
+            </p>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-[#eeeeee]">
+              <table className="w-full text-sm">
+                <thead className="bg-[#fafaf8] text-xs text-[#707070]">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">工場</th>
+                    {isThisMonth && <th className="px-3 py-2 text-left font-medium">今日の記録</th>}
+                    <th className="px-3 py-2 text-right font-medium">記録日数</th>
+                    <th className="px-3 py-2 text-right font-medium">スクラップ合計(kg)</th>
+                    <th className="px-3 py-2 text-right font-medium">承認待ち（全期間）</th>
+                    <th className="px-3 py-2 text-right font-medium"></th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* ⑥⑦ 突合 */}
-      <div className="mb-6 grid gap-6 lg:grid-cols-2">
-        <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-          <h2 className="mb-3 text-sm font-bold text-[#333333]">⑥ スクラップ売却 × 日次記録 の突合</h2>
-          <table className="w-full border-collapse text-sm">
-            <tbody>
-              <tr>
-                <th className={th}>スクラップ売却数量（⑤入力）</th>
-                <td className={tdNum}>{s.baikyaku !== null ? `${fmt(s.baikyaku)} kg` : "未入力"}</td>
-                <td className={td}></td>
-              </tr>
-              <tr>
-                <th className={th}>日次記録スクラップ合計（①）</th>
-                <td className={tdNum}>{fmt(dailyTotal)} kg</td>
-                <td className={td}>{s.daily.days}日分</td>
-              </tr>
-              <tr>
-                <th className={th}>差異（売却 − 日次記録）</th>
-                <td className={`${tdNum} ${warn6 ? "bg-[#fdecea] text-[#dc000c]" : s.diff6 !== null ? "bg-[#eef4ee]" : ""}`}>
-                  {s.diff6 !== null ? `${fmt(s.diff6)} kg` : "-"}
-                </td>
-                <td className={td}>{s.rate6 !== null ? `率 ${fmtPct(s.rate6)}` : ""}</td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-          <h2 className="mb-3 text-sm font-bold text-[#333333]">⑦ 理論スクラップ × 売却/日次記録 の突合</h2>
-          <table className="w-full border-collapse text-sm">
-            <tbody>
-              <tr>
-                <th className={th}>理論スクラップ（全体）</th>
-                <td className={tdNum}>{g.scrapTheo !== null ? `${fmt(g.scrapTheo)} kg` : "-"}</td>
-                <td className={td}>
-                  <MethodBadge method={g.method} />
-                </td>
-              </tr>
-              <tr>
-                <th className={th}>売却 − 理論（売量vs理論）</th>
-                <td className={`${tdNum} ${warn7 ? "bg-[#fdecea] text-[#dc000c]" : s.diff7sell !== null ? "bg-[#eef4ee]" : ""}`}>
-                  {s.diff7sell !== null ? `${fmt(s.diff7sell)} kg` : "-"}
-                </td>
-                <td className={td}>{s.rate7sell !== null ? `率 ${fmtPct(s.rate7sell)}` : ""}</td>
-              </tr>
-              <tr>
-                <th className={th}>日次記録 − 理論</th>
-                <td className={tdNum}>{s.diff7daily !== null ? `${fmt(s.diff7daily)} kg` : "-"}</td>
-                <td className={td}>{s.rate7daily !== null ? `率 ${fmtPct(s.rate7daily)}` : ""}</td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
-      </div>
-
-      {/* 年間推移 */}
-      <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
-        <h2 className="mb-3 text-sm font-bold text-[#333333]">{year}年 年間推移（{factory ?? "全社合算"}）</h2>
-        <div className="overflow-x-auto">
-          <table className="print-table w-full border-collapse text-sm">
-            <thead>
-              <tr>
-                <th className={th}>年月</th>
-                <th className={thNum}>月初在庫</th>
-                <th className={thNum}>購入重量</th>
-                <th className={thNum}>使用量</th>
-                <th className={thNum}>構成重量</th>
-                <th className={thNum}>完成重量</th>
-                <th className={thNum}>理論SCP</th>
-                <th className={thNum}>SCP売量</th>
-                <th className={thNum}>日次記録</th>
-                <th className={thNum}>売量vs理論</th>
-                <th className={thNum}>売却vs日次</th>
-              </tr>
-            </thead>
-            <tbody>
-              {years.length === 0 && (
-                <tr>
-                  <td className={td} colSpan={11}>
-                    データがありません。
-                    <Link href="/monthly" className="text-[#b4632c] underline">月次入力</Link>・
-                    <Link href="/daily" className="text-[#b4632c] underline">日次記録</Link>から登録してください。
-                  </td>
-                </tr>
-              )}
-              {years.map((r) => (
-                <tr key={r.ym} className={r.ym === ym ? "bg-[#faf6ef]" : ""}>
-                  <td className={td}>
-                    <Link href={`/?ym=${r.ym}`} className="text-[#b4632c] hover:underline">
-                      {r.ym}
-                    </Link>
-                  </td>
-                  <td className={tdNum}>{fmt(r.zaiko)}</td>
-                  <td className={tdNum}>{fmt(r.konyu)}</td>
-                  <td className={tdNum}>{fmt(r.usage)}</td>
-                  <td className={tdNum}>{fmt(r.usageBom)}</td>
-                  <td className={tdNum}>{fmt(r.finished)}</td>
-                  <td className={tdNum}>{fmt(r.scrapTheo)}</td>
-                  <td className={tdNum}>{fmt(r.baikyaku)}</td>
-                  <td className={tdNum}>{fmt(r.daily)}</td>
-                  <td className={`${tdNum} ${r.diff7sell !== null && r.diff7sell < 0 ? "text-[#dc000c]" : ""}`}>
-                    {fmt(r.diff7sell)}
-                  </td>
-                  <td className={`${tdNum} ${r.diff6 !== null && r.diff6 < 0 ? "text-[#dc000c]" : ""}`}>
-                    {fmt(r.diff6)}
-                  </td>
-                </tr>
+                </thead>
+                <tbody className="divide-y divide-[#f0f0f0]">
+                  {status.factories.map((f) => {
+                    const mine = recorded.filter((r) => r.factory === f);
+                    const days = new Set(mine.map((r) => r.recordDate)).size;
+                    const total = mine.reduce((t, r) => t + r.total, 0);
+                    const todayDone = mine.some((r) => r.recordDate === today);
+                    const pending = status.pending[f] ?? 0;
+                    return (
+                      <tr key={f} className="hover:bg-[#fcfcfb]">
+                        <td className="px-3 py-2 font-medium text-[#333333]">{f}</td>
+                        {isThisMonth && (
+                          <td className="px-3 py-2">
+                            <span
+                              className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+                                todayDone ? "bg-[#eef4ee] text-[#2f6b2f]" : "bg-[#fff3e0] text-[#a15c00]"
+                              }`}
+                            >
+                              {todayDone ? "記録あり" : "まだ"}
+                            </span>
+                          </td>
+                        )}
+                        <td className="px-3 py-2 text-right tabular-nums">{days}日</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{fmt(total)}</td>
+                        <td
+                          className={`px-3 py-2 text-right tabular-nums ${pending > 0 ? "font-bold text-[#a15c00]" : ""}`}
+                        >
+                          {pending}日
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right">
+                          <Link
+                            href={`${MODULES.daily.href}?factory=${encodeURIComponent(f)}`}
+                            className="text-xs text-[#b4632c] underline"
+                          >
+                            日次記録
+                          </Link>
+                          <Link
+                            href={`${MODULES.summary.href}?ym=${ym}&factory=${encodeURIComponent(f)}`}
+                            className="ml-3 text-xs text-[#b4632c] underline"
+                          >
+                            月間集計
+                          </Link>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                {status.factories.length > 1 && (
+                  <tfoot className="bg-[#fafaf8] text-xs">
+                    <tr>
+                      <td className="px-3 py-2 font-medium text-[#555555]">合計</td>
+                      {isThisMonth && <td />}
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {new Set(recorded.map((r) => `${r.factory}|${r.recordDate}`)).size}日
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {fmt(recorded.reduce((t, r) => t + r.total, 0))}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {Object.values(status.pending).reduce((t, n) => t + n, 0)}日
+                      </td>
+                      <td />
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          )}
+          <h3 className="mb-1.5 mt-4 text-xs font-bold text-[#707070]">最近の日次記録</h3>
+          {recent.length === 0 ? (
+            <p className="rounded-lg bg-[#f7f7f5] px-3 py-3 text-sm text-[#707070]">
+              {ymLabel}の記録はまだありません。
+              <Link href={MODULES.daily.href} className="ml-1 text-[#b4632c] underline">
+                日次記録をつける
+              </Link>
+            </p>
+          ) : (
+            <ul className="divide-y divide-[#eeeeee] rounded-xl border border-[#eeeeee]">
+              {recent.map((r) => (
+                <li key={`${r.recordDate}|${r.factory}`}>
+                  <Link
+                    href={`/daily?date=${r.recordDate}&factory=${encodeURIComponent(r.factory)}`}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-sm hover:bg-[#faf6ef]"
+                  >
+                    <span className="tabular-nums text-[#333333]">{r.recordDate}</span>
+                    <span className="text-[#707070]">{r.factory}</span>
+                    <span className="grow text-right tabular-nums text-[#333333]">{fmt(r.total)} kg</span>
+                    <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${statusClass(r.status)}`}>
+                      {DAILY_STATUS_LABEL[r.status]}
+                    </span>
+                  </Link>
+                </li>
               ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+            </ul>
+          )}
+        </section>
+      )}
+
+      {/* 機能（目的ごと） */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {MODULE_GROUPS.map((g) => {
+          const mods = g.keys.map((k) => MODULES[k]).filter((m) => usable(m, canOperate, isAdmin));
+          if (mods.length === 0) return null;
+          return (
+            <section key={g.title} className="rounded-2xl border border-[#e5e5e5] bg-white p-4">
+              <div className="mb-3 flex items-baseline gap-2">
+                <h2 className="text-sm font-bold text-[#333333]">{g.title}</h2>
+                <p className="text-[11px] text-[#909090]">{g.note}</p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {mods.map((m) => (
+                  <ModuleCard key={m.key} m={m} />
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
     </div>
+  );
+}
+
+function ModuleCard({ m }: { m: AppModule }) {
+  const Icon = m.icon;
+  return (
+    <Link
+      href={m.href}
+      className="flex flex-col rounded-xl border border-[#eeeeee] p-3 transition hover:border-[#b4632c] hover:shadow-sm"
+    >
+      <div className="mb-1.5 flex items-center gap-2">
+        <Icon className="h-5 w-5 shrink-0 text-[#b4632c]" />
+        <h3 className="text-sm font-bold text-[#333333]">{m.title}</h3>
+      </div>
+      <p className="mb-2 text-xs leading-5 text-[#707070]">{m.lead}</p>
+      {m.points.length > 0 && (
+        <ul className="mb-3 list-disc space-y-0.5 pl-4 text-[11px] leading-4 text-[#909090]">
+          {m.points.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
+      )}
+      <span className="mt-auto inline-flex w-fit items-center gap-1 text-xs font-bold text-[#b4632c]">
+        {m.cta}
+        <ChevronRight className="h-3.5 w-3.5" />
+      </span>
+    </Link>
   );
 }

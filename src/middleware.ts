@@ -17,10 +17,17 @@ export function middleware() {
 export const config = {
   matcher: [
     "/",
+    "/dashboard",
     "/daily",
+    "/daily/import",
+    "/bags",
+    "/shipments",
     "/summary",
     "/first",
+    "/first-list",
+    "/quality",
     "/guide",
+    "/guide/print",
     "/items",
     "/scales",
     "/mcframe",

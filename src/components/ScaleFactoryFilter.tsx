@@ -2,7 +2,10 @@
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-/** 重量計マスターの工場絞り込み。URL の ?factory= を書き換える。 */
+/**
+ * 重量計マスターの工場絞り込み。URL の ?factory= を書き換える。
+ * 所属工場の人・上部のバーで工場を選んだ人は、その工場に固定して表示だけにする。
+ */
 export default function ScaleFactoryFilter({
   factory,
   factoryOptions,
@@ -10,7 +13,7 @@ export default function ScaleFactoryFilter({
 }: {
   factory: string;
   factoryOptions: string[];
-  /** 所属工場が設定された人は自工場に固定（選び直せない） */
+  /** 所属工場・上部で選んだ工場に固定（ここでは選び直せない） */
   factoryLocked: boolean;
 }) {
   const router = useRouter();

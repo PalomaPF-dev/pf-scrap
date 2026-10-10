@@ -4,10 +4,10 @@ import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Upload } from "lucide-react";
 import { importItemsAction } from "@/lib/actions";
-import { parseCsv, readTextFile } from "@/lib/csv";
+import { readSheetRows } from "@/lib/csv";
 
 /**
- * 品目マスターのCSV取込。1行目に見出しがあれば列順は自由
+ * 品目マスターの取込（Excelブック(.xlsx)・CSVのどちらでもよい）。1行目に見出しがあれば列順は自由
  * （見出し例: 品目CD, 格納場所CD, 格納場所名, 品名, 区分, 親図番, 親品名, 子図番, 子品名,
  *   単位, 構成重量, 完成重量(理論), 製造場所CD, 製造場所名, 工場）。
  * 品目は「品目CD × 格納場所CD」の組で識別する。格納場所CDが無いCSV（旧様式）は
@@ -39,9 +39,15 @@ export default function ItemImportButton() {
 
   async function onFile(file: File) {
     setMessage("");
-    const rows = parseCsv(await readTextFile(file));
+    let rows: string[][];
+    try {
+      rows = await readSheetRows(file);
+    } catch (e) {
+      setMessage((e as Error).message || "ファイルを読み取れませんでした。");
+      return;
+    }
     if (rows.length === 0) {
-      setMessage("CSVが空です。");
+      setMessage("ファイルが空です。");
       return;
     }
     // ヘッダー行から列位置を判定（日本語名 or 英語キー）。判定不可なら列順を仮定
@@ -82,12 +88,12 @@ export default function ItemImportButton() {
         className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5] disabled:opacity-50"
       >
         <Upload className="h-4 w-4" />
-        {pending ? "取込中…" : "CSV取込"}
+        {pending ? "取込中…" : "Excel/CSV取込"}
       </button>
       <input
         ref={fileRef}
         type="file"
-        accept=".csv"
+        accept=".xlsx,.xlsm,.csv,.txt"
         hidden
         onChange={(e) => {
           const f = e.target.files?.[0];

@@ -4,7 +4,9 @@ import "./globals.css";
 import Providers from "@/components/Providers";
 import AppShell from "@/components/AppShell";
 import { loadSidebarUser } from "@/lib/sidebarUser";
-import { canUseOperations, getOptionalSession } from "@/lib/session";
+import { getOptionalSession } from "@/lib/session";
+import { loadGuideAudience } from "@/lib/guideAudience";
+import type { GuideAudience } from "@/lib/guideMap";
 
 /**
  * 本文フォント。OS標準任せだと Mac=ヒラギノ / Windows=メイリオ で見え方が変わるため、
@@ -40,21 +42,23 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const user = await loadSidebarUser();
   // マスタ・取込・調達入力のタブを出すかどうか（生産管理部・調達部のメンバーと管理者）。
   // 部署はJWTに載せずDBから読むので、ポータルで異動を反映したら次の描画で効く。
+  // 同じ判定で、作業しながら見るガイドに出すスライドも決める（使い方ページと同じ規則）。
   const sess = await getOptionalSession();
-  const canOperate = sess
-    ? await canUseOperations({
+  const guideAudience: GuideAudience = sess
+    ? await loadGuideAudience({
         companyId: sess.companyId,
         userId: sess.id,
         role: sess.role ?? "admin",
         isDemo: Boolean(sess.isDemo),
       })
-    : false;
+    : { canOperate: false, isAdmin: false, useShipments: false };
+  const canOperate = guideAudience.canOperate;
 
   return (
     <html lang="ja" className={notoSansJP.variable}>
       <body className="antialiased">
         <Providers>
-          <AppShell user={user} canOperate={canOperate}>
+          <AppShell user={user} canOperate={canOperate} guideAudience={guideAudience}>
             {children}
           </AppShell>
         </Providers>

@@ -1,4 +1,4 @@
-import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
+import { requireOperationsPage, getFactoryView } from "@/lib/session";
 import { listScales, type Scale } from "@/lib/db";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
@@ -14,7 +14,8 @@ export default async function ScaleLabelsPage({
 }) {
   const session = await requireOperationsPage();
   const sp = await searchParams;
-  const restriction = await getFactoryRestriction(session);
+  // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定
+  const restriction = await getFactoryView(session);
   const factoryLocked = restriction.restricted;
   const factory = factoryLocked ? restriction.factory! : (sp.factory ?? "").trim();
 

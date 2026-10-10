@@ -28,10 +28,12 @@ let schemaReady: Promise<void> | null = null;
  * - scrap_items           … 品目マスター（品目CD×格納場所CDで識別、子図番、構成/完成重量）
  * - scrap_daily_records   … 日次記録票（日付×工場で1枚）
  * - scrap_daily_entries   … 日中記録の明細（発生のたびに1行）
+ * - scrap_bags            … スクラップ袋（交換までを1区切り。明細の親）
+ * - scrap_bag_starts      … 袋運用の開始日（工場ごと。これより前は日単位の管理）
  * - scrap_first_articles  … 初品の実測完成品重量
  * - scrap_mcframe_qty     … McFrame取込の完成品数量（年月×品目CD×格納場所CD）
  * - scrap_monthly_inputs  … 月初在庫・購入重量・スクラップ売却数量（年月で1行）
- * - portal_factories / portal_workplaces … ポータル配信の工場・職場マスタ（入力候補）
+ * - portal_factories / portal_workplaces … 工場・職場マスタ（ポータル配信＋手動追加。使う/使わないを持つ）
  *
  * 認証テーブル（companies/users）も同時に用意する。
  * 同一プロセス内の同時呼び出しは1回の実行に集約（共有プロミス）。失敗時は次回再試行できるよう解除。
@@ -83,6 +85,10 @@ async function buildSchema(): Promise<void> {
     )`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_company_idx ON scrap_items(company_id)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_ko_zuban_idx ON scrap_items(company_id, ko_zuban)`);
+  // McFrameの製造実績取込で自動登録した品目の目印。
+  // 実績には品名と場所しか無く、構成重量・完成重量(理論)は入らないため、
+  // 後から本物の品目マスターを取り込んだらこの行は消す（重量0の行が残ると完成重量が0になる）。
+  await safeDdl(() => sql`ALTER TABLE scrap_items ADD COLUMN IF NOT EXISTS auto_added BOOLEAN NOT NULL DEFAULT false`);
 
   // スクラップ種類マスター（上銅 / 銅ダライ / 銅スクラップ …）。
   // 種類は現場の運用で増えるため、定数ではなく設定で足せるようにする。
@@ -180,7 +186,8 @@ async function buildSchema(): Promise<void> {
   //   スクラップ重量 = 投入前重量(箱含む) − 箱重量(空き箱)
   // を自動計算する。スクラップ箱は常時重量計の上にあるため、累積表示値
   // （投入前 cum_before / 投入後 cum_after）も記録し、差分との整合を確認する。
-  // hinshu 列には箱の種類（上銅/銅ダライ）を入れる。busho/kikai/kotei は旧様式の名残（新規入力では未使用）。
+  // hinshu 列には箱の種類（上銅/銅ダライ）を入れる。kikai/kotei は旧様式の名残（新規入力では未使用）。
+  // busho は「どの職場のスクラップか」（2026-09〜 新規入力でも使う。紙の記録票の「部署」欄と同じ意味）。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS scale_id UUID`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS scale_name TEXT NOT NULL DEFAULT ''`);
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS gross_weight NUMERIC`);
@@ -190,6 +197,9 @@ async function buildSchema(): Promise<void> {
   // 累積値の連携（2026-08）: 投入前の累積は「朝礼後の累積値」または同じ箱の直前の
   // 投入後累積が自動で入る。そのままでは編集できず、訂正するときだけ理由を残す。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_before_reason TEXT NOT NULL DEFAULT ''`);
+  // Excel（紙様式）からの取込（2026-09）: 記録票の「品種」（銅条・パイプ等の材質）。
+  // hinshu は箱の種類に使っているため別の列に持つ。部署・機械・工程は既存の列をそのまま使う。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS zairyo TEXT NOT NULL DEFAULT ''`);
   // 箱（重量計）ごとの朝礼後の累積値。{ "<scale_id>": 123.4 } 形式。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_records ADD COLUMN IF NOT EXISTS kaishi_cum JSONB NOT NULL DEFAULT '{}'::jsonb`);
 
@@ -199,6 +209,77 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after_read_id UUID`);
   // 投入後の累積も訂正できるようにする（投入前と同じく、変えたときだけ理由が入る）。
   await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS cum_after_reason TEXT NOT NULL DEFAULT ''`);
+
+  // ===== スクラップ袋（2026-08） =====
+  // 現場は総重量計に鉄カゴを載せ、その中の袋へ投入する。袋は破損防止のため
+  // 700〜800kg で交換し、交換すると（新しいカゴを載せて風袋引きするため）表示値は
+  // 0 に戻る。現場・記入用紙・引き取りの区切りはこの「袋」で、1日に何度も変わり、
+  // 夜勤帯の投入で翌日まで続くこともある。
+  //
+  // 日次記録票（日付×工場で1枚）はそのまま残し、明細の親として袋を持たせる。
+  // 重量はこれまでどおり明細から積み上げるので、束ね方が2通りになるだけ:
+  //   日合計   = その日の明細の合計（従来と変わらない）
+  //   袋の重量 = 締めの表示値 close_cum（風袋引きした 0 から積んだ値）
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_bags (
+      id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id        UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      factory           TEXT NOT NULL DEFAULT '',
+      -- 重量計マスターから消えても袋の記録は残す（あえて外部キーにしない）
+      scale_id          UUID,
+      scale_name        TEXT NOT NULL DEFAULT '',
+      kind              TEXT NOT NULL DEFAULT '',
+      -- 袋No。現場の記入用紙と同じ「日付 + その日の順番」。重量は締めたときに決まる
+      bag_no            TEXT NOT NULL DEFAULT '',
+      seq               INTEGER NOT NULL DEFAULT 1,
+      opened_on         DATE NOT NULL,
+      opened_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      opened_by         TEXT NOT NULL DEFAULT '',
+      -- 開始の表示値。風袋引きして 0 を確認してから投入するので通常は 0。
+      -- 使いかけの袋から記録を始めるときだけ、その時点の表示値が入る
+      start_cum         NUMERIC NOT NULL DEFAULT 0,
+      closed_on         DATE,
+      closed_at         TIMESTAMPTZ,
+      closed_by         TEXT NOT NULL DEFAULT '',
+      -- 交換直前（カゴを降ろす前）の表示値。「この袋は◯◯kgでした」の◯◯
+      close_cum         NUMERIC,
+      close_cum_read_id UUID,
+      close_cum_reason  TEXT NOT NULL DEFAULT '',
+      -- 締めた時点の明細合計。close_cum − start_cum との差が記録漏れ・読み違い
+      total_weight      NUMERIC,
+      -- open(記録中) → closed(締め済み・承認待ち) → approved(承認済み)
+      status            TEXT NOT NULL DEFAULT 'open',
+      approved_by       TEXT NOT NULL DEFAULT '',
+      approved_at       TIMESTAMPTZ,
+      note              TEXT NOT NULL DEFAULT '',
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_bags_company_idx ON scrap_bags(company_id, factory, opened_on DESC)`);
+  // 1台の重量計に「記録中」の袋は同時に1つだけ。二重に開くのは DB で防ぐ
+  // （2端末から同時に開始を押しても、あとから届いた側がエラーになる）。
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_bags_open_uidx ON scrap_bags(company_id, scale_id) WHERE status = 'open'`);
+  // 明細がどの袋に入ったか。導入前の明細は NULL のまま＝「袋管理より前の記録」
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS bag_id UUID`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_daily_entries_bag_idx ON scrap_daily_entries(bag_id)`);
+  // 交換の目安 kg。超えても記録は止めず、注意表示だけ出す（未入力は既定値を使う）
+  await safeDdl(() => sql`ALTER TABLE scrap_scales ADD COLUMN IF NOT EXISTS bag_target_kg NUMERIC`);
+
+  // 袋運用の開始日（工場ごと）。この日から「袋単位」で管理し、それより前は
+  // 従来どおり日単位の記録として扱う（袋の操作は出さない・過去日に袋を作らせない）。
+  // 未設定でも、その工場で最初に袋を開いた日から袋運用とみなす（データから推定）。
+  // 設定はその推定を上書きするためのもの。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_bag_starts (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      factory    TEXT NOT NULL,
+      start_on   DATE NOT NULL,
+      updated_by TEXT NOT NULL DEFAULT '',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, factory)
+    )`);
+
 
   // AI読取のログ。**追記のみ**で、書き込むのはサーバー（/api/scale-read）だけ。
   // クライアントからは更新も削除もできないため、「AIはこう読んだ」という事実が残る。
@@ -243,6 +324,9 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS approved_by TEXT NOT NULL DEFAULT ''`);
   await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`);
   await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS reject_comment TEXT NOT NULL DEFAULT ''`);
+  // 取込の由来メモ（例: 「Excel取込」「Excel取込・桁補正 0.175 → 0.0175」）。
+  // 桁を直した値は、元の記入値が分かるようにここへ残す。
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT ''`);
   // ワークフロー導入前の既存測定値は承認済みとして扱う（計算結果を変えない）
   {
     const applied = await sql`SELECT 1 FROM pf_scrap_migrations WHERE key = 'fa_status_backfill_v1' LIMIT 1`.catch(() => []);
@@ -336,6 +420,10 @@ async function buildSchema(): Promise<void> {
   await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_mcframe_days_ref_uidx ON scrap_mcframe_days(company_id, qdate, hinmoku_cd, kakuno_cd)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_items_hinmoku_idx ON scrap_items(company_id, kanri_zuban, kakuno_cd)`);
   await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_first_articles_ref_idx ON scrap_first_articles(company_id, hinmoku_cd, kakuno_cd, measured_on)`);
+  // 登録したときに画面で選んでいた工場（2026-09）。測定履歴はこれまで品目マスターの工場だけで
+  // 絞っていたため、マスター側の工場名が違う・マスターから消えた品目の記録が、どの工場の
+  // 履歴にも出ず承認できなくなっていた。既存の記録は空（＝品目マスターの工場で判定）。
+  await safeDdl(() => sql`ALTER TABLE scrap_first_articles ADD COLUMN IF NOT EXISTS factory TEXT NOT NULL DEFAULT ''`);
 
   // ⑤ 月次入力（年月×工場で1行）。区分別の月初在庫・購入重量と、スクラップ売却数量。
   // 工場別シート（大口/直方）の運用に合わせて工場単位で持ち、照合は全社合算/工場別を切り替える。
@@ -417,4 +505,62 @@ async function buildSchema(): Promise<void> {
       sort         INTEGER NOT NULL DEFAULT 0,
       UNIQUE (company_id, code)
     )`);
+
+  // 工場・職場を、このアプリで使うかどうか（2026-09）。
+  // ポータルは会社の全工場・全職場を配信してくるので、スクラップに関係の無い工場まで
+  // 候補に出ていた。配信分は消しても次の配信で戻るので「使わない（非表示）」にし、
+  // 手で追加したものだけ削除できるようにする。
+  //   source: portal … ポータル配信 / manual … 設定画面で追加 / data … 記録にだけ出てきた工場
+  await safeDdl(() => sql`ALTER TABLE portal_factories ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`);
+  await safeDdl(() => sql`ALTER TABLE portal_factories ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'portal'`);
+  await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`);
+  await safeDdl(() => sql`ALTER TABLE portal_workplaces ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'portal'`);
+
+  // ===== 工場間のプラ箱送付（2026-10） =====
+  // 本社工場・第二工場などはスクラップをプラ箱に入れて毎日大口工場へ送り、
+  // 大口のスクラップ箱で処理（投入・売却）する。送る側でプラ箱ごとに計量して出荷し、
+  // 大口でも投入前に量って突き合わせる。
+  //
+  // 送り先（どの工場がどこへ送るか）。送らない工場は行が無い＝自工場で処理。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_ship_routes (
+      company_id   UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      from_factory TEXT NOT NULL,
+      to_factory   TEXT NOT NULL,
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (company_id, from_factory)
+    )`);
+  // プラ箱1つ＝1行。box_no は箱に書く番号（例: 本社工場-1002-03）。
+  // 処理済みかどうかは持たない。日次記録の明細（shipment_id）から引く。
+  // 明細は保存のたびに入れ直すので、状態を別に持つと食い違うため。
+  await safeDdl(() => sql`
+    CREATE TABLE IF NOT EXISTS scrap_shipments (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id   UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      box_no       TEXT NOT NULL,
+      from_factory TEXT NOT NULL,
+      to_factory   TEXT NOT NULL,
+      ship_date    DATE NOT NULL,
+      hinshu       TEXT NOT NULL,
+      weight       NUMERIC NOT NULL,
+      shipped_by   TEXT NOT NULL DEFAULT '',
+      note         TEXT NOT NULL DEFAULT '',
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (company_id, box_no)
+    )`);
+  // 送る側は空のプラ箱を先に量っておき、プラ箱ごと量った総重量から差し引いて
+  // スクラップ重量（weight）を出す。両方残して、後から計算を確かめられるようにする。
+  // 2026-10 の導入直後に登録した分は NULL（weight だけ）。
+  await safeDdl(() => sql`ALTER TABLE scrap_shipments ADD COLUMN IF NOT EXISTS gross_weight NUMERIC`);
+  await safeDdl(() => sql`ALTER TABLE scrap_shipments ADD COLUMN IF NOT EXISTS tare_weight NUMERIC`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_to_idx ON scrap_shipments(company_id, to_factory, ship_date)`);
+  await safeDdl(() => sql`CREATE INDEX IF NOT EXISTS scrap_shipments_from_idx ON scrap_shipments(company_id, from_factory, ship_date)`);
+  // 明細の発生元工場（空＝記録した工場）と、処理したプラ箱。
+  // 1つのプラ箱を2回処理しないよう、プラ箱は明細1件にしか結べない。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS origin_factory TEXT NOT NULL DEFAULT ''`);
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS shipment_id UUID`);
+  // 受け入れ側で、スクラップ箱へ空けたあとに量ったプラ箱の重さ（2026-10）。
+  // 送る側はプラ箱ごと量って出荷するので、投入重量 ＋ これ ＝ 出荷重量 で突き合わせる。
+  await safeDdl(() => sql`ALTER TABLE scrap_daily_entries ADD COLUMN IF NOT EXISTS poly_tare NUMERIC`);
+  await safeDdl(() => sql`CREATE UNIQUE INDEX IF NOT EXISTS scrap_daily_entries_shipment_uidx ON scrap_daily_entries(shipment_id) WHERE shipment_id IS NOT NULL`);
 }

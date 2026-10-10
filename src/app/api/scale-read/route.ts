@@ -179,9 +179,38 @@ export async function POST(req: NextRequest) {
     );
   } catch (e) {
     console.error("[scale-read]", e);
-    return NextResponse.json(
-      { message: "読み取りに失敗しました。もう一度撮るか、手入力してください。" },
-      { status: 502 }
-    );
+    const { status, message } = describeAiError(e);
+    return NextResponse.json({ message }, { status });
   }
+}
+
+/**
+ * AI読取の失敗を、現場の人が次に何をすればよいか分かる文言に直す。
+ *
+ * 2026-09 に Anthropic API の利用上限に達し、読取が全件失敗したことがある。
+ * そのとき画面には「もう一度撮るか…」としか出ず、撮り直しても直らないので
+ * 現場が困った。撮り直しで直らない失敗は、はっきり「手入力で」と伝える。
+ */
+function describeAiError(e: unknown): { status: number; message: string } {
+  const status = typeof (e as { status?: unknown })?.status === "number" ? (e as { status: number }).status : 0;
+  const text = e instanceof Error ? e.message : String(e ?? "");
+  if (/usage limit/i.test(text) || /credit balance/i.test(text)) {
+    return {
+      status: 503,
+      message: "AI読取は利用上限に達しているため、いまは使えません。表示の数値を手入力してください（管理者へ連絡済みでなければお知らせください）。",
+    };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      status: 503,
+      message: "AI読取の設定に問題があり、いまは使えません。表示の数値を手入力し、管理者へお知らせください。",
+    };
+  }
+  if (status === 429 || status === 529 || /overloaded|rate.?limit/i.test(text)) {
+    return {
+      status: 503,
+      message: "AI読取が混み合っています。少し待ってから撮り直すか、表示の数値を手入力してください。",
+    };
+  }
+  return { status: 502, message: "読み取りに失敗しました。もう一度撮るか、表示の数値を手入力してください。" };
 }

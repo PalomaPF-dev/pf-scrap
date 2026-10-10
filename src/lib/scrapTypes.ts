@@ -134,9 +134,75 @@ export interface DailyEntry {
    */
   cumBeforeReadId: string | null;
   cumAfterReadId: string | null;
+  /**
+   * この投入が入った袋（scrap_bags.id）。袋管理より前の記録は null。
+   * 累積の引き継ぎ・「投入後 < 投入前」の判定は、この袋の中だけで行う
+   * （袋を交換すると表示値が 0 に戻るため、重量計ごとでは繋がらない）。
+   */
+  bagId: string | null;
   /** 記録者（ログインユーザーを自動記録） */
   kirokusha: string;
   ijo: string;
+  /**
+   * どの職場のスクラップか（紙の記録票の「部署」欄と同じ意味）。
+   * 画面から記録するときは職場を選んで入れる。Excelから取り込んだ行は部署欄の値。
+   */
+  busho: string;
+  /**
+   * 紙様式（Excel）から取り込んだ行だけが持つ発生元の情報。
+   * 新しい画面の入力では使わないが、取り込んだ記録を編集・再保存しても消えないよう持ち回る。
+   * 機械 / 品種（銅条・パイプ等の材質） / 工程。
+   */
+  kikai: string;
+  zairyo: string;
+  kotei: string;
+  /**
+   * 発生元の工場。空＝記録した工場のスクラップ。他工場からプラ箱で届いた分は
+   * 送ってきた工場名が入る（照合は発生元の工場で、売却・箱の記録は記録した工場で数える）。
+   */
+  originFactory?: string;
+  /** 処理したプラ箱（scrap_shipments.id）。他工場からの持ち込み分だけ */
+  shipmentId?: string | null;
+  /**
+   * 受け入れ側で、スクラップを空けたあとに量ったプラ箱の重さ kg。プラ箱を処理した行だけ。
+   * 投入重量（スクラップ）＋ プラ箱 ＝ 送った工場で量った重量（プラ箱込み）になるはず。
+   */
+  polyTare?: number | null;
+}
+
+/** 工場間で送るプラ箱1つ。送る側で計量して出荷し、受け入れ側で投入前に量って突き合わせる。 */
+export interface Shipment {
+  id: string;
+  /** 箱に書く番号（例: 本社工場-1002-03） */
+  boxNo: string;
+  fromFactory: string;
+  toFactory: string;
+  /** 出荷日（送る側の記録日） */
+  shipDate: string;
+  /** スクラップの種類（プラ箱ごとに分けて送る） */
+  hinshu: string;
+  /**
+   * 出荷重量 kg。送る側はプラ箱ごと量るので、ふつうはプラ箱込みの重さ（＝ grossWeight）。
+   * 2026-10-02〜04 の試行版で登録した分だけ、送る側で出したスクラップ重量が入っている。
+   */
+  weight: number;
+  /** プラ箱ごと量った重さ kg（出荷重量）。導入直後の登録分は null */
+  grossWeight: number | null;
+  /** 送る側で量ったプラ箱の重さ kg。試行版の登録分だけ。いまは受け入れ側で量る */
+  tareWeight: number | null;
+  shippedBy: string;
+  note: string;
+  /** 受け入れ側で処理した記録。未処理なら null */
+  received: {
+    /** 処理日（受け入れ側の日次記録の日付） */
+    date: string;
+    /** 受け入れ側で量った重量（スクラップ箱への投入重量）kg */
+    weight: number;
+    /** 受け入れ側で、空けたあとに量ったプラ箱の重さ kg。未入力は null */
+    polyTare: number | null;
+    scaleName: string;
+    kirokusha: string;
+  } | null;
 }
 
 export interface DailyRecord {
@@ -165,6 +231,86 @@ export interface DailyRecord {
   entries: DailyEntry[];
 }
 
+/**
+ * スクラップ袋の状態。
+ *   open     … 記録中（この袋に投入している）
+ *   closed   … 締め済み（カゴから外した。承認待ち）
+ *   approved … 承認済み（管理者が締めの数字を確認した）
+ */
+export type BagStatus = "open" | "closed" | "approved";
+
+export const BAG_STATUS_LABEL: Record<BagStatus, string> = {
+  open: "記録中",
+  closed: "締め済み（承認待ち）",
+  approved: "承認済み",
+};
+
+/**
+ * 袋を交換する目安の重量 kg。破損防止のため 700〜800kg で交換する運用。
+ * 超えても記録は止めない（未満での交換もあるため）。重量計ごとに
+ * bagTargetKg が登録されていればそちらを使う。
+ */
+export const BAG_TARGET_KG = 800;
+
+/**
+ * スクラップ袋（鉄カゴにセットする袋）。交換までが1区切りで、記入用紙・Excelの
+ * 1枚に対応する。1日に何度も交換され、夜勤帯の投入で翌日まで続くこともあるため、
+ * 日付ではなく「開いてから締めるまで」で管理する。
+ */
+export interface ScrapBag {
+  id: string;
+  factory: string;
+  /** 載せている重量計（総重量計）。マスター削除後も表示できるよう名称も持つ */
+  scaleId: string | null;
+  scaleName: string;
+  kind: string;
+  /** 袋No（開始日 + その日の順番。例 20260831-2）。記入用紙・引き取りの突き合わせに使う */
+  bagNo: string;
+  seq: number;
+  openedOn: string;
+  openedAt: string | null;
+  openedBy: string;
+  /** 開始の表示値 kg。風袋引きして 0 を確認してから始めるので通常は 0 */
+  startCum: number;
+  closedOn: string | null;
+  closedAt: string | null;
+  closedBy: string;
+  /** 交換直前の表示値 kg。「この袋は◯◯kgでした」の◯◯ */
+  closeCum: number | null;
+  closeCumReason: string;
+  closeCumReadId: string | null;
+  /** 締めた時点の明細合計 kg（締めるまでは null） */
+  totalWeight: number | null;
+  status: BagStatus;
+  approvedBy: string;
+  approvedAt: string | null;
+  note: string;
+  /** 集計（保存済みの明細から都度計算）: この袋に記録された合計・件数・最後の投入後 */
+  runningTotal: number;
+  entryCount: number;
+  lastCum: number | null;
+}
+
+/**
+ * 袋の重量（＝現場が紙に書く「この袋は◯◯kg」）。締めの表示値から開始値を引く。
+ * 通常は開始が 0 なので締めの表示値そのもの。締める前は null。
+ */
+export function bagWeight(b: ScrapBag): number | null {
+  if (b.closeCum === null) return null;
+  return Math.round((b.closeCum - b.startCum) * 1000) / 1000;
+}
+
+/**
+ * 袋の重量と、アプリに記録された明細合計の差 kg。
+ * 0 でなければ、記録していない投入・読み取りの誤り・他部署の投入のいずれか。
+ */
+export function bagGap(b: ScrapBag): number | null {
+  const w = bagWeight(b);
+  if (w === null) return null;
+  const total = b.totalWeight ?? b.runningTotal;
+  return Math.round((w - total) * 1000) / 1000;
+}
+
 /** 初品測定の承認状態（登録と同時に申請＝pending。承認済みのみ計算に採用）。 */
 export type FaStatus = "pending" | "approved" | "rejected";
 
@@ -184,6 +330,10 @@ export interface FirstArticle {
   status: FaStatus;
   approvedBy: string;
   rejectComment: string;
+  /** 取込の由来メモ（Excel取込・桁補正の記録）。手入力は空 */
+  note: string;
+  /** 登録したときに選んでいた工場。取込分・2026-09以前の記録は空 */
+  factory: string;
   /** 品目マスターの表示用（品名・理論値）。未登録は null */
   hinmei: string | null;
   kanseiJuryo: number | null;
@@ -210,6 +360,11 @@ export interface Scale {
    * AIへの指示と、読み取り値の刻みの検証に使う。未登録は null。
    */
   division: number | null;
+  /**
+   * 袋を交換する目安 kg。未登録は BAG_TARGET_KG を使う。
+   * 超えても記録は止めず、注意表示だけ出す。
+   */
+  bagTargetKg: number | null;
 }
 
 /** AI読取の確信度。low は採用せず、必ず手入力に落とす。 */
@@ -229,4 +384,45 @@ export interface ScaleReadResponse {
 export interface ScalePhotoResult extends ScaleReadResponse {
   /** 同じ写真から読めたQRコード。読めなければ空 */
   qr: string;
+}
+
+/**
+ * 送る側と受け入れ側の、突き合わせる重さの組。未処理は null。
+ *
+ * 送る側はプラ箱ごと量って出荷し、受け入れ側はスクラップ箱へ空けた重量（投入重量）と、
+ * 空になったプラ箱の重さを量る。投入重量 ＋ プラ箱 ＝ 出荷重量（プラ箱込み）になるはず。
+ * 受け入れ側のプラ箱の重さが無い記録（試行版の登録分）は、スクラップ重量どうしで比べる。
+ */
+export function shipmentPair(sh: Shipment): { sent: number; received: number; withBox: boolean } | null {
+  if (!sh.received) return null;
+  if (sh.received.polyTare !== null && sh.grossWeight !== null) {
+    return {
+      sent: sh.grossWeight,
+      received: Math.round((sh.received.weight + sh.received.polyTare) * 1000) / 1000,
+      withBox: true,
+    };
+  }
+  return { sent: sh.weight, received: sh.received.weight, withBox: false };
+}
+
+/**
+ * プラ箱の重量差（受け入れ側 − 送る側）。未処理は null。
+ * 両方で量っているので、差が大きければ量り間違い・取り違え・こぼれを疑う。
+ */
+export function shipmentGap(sh: Shipment): number | null {
+  const p = shipmentPair(sh);
+  if (!p) return null;
+  return Math.round((p.received - p.sent) * 1000) / 1000;
+}
+
+/** 差が「要確認」か。1kg 未満の差は量りのばらつきとして扱い、それ以上は重量の3%を超えたら要確認。 */
+export function shipmentGapLarge(sh: Shipment): boolean {
+  const p = shipmentPair(sh);
+  if (!p) return false;
+  return Math.abs(p.received - p.sent) > Math.max(1, p.sent * 0.03);
+}
+
+/** 受け入れ側でプラ箱の重さを量る必要がある箱か（送る側がプラ箱込みだけを量った箱）。 */
+export function shipmentNeedsPolyTare(sh: Shipment): boolean {
+  return sh.tareWeight === null && sh.grossWeight !== null;
 }

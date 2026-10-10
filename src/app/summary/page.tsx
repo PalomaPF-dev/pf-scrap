@@ -1,15 +1,18 @@
 import { FileDown, ClipboardList } from "lucide-react";
-import { requireEntitledSession, getFactoryRestriction } from "@/lib/session";
+import { requireEntitledSession, getFactoryView } from "@/lib/session";
 import {
   DAILY_STATUS_LABEL,
+  getBagStart,
   listDailyAgg,
   listFactoryOptions,
   listScrapKinds,
+  listWorkplaceAgg,
+  type WorkplaceAggRow,
   type DailyAggRow,
   type ScrapKind,
 } from "@/lib/db";
 import { kindColor } from "@/lib/scrapTypes";
-import { fmt, fmtPct, isYmStr, thisMonthStr } from "@/lib/format";
+import { fmt, fmtPct, isYmStr, thisMonthStr, todayStr } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import DbErrorState from "@/components/DbErrorState";
 import MonthNav from "@/components/MonthNav";
@@ -52,18 +55,28 @@ export default async function SummaryPage({
   let factory: string;
   let agg: DailyAggRow[];
   let kinds: ScrapKind[];
+  let wpAgg: WorkplaceAggRow[];
+  const bagStartByFactory: Record<string, string> = {};
   try {
-    const restriction = await getFactoryRestriction(session);
-    // 所属工場ユーザーは自工場に固定（URLで他工場を指定されてもサーバー側で無視）
+    const restriction = await getFactoryView(session);
+    // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定（URLで他工場を指定されてもサーバー側で無視）
     factoryLocked = restriction.restricted;
     factoryOptions = restriction.restricted
       ? [restriction.factory!]
       : await listFactoryOptions(session.companyId);
     factory = restriction.restricted ? restriction.factory! : (sp.factory ?? "").trim();
-    [agg, kinds] = await Promise.all([
+    [agg, kinds, wpAgg] = await Promise.all([
       listDailyAgg(session.companyId, ym, factory || null),
       listScrapKinds(session.companyId),
+      // どの職場のスクラップか（明細の職場＝紙の記録票の「部署」欄）
+      listWorkplaceAgg(session.companyId, ym, factory || null),
     ]);
+    // 袋運用の開始日は工場ごと。これより前の日は「日単位の管理」として区別して出す。
+    const targets = factory ? [factory] : [...new Set(agg.map((r) => r.factory))];
+    for (const f of targets) {
+      const st = await getBagStart(session.companyId, f);
+      bagStartByFactory[f] = st.startOn ?? todayStr();
+    }
   } catch (e) {
     console.error("[summary]", e);
     return (
@@ -88,8 +101,23 @@ export default async function SummaryPage({
   // 種類で絞ったときは、その種類の重量だけを見る（回収箱測定値は箱ごと＝種類混在なので突合しない）
   const shownKinds = kind ? [kind] : kindNames;
   const rows = agg
-    .map((r) => ({ ...r, shownTotal: kind ? (r.byKind[kind] ?? 0) : r.total }))
+    .map((r) => ({
+      ...r,
+      shownTotal: kind ? (r.byKind[kind] ?? 0) : r.total,
+      // 袋単位で管理している期間か（工場ごとの開始日以降か）
+      bagEra: r.recordDate >= (bagStartByFactory[r.factory] ?? todayStr()),
+    }))
     .filter((r) => !kind || r.shownTotal !== 0);
+
+  // 袋運用と、それ以前（日単位）の内訳。切替をまたぐ月だけ意味があるので、
+  // 両方が混ざっている月にだけ出す。
+  const eraRows = rows.filter((r) => r.bagEra);
+  const preRows = rows.filter((r) => !r.bagEra);
+  const showEraSplit = eraRows.length > 0 && preRows.length > 0;
+  const eraTotal = eraRows.reduce((t, r) => t + r.shownTotal, 0);
+  const preTotal = preRows.reduce((t, r) => t + r.shownTotal, 0);
+  // 袋運用なのに袋に紐づいていない投入がある日（袋の開き忘れ）
+  const noBagDays = eraRows.filter((r) => r.noBagCount > 0);
 
   const byKindTotal = Object.fromEntries(
     kindNames.map((n) => [n, rows.reduce((t, r) => t + (r.byKind[n] ?? 0), 0)])
@@ -112,8 +140,20 @@ export default async function SummaryPage({
   });
 
   // 表の列数（データ無しの行・合計行の colSpan 用）
-  const cols = 3 + shownKinds.length + (kind ? 0 : 4) + 1 + (isAdmin ? 1 : 0);
+  const cols = 4 + shownKinds.length + (kind ? 0 : 4) + 1 + (isAdmin ? 1 : 0);
   const restCols = (kind ? 1 : 4) + (isAdmin ? 1 : 0);
+
+  // 職場別。種類で絞っているときは、その種類の重量だけを見る。
+  // 職場が1件も入っていない月は出さない（入力していない工場で空の表を見せない）。
+  const wpRows = wpAgg
+    .map((r) => ({ ...r, shown: kind ? (r.byKind[kind] ?? 0) : r.total }))
+    .filter((r) => !kind || r.shown !== 0);
+  const showWorkplace = wpRows.some((r) => r.workplace !== "");
+  const wpTotal = wpRows.reduce((t, r) => t + r.shown, 0);
+  const wpExportHref =
+    `/api/export?type=workplaces&ym=${ym}` +
+    (factory ? `&factory=${encodeURIComponent(factory)}` : "") +
+    (kind ? `&kind=${encodeURIComponent(kind)}` : "");
 
   const exportHref =
     `/api/export?type=daily&ym=${ym}` +
@@ -184,6 +224,35 @@ export default async function SummaryPage({
         </div>
       </section>
 
+      {/* 袋運用とそれ以前の内訳（切替をまたぐ月だけ） */}
+      {(showEraSplit || noBagDays.length > 0) && (
+        <section className="mt-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+          <h2 className="mb-1 text-sm font-bold text-[#333333]">袋単位の管理との境目</h2>
+          <p className="mb-3 text-xs text-[#909090]">
+            合計は境目に関係なく明細から積み上げています（日別・月別の数字は変わりません）。
+            分けて見たいときのために、内訳を出しています。
+          </p>
+          {showEraSplit && (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-xl bg-[#faf6ef] px-3 py-2.5">
+                <div className="text-xs text-[#707070]">袋単位（{eraRows.length}日分）</div>
+                <div className="text-lg font-bold tabular-nums">{fmt(eraTotal)} kg</div>
+              </div>
+              <div className="rounded-xl bg-[#f7f7f5] px-3 py-2.5">
+                <div className="text-xs text-[#707070]">袋管理前（{preRows.length}日分）</div>
+                <div className="text-lg font-bold tabular-nums">{fmt(preTotal)} kg</div>
+              </div>
+            </div>
+          )}
+          {noBagDays.length > 0 && (
+            <p className="mt-3 rounded-lg bg-[#fdecea] px-3 py-2 text-sm text-[#dc000c]">
+              袋単位の期間なのに、袋に紐づいていない投入がある日が {noBagDays.length} 日あります（
+              {noBagDays.map((r) => r.recordDate).join("・")}）。袋を開く前に記録した分です。
+            </p>
+          )}
+        </section>
+      )}
+
       {/* 工場別の内訳（全工場を見ているときだけ） */}
       {showFactoryBreakdown && (
         <section className="mt-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
@@ -238,6 +307,76 @@ export default async function SummaryPage({
         </section>
       )}
 
+      {/* 職場別（どの職場からスクラップが出たか） */}
+      {showWorkplace && (
+        <section className="mt-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-bold text-[#333333]">職場別</h2>
+              <p className="mt-0.5 text-xs text-[#909090]">
+                どの職場から出たスクラップか。紙の記録票から取り込んだ分は「部署」欄の値です。
+              </p>
+            </div>
+            <a
+              href={wpExportHref}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 text-xs font-medium text-[#555555] hover:bg-[#f7f7f5]"
+            >
+              <FileDown className="h-4 w-4" />
+              職場別CSV
+            </a>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="print-table w-full border-collapse text-sm">
+              <thead>
+                <tr>
+                  {!factory && <th className={th}>工場</th>}
+                  <th className={th}>職場</th>
+                  <th className={thNum}>件数</th>
+                  {shownKinds.map((n) => (
+                    <th key={n} className={thNum}>
+                      {n}(kg)
+                    </th>
+                  ))}
+                  {!kind && <th className={thNum}>合計(kg)</th>}
+                  <th className={thNum}>割合</th>
+                </tr>
+              </thead>
+              <tbody>
+                {wpRows.map((r) => (
+                  <tr key={`${r.factory}|${r.workplace}`}>
+                    {!factory && <td className={td}>{r.factory}</td>}
+                    <td className={`${td} ${r.workplace ? "" : "text-[#909090]"}`}>
+                      {r.workplace || "（職場の入力なし）"}
+                    </td>
+                    <td className={tdNum}>{r.count}</td>
+                    {shownKinds.map((n) => (
+                      <td key={n} className={tdNum}>
+                        {fmt(r.byKind[n] ?? 0)}
+                      </td>
+                    ))}
+                    {!kind && <td className={`${tdNum} font-semibold`}>{fmt(r.total)}</td>}
+                    <td className={tdNum}>{fmtPct(wpTotal > 0 ? r.shown / wpTotal : null)}</td>
+                  </tr>
+                ))}
+                <tr className="bg-[#faf6ef] font-semibold">
+                  <td className={td} colSpan={factory ? 1 : 2}>
+                    合計
+                  </td>
+                  <td className={tdNum}>{wpRows.reduce((t, r) => t + r.count, 0)}</td>
+                  {shownKinds.map((n) => (
+                    <td key={n} className={tdNum}>
+                      {fmt(wpRows.reduce((t, r) => t + (r.byKind[n] ?? 0), 0))}
+                    </td>
+                  ))}
+                  {!kind && <td className={tdNum}>{fmt(wpTotal)}</td>}
+                  <td className={tdNum}></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {/* 日別 */}
       <section className="mt-4 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
         <h2 className="mb-1 text-sm font-bold text-[#333333]">日別</h2>
@@ -267,6 +406,12 @@ export default async function SummaryPage({
                       .map((n) => `${n} ${fmt(r.byKind[n] ?? 0)}`)
                       .join(" ／ ") || "記録なし"}
                   </span>
+                  <span className="mt-0.5 block text-xs text-[#909090]">
+                    {r.bagEra ? `袋 ${r.bagCount}件` : "袋管理前（日単位）"}
+                    {r.bagEra && r.noBagCount > 0 && (
+                      <span className="ml-1 text-[#dc000c]">袋なし{r.noBagCount}</span>
+                    )}
+                  </span>
                 </span>
                 <span className="shrink-0 text-right">
                   <span className="block text-lg font-bold tabular-nums">{fmt(r.shownTotal)}</span>
@@ -294,6 +439,7 @@ export default async function SummaryPage({
                 <th className={th}>日付</th>
                 <th className={th}>工場</th>
                 <th className={th}>責任者</th>
+                <th className={th}>袋</th>
                 {shownKinds.map((n) => (
                   <th key={n} className={thNum}>
                     {n}(kg)
@@ -333,6 +479,20 @@ export default async function SummaryPage({
                     </td>
                     <td className={td}>{r.factory}</td>
                     <td className={td}>{r.sekininsha}</td>
+                    <td className={td}>
+                      {r.bagEra ? (
+                        <>
+                          <span className="tabular-nums">{r.bagCount}</span> 袋
+                          {r.noBagCount > 0 && (
+                            <span className="ml-1 rounded-md bg-[#fdecea] px-1.5 py-0.5 text-[11px] font-bold text-[#dc000c]">
+                              袋なし{r.noBagCount}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-xs text-[#909090]">日単位</span>
+                      )}
+                    </td>
                     {shownKinds.map((n) => (
                       <td key={n} className={tdNum}>
                         {fmt(r.byKind[n] ?? 0)}
@@ -368,7 +528,7 @@ export default async function SummaryPage({
               })}
               {rows.length > 0 && (
                 <tr className="bg-[#faf6ef] font-semibold">
-                  <td className={td} colSpan={3}>
+                  <td className={td} colSpan={4}>
                     月間合計（{rows.length}日分）
                   </td>
                   {shownKinds.map((n) => (

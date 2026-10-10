@@ -1,0 +1,335 @@
+import Link from "next/link";
+import { FileDown } from "lucide-react";
+import { requireEntitledSession, getFactoryView } from "@/lib/session";
+import { monthlySummary, yearSummary, type KubunSummary } from "@/lib/calc";
+import { KUBUN_LIST } from "@/lib/db";
+import { fmt, fmtPct, isYmStr, thisMonthStr } from "@/lib/format";
+import PageHeader from "@/components/PageHeader";
+import DbErrorState from "@/components/DbErrorState";
+import MonthNav from "@/components/MonthNav";
+import FactorySelect from "@/components/FactorySelect";
+import { listFactoryOptions } from "@/lib/db";
+
+export const dynamic = "force-dynamic";
+
+const td = "border border-[#e5e5e5] px-2.5 py-1.5 whitespace-nowrap";
+const tdNum = `${td} text-right tabular-nums`;
+const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2.5 py-1.5 text-left font-semibold whitespace-nowrap";
+const thNum = `${th} text-right`;
+
+function MethodBadge({ method }: { method: KubunSummary["method"] }) {
+  if (!method) return null;
+  return (
+    <span
+      title={
+        method === "在庫法"
+          ? "月初在庫 + 購入重量 − 翌月月初在庫"
+          : "Σ(加工数 × 構成重量)。翌月の月初在庫が未入力のための代替計算"
+      }
+      className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${
+        method === "在庫法" ? "bg-[#eef4ee] text-[#2f6b2f]" : "bg-[#fff3e0] text-[#a15c00]"
+      }`}
+    >
+      {method}
+    </span>
+  );
+}
+
+/** 照合ダッシュボード（旧ホーム。ホームを使用手順の説明にしたため /dashboard へ移した）。 */
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ ym?: string; factory?: string }>;
+}) {
+  const session = await requireEntitledSession();
+  const sp = await searchParams;
+  const ym = isYmStr(sp.ym) ? sp.ym : thisMonthStr();
+  const year = Number(ym.slice(0, 4));
+
+  let s, years, factoryOptions: string[], factory: string | null, factoryLocked: boolean;
+  try {
+    // 所属工場ユーザーは自工場、上部で工場を選んだ人はその工場に固定。
+    // 「全工場」を選んだ人は 全社(合算)/工場 をここで切替可能
+    const restriction = await getFactoryView(session);
+    factoryOptions = await listFactoryOptions(session.companyId);
+    factoryLocked = restriction.restricted;
+    factory = restriction.restricted
+      ? restriction.factory
+      : (sp.factory ?? "").trim() || null;
+    [s, years] = await Promise.all([
+      monthlySummary(session.companyId, ym, factory),
+      yearSummary(session.companyId, year, factory),
+    ]);
+  } catch (e) {
+    console.error("[dashboard]", e);
+    return (
+      <div className="p-4 sm:p-6">
+        <PageHeader title="照合ダッシュボード" />
+        <DbErrorState />
+      </div>
+    );
+  }
+
+  const g = s.perKubun["全体"];
+  const dailyTotal = s.daily.total;
+  // 売却と比べるのは、この工場の箱で量った量（他工場から届いたプラ箱を含む）
+  const processed = s.daily.processed;
+  // 差異5%超は要確認としてハイライトする
+  const warn6 =
+    s.diff6 !== null && processed > 0 && Math.abs(s.diff6) / processed > 0.05;
+  const warn7 =
+    s.diff7sell !== null && g.scrapTheo ? Math.abs(s.diff7sell) / Math.abs(g.scrapTheo) > 0.05 : false;
+
+  return (
+    <div className="p-4 sm:p-6">
+      <PageHeader
+        title="照合ダッシュボード"
+        description={`${session.companyName} スクラップ重量の突合（${factory ?? "全社合算"}）`}
+        action={
+          <>
+            {factoryLocked ? (
+              <span className="rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm">
+                {factory}
+              </span>
+            ) : (
+              <FactorySelect factory={factory ?? ""} options={factoryOptions} />
+            )}
+            <MonthNav ym={ym} />
+            <a
+              href={`/api/export?type=recon&year=${year}${factory ? `&factory=${encodeURIComponent(factory)}` : ""}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#e5e5e5] bg-white px-3 py-2 text-sm font-medium text-[#555555] hover:bg-[#f7f7f5]"
+            >
+              <FileDown className="h-4 w-4" />
+              年間一覧CSV
+            </a>
+          </>
+        }
+      />
+
+      {/* 月次サマリー（区分別） */}
+      <section className="mb-6 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+        <h2 className="mb-1 text-sm font-bold text-[#333333]">月次サマリー（区分別）</h2>
+        <p className="mb-3 text-xs text-[#909090]">
+          使用量 = 月初在庫 + 購入重量 − 翌月月初在庫（翌月の月初在庫が未入力の月は構成重量ベース） / 理論スクラップ = 使用量 − 完成重量
+        </p>
+        {!s.hasMcframe && (
+          <p className="mb-3 rounded-lg bg-[#fff3e0] px-3 py-2 text-xs text-[#a15c00]">
+            この月はMcFrameの加工数が未取込です。完成重量・理論スクラップは月末に取り込むと出ます（「-」で表示）。
+          </p>
+        )}
+        {s.mcframe.dayRows > 0 && s.mcframe.monthRows > 0 && (
+          <p className="mb-3 rounded-lg bg-[#f7f7f5] px-3 py-2 text-xs text-[#707070]">
+            この月は日別の加工数（{s.mcframe.dayRows}件）を使っています。過去データ移行で入れた月次の取込値（
+            {s.mcframe.monthRows}件）は二重計上を避けるため未使用です。
+          </p>
+        )}
+        {s.procureCoverage && s.procureCoverage.entered < s.procureCoverage.inMonth && (
+          <p className="mb-3 rounded-lg bg-[#fff3e0] px-3 py-2 text-xs text-[#a15c00]">
+            購入・売却は調達入力（日次）の合計を使っています。この月の入力は
+            {s.procureCoverage.inMonth}日中 {s.procureCoverage.entered}日分だけです（
+            <Link href={`/procurement?ym=${ym}`} className="underline">
+              調達入力
+            </Link>
+            ）。入力漏れがあると使用量・差異が過小になります。月次入力の値は使いません。
+          </p>
+        )}
+        {s.skippedItems.items > 0 && (
+          <p className="mb-3 rounded-lg bg-[#fdecea] px-3 py-2 text-xs text-[#dc000c]">
+            品目マスターにこの工場の登録が無い {s.skippedItems.items}品目（加工数 {fmt(s.skippedItems.qty, 0)}）を集計から外しています。
+            品目マスターに登録すると完成重量・理論スクラップに含まれます。
+          </p>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr>
+                <th className={th}>区分</th>
+                <th className={thNum}>月初在庫</th>
+                <th className={thNum}>購入重量</th>
+                <th className={thNum}>翌月月初在庫</th>
+                <th className={thNum}>使用量</th>
+                <th className={th}>算出</th>
+                <th className={thNum}>構成重量(参考)</th>
+                <th className={thNum}>完成重量</th>
+                <th className={thNum}>理論スクラップ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...KUBUN_LIST, "全体"].map((kb) => {
+                const r = s.perKubun[kb];
+                const usage = r.usageInv !== null ? r.usageInv : r.usageBom;
+                return (
+                  <tr key={kb} className={kb === "全体" ? "bg-[#faf6ef] font-semibold" : ""}>
+                    <td className={td}>{kb}</td>
+                    <td className={tdNum}>{fmt(r.zaiko)}</td>
+                    <td className={tdNum}>{fmt(r.konyu)}</td>
+                    <td className={tdNum}>{fmt(r.zaikoNext)}</td>
+                    <td className={tdNum}>{fmt(r.method === null ? null : usage)}</td>
+                    <td className={td}>
+                      <MethodBadge method={r.method} />
+                    </td>
+                    <td className={tdNum}>{fmt(s.hasMcframe ? r.usageBom : null)}</td>
+                    <td className={tdNum}>{fmt(s.hasMcframe ? r.finished : null)}</td>
+                    <td className={`${tdNum} ${r.scrapTheo !== null && r.scrapTheo < 0 ? "text-[#dc000c]" : ""}`}>
+                      {fmt(r.scrapTheo)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* ⑥⑦ 突合 */}
+      <div className="mb-6 grid gap-6 lg:grid-cols-2">
+        <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+          <h2 className="mb-3 text-sm font-bold text-[#333333]">⑥ スクラップ売却 × 日次記録 の突合</h2>
+          <table className="w-full border-collapse text-sm">
+            <tbody>
+              <tr>
+                <th className={th}>スクラップ売却数量（⑤入力）</th>
+                <td className={tdNum}>
+                  {s.baikyaku !== null ? `${fmt(s.baikyaku)} kg` : s.daily.outgoing > 0 ? "送り先で計上" : "未入力"}
+                </td>
+                <td className={td}></td>
+              </tr>
+              <tr>
+                <th className={th}>
+                  日次記録スクラップ合計（①）
+                  {s.daily.incoming > 0 && <div className="text-xs font-normal">この工場の箱で量った量</div>}
+                </th>
+                <td className={tdNum}>{fmt(processed)} kg</td>
+                <td className={td}>{s.daily.days}日分</td>
+              </tr>
+              {s.daily.incoming > 0 && (
+                <tr>
+                  <th className={`${th} font-normal`}>　うち他工場から届いたプラ箱</th>
+                  <td className={tdNum}>{fmt(s.daily.incoming)} kg</td>
+                  <td className={td}>
+                    <Link href={`/shipments?ym=${ym}`} className="text-xs underline">
+                      プラ箱の一覧
+                    </Link>
+                  </td>
+                </tr>
+              )}
+              {s.daily.outgoing > 0 && (
+                <tr>
+                  <th className={`${th} font-normal`}>他工場へ送って処理した分</th>
+                  <td className={tdNum}>{fmt(s.daily.outgoing)} kg</td>
+                  <td className={td}>売却は送り先で計上</td>
+                </tr>
+              )}
+              <tr>
+                <th className={th}>差異（売却 − 日次記録）</th>
+                <td className={`${tdNum} ${warn6 ? "bg-[#fdecea] text-[#dc000c]" : s.diff6 !== null ? "bg-[#eef4ee]" : ""}`}>
+                  {s.diff6 !== null ? `${fmt(s.diff6)} kg` : "-"}
+                </td>
+                <td className={td}>{s.rate6 !== null ? `率 ${fmtPct(s.rate6)}` : ""}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+          <h2 className="mb-3 text-sm font-bold text-[#333333]">⑦ 理論スクラップ × 売却/日次記録 の突合</h2>
+          <table className="w-full border-collapse text-sm">
+            <tbody>
+              <tr>
+                <th className={th}>理論スクラップ（全体）</th>
+                <td className={tdNum}>{g.scrapTheo !== null ? `${fmt(g.scrapTheo)} kg` : "-"}</td>
+                <td className={td}>
+                  <MethodBadge method={g.method} />
+                </td>
+              </tr>
+              {s.daily.incoming > 0 && s.baikyakuOwn !== null && (
+                <tr>
+                  <th className={`${th} font-normal`}>売却のうち自工場分（他工場のプラ箱を除く）</th>
+                  <td className={tdNum}>{fmt(s.baikyakuOwn)} kg</td>
+                  <td className={td}></td>
+                </tr>
+              )}
+              <tr>
+                <th className={th}>売却 − 理論（売量vs理論）</th>
+                <td className={`${tdNum} ${warn7 ? "bg-[#fdecea] text-[#dc000c]" : s.diff7sell !== null ? "bg-[#eef4ee]" : ""}`}>
+                  {s.diff7sell !== null ? `${fmt(s.diff7sell)} kg` : "-"}
+                </td>
+                <td className={td}>{s.rate7sell !== null ? `率 ${fmtPct(s.rate7sell)}` : ""}</td>
+              </tr>
+              <tr>
+                <th className={th}>
+                  日次記録 − 理論
+                  {(s.daily.incoming > 0 || s.daily.outgoing > 0) && (
+                    <div className="text-xs font-normal">
+                      日次記録はこの工場のスクラップ {fmt(dailyTotal)} kg（他工場へ送った分を含み、届いた分を除く）
+                    </div>
+                  )}
+                </th>
+                <td className={tdNum}>{s.diff7daily !== null ? `${fmt(s.diff7daily)} kg` : "-"}</td>
+                <td className={td}>{s.rate7daily !== null ? `率 ${fmtPct(s.rate7daily)}` : ""}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      {/* 年間推移 */}
+      <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+        <h2 className="mb-3 text-sm font-bold text-[#333333]">{year}年 年間推移（{factory ?? "全社合算"}）</h2>
+        <div className="overflow-x-auto">
+          <table className="print-table w-full border-collapse text-sm">
+            <thead>
+              <tr>
+                <th className={th}>年月</th>
+                <th className={thNum}>月初在庫</th>
+                <th className={thNum}>購入重量</th>
+                <th className={thNum}>使用量</th>
+                <th className={thNum}>構成重量</th>
+                <th className={thNum}>完成重量</th>
+                <th className={thNum}>理論SCP</th>
+                <th className={thNum}>SCP売量</th>
+                <th className={thNum}>日次記録</th>
+                <th className={thNum}>売量vs理論</th>
+                <th className={thNum}>売却vs日次</th>
+              </tr>
+            </thead>
+            <tbody>
+              {years.length === 0 && (
+                <tr>
+                  <td className={td} colSpan={11}>
+                    データがありません。
+                    <Link href="/monthly" className="text-[#b4632c] underline">月次入力</Link>・
+                    <Link href="/daily" className="text-[#b4632c] underline">日次記録</Link>から登録してください。
+                  </td>
+                </tr>
+              )}
+              {years.map((r) => (
+                <tr key={r.ym} className={r.ym === ym ? "bg-[#faf6ef]" : ""}>
+                  <td className={td}>
+                    <Link href={`/dashboard?ym=${r.ym}${factory && !factoryLocked ? `&factory=${encodeURIComponent(factory)}` : ""}`} className="text-[#b4632c] hover:underline">
+                      {r.ym}
+                    </Link>
+                  </td>
+                  <td className={tdNum}>{fmt(r.zaiko)}</td>
+                  <td className={tdNum}>{fmt(r.konyu)}</td>
+                  <td className={tdNum}>{fmt(r.usage)}</td>
+                  <td className={tdNum}>{fmt(r.usageBom)}</td>
+                  <td className={tdNum}>{fmt(r.finished)}</td>
+                  <td className={tdNum}>{fmt(r.scrapTheo)}</td>
+                  <td className={tdNum}>{fmt(r.baikyaku)}</td>
+                  <td className={tdNum}>{fmt(r.daily)}</td>
+                  <td className={`${tdNum} ${r.diff7sell !== null && r.diff7sell < 0 ? "text-[#dc000c]" : ""}`}>
+                    {fmt(r.diff7sell)}
+                  </td>
+                  <td className={`${tdNum} ${r.diff6 !== null && r.diff6 < 0 ? "text-[#dc000c]" : ""}`}>
+                    {fmt(r.diff6)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}

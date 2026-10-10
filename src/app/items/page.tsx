@@ -1,5 +1,5 @@
 import { FileDown, QrCode } from "lucide-react";
-import { requireOperationsPage, getFactoryRestriction } from "@/lib/session";
+import { requireOperationsPage, getFactoryView } from "@/lib/session";
 import {
   listFactoryOptions,
   listItemWorkplaces,
@@ -33,8 +33,8 @@ export default async function ItemsPage({
   let factory: string;
   let factoryLocked: boolean;
   try {
-    // 所属工場が設定されている人は自工場が自動で選ばれる（他工場は選べない）
-    const restriction = await getFactoryRestriction(session);
+    // 所属工場が設定されている人は自工場（他工場は選べない）、上部で工場を選んだ人はその工場に固定
+    const restriction = await getFactoryView(session);
     factoryLocked = restriction.restricted;
     factory = restriction.restricted ? restriction.factory! : (sp.factory ?? "").trim();
     [{ items, total }, factoryOptions, workplaceOptions] = await Promise.all([

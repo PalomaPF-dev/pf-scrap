@@ -63,6 +63,7 @@ export async function GET(req: NextRequest) {
     loginId?: unknown;
     app?: unknown;
     exp?: unknown;
+    purpose?: unknown;
     name?: unknown;
     role?: unknown;
     canManage?: unknown;
@@ -76,6 +77,9 @@ export async function GET(req: NextRequest) {
   const loginId = typeof data.loginId === "string" ? data.loginId.trim() : "";
   if (!loginId) return ssoFail(req);
   if (data.app !== APP_KEY) return ssoFail(req);
+  // 用途の確認。ポータルはログアウト用にも同じ鍵で署名したトークン（purpose:"logout"）を出すため、
+  // それでは入れないようにする。purpose が無い（purpose を付ける前のポータルの）トークンは従来どおり通す。
+  if (data.purpose !== undefined && data.purpose !== "sso") return ssoFail(req);
   if (typeof data.exp !== "number" || !(data.exp > Date.now())) return ssoFail(req);
   // ポータルは氏名・権限・所属もトークンに載せてくる（署名済みなので信頼できる）。
   // アカウント未発行のときの自動作成に使う。

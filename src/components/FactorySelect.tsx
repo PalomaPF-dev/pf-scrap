@@ -2,7 +2,10 @@
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-/** 照合ダッシュボードの工場切替（空=全社合算）。URL の ?factory= を書き換える。 */
+/**
+ * 照合ダッシュボードの工場切替（空=全社合算）。URL の ?factory= を書き換える。
+ * 上部のバーで「全工場」を選んでいるときだけ出す（工場を選んでいるときはその工場に固定）。
+ */
 export default function FactorySelect({
   factory,
   options,

@@ -75,7 +75,7 @@
 
 | エンドポイント | 用途 |
 | --- | --- |
-| `GET /api/sso?token=…` | ポータルからのSSOログイン（`PF_PROVISION_KEY` によるHMAC署名・60秒有効。app キーは `scrap`） |
+| `GET /api/sso?token=…` | ポータルからのSSOログイン（`PF_SSO_KEY`（未設定なら `PF_PROVISION_KEY`）によるHMAC署名・60秒有効。app キーは `scrap`） |
 | `GET /api/logout?token=…` | ポータルの一括ログアウト（front-channel logout） |
 | `POST /api/provision` | アカウント一括発行・更新・失効（共有キー認証） |
 | `POST /api/portal-masters` | 工場・職場マスタの配信（日次記録の工場の入力候補に使用） |

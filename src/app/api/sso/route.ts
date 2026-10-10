@@ -11,12 +11,30 @@ import {
 } from "@/lib/authDb";
 import { getSql } from "@/lib/neon";
 
+/**
+ * ポータルの署名を照合する鍵（優先順）。
+ * ポータルは PF_SSO_KEY（未設定なら PF_PROVISION_KEY）で SSO／一括ログアウト用のトークンに署名する。
+ * アプリ連携の共有シークレット（PF_PROVISION_KEY。約20アプリと人事連携が持つ）から
+ * ログインの鍵を分けるため、こちらも PF_SSO_KEY を優先して照合する。
+ * 移行期間（PORTAL_KEY_FALLBACK_UNTIL まで）は PF_SSO_KEY で合わなければ PF_PROVISION_KEY でも照合する
+ * （ポータルと各アプリで環境変数の設定・再デプロイの順序を問わないため）。
+ * 期限を過ぎると PF_SSO_KEY だけになる。PF_SSO_KEY を設定していないアプリは従来どおり PF_PROVISION_KEY。
+ */
+const PORTAL_KEY_FALLBACK_UNTIL = Date.parse("2026-11-01T00:00:00+09:00");
+function portalSigningKeys(): string[] {
+  const sso = (process.env.PF_SSO_KEY || "").trim();
+  const prov = (process.env.PF_PROVISION_KEY || "").trim();
+  if (!sso) return prov ? [prov] : [];
+  if (prov && prov !== sso && Date.now() < PORTAL_KEY_FALLBACK_UNTIL) return [sso, prov];
+  return [sso];
+}
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * ポータルからのSSOログインAPI（PFシリーズ共通の方式）。
- * ポータルは PF_PROVISION_KEY で署名した短命トークン（60秒）を付けてリダイレクトしてくる。
+ * ポータルは PF_SSO_KEY（未設定なら PF_PROVISION_KEY）で署名した短命トークン（60秒）を付けてリダイレクトしてくる。
  * トークン検証に成功したら、Credentials ログインと同じ内容の next-auth セッション JWT を
  * 発行してクッキーにセットし、トップへリダイレクトする（パスワード不要）。
  * pending（パスワード未設定）ユーザーもポータル経由ならログイン可能とする。
@@ -43,8 +61,8 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export async function GET(req: NextRequest) {
-  const provisionKey = process.env.PF_PROVISION_KEY;
-  if (!provisionKey) {
+  const keys = portalSigningKeys();
+  if (keys.length === 0) {
     return NextResponse.json({ message: "SSO未設定" }, { status: 503 });
   }
 
@@ -55,8 +73,8 @@ export async function GET(req: NextRequest) {
   const sig = raw.slice(dot + 1);
 
   // 署名検証（payload 文字列に対する HMAC-SHA256 の小文字hex）
-  const expected = createHmac("sha256", provisionKey).update(payload).digest("hex");
-  if (!safeEqual(sig, expected)) return ssoFail(req);
+  // どれか1つの鍵で署名が合えばよい（鍵の移行期間は2つ）
+  if (!keys.some((key) => safeEqual(sig, createHmac("sha256", key).update(payload).digest("hex")))) return ssoFail(req);
 
   // ペイロード検証（loginId / app / exp。exp は epoch ms、発行から60秒有効）
   let data: {
@@ -78,8 +96,8 @@ export async function GET(req: NextRequest) {
   if (!loginId) return ssoFail(req);
   if (data.app !== APP_KEY) return ssoFail(req);
   // 用途の確認。ポータルはログアウト用にも同じ鍵で署名したトークン（purpose:"logout"）を出すため、
-  // それでは入れないようにする。purpose が無い（purpose を付ける前のポータルの）トークンは従来どおり通す。
-  if (data.purpose !== undefined && data.purpose !== "sso") return ssoFail(req);
+  // purpose が "sso" のものだけ通す（purpose を付ける前のポータルのトークンはもう出ない）。
+  if (data.purpose !== "sso") return ssoFail(req);
   if (typeof data.exp !== "number" || !(data.exp > Date.now())) return ssoFail(req);
   // ポータルは氏名・権限・所属もトークンに載せてくる（署名済みなので信頼できる）。
   // アカウント未発行のときの自動作成に使う。

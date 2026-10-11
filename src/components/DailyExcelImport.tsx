@@ -437,7 +437,7 @@ export default function DailyExcelImport({
                         {d.sources.map((s, i) => (
                           <span
                             key={`${s.sheetName}-${i}`}
-                            className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${kindColor(s.kind)}`}
+                            className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${kindColor(s.kind, kindNames.indexOf(s.kind))}`}
                           >
                             {s.kind} {fmt(s.total)}
                           </span>

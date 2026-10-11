@@ -32,8 +32,9 @@ export default async function ScalesPage({
     [scales, factoryOptions, kinds] = await Promise.all([
       listScales(session.companyId, { factory: factory || null }),
       listFactoryOptions(session.companyId),
-      // 種類の選択肢は設定マスタから（使用中のものだけ）
-      listScrapKinds(session.companyId, { activeOnly: true }),
+      // 種類は設定マスタから。使わないにした種類も渡す（色を設定・日次記録と同じ並び順で決めるため。
+      // 選択肢に出すのは使用中のものだけ）
+      listScrapKinds(session.companyId),
     ]);
   } catch (e) {
     console.error("[scales]", e);

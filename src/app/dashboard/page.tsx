@@ -16,6 +16,8 @@ const td = "border border-[#e5e5e5] px-2.5 py-1.5 whitespace-nowrap";
 const tdNum = `${td} text-right tabular-nums`;
 const th = "border border-[#e5e5e5] bg-[#f0f0ee] px-2.5 py-1.5 text-left font-semibold whitespace-nowrap";
 const thNum = `${th} text-right`;
+/** ⑥⑦の突合カードの見出し列。添え書きが長いので折り返す（折り返さないとカードからはみ出して切れる） */
+const thCard = "border border-[#e5e5e5] bg-[#f0f0ee] px-2.5 py-1.5 text-left font-semibold";
 
 function MethodBadge({ method }: { method: KubunSummary["method"] }) {
   if (!method) return null;
@@ -183,20 +185,20 @@ export default async function DashboardPage({
 
       {/* ⑥⑦ 突合 */}
       <div className="mb-6 grid gap-6 lg:grid-cols-2">
-        <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+        <section className="min-w-0 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
           <h2 className="mb-3 text-sm font-bold text-[#333333]">⑥ スクラップ売却 × 日次記録 の突合</h2>
           <table className="w-full border-collapse text-sm">
             <tbody>
               <tr>
-                <th className={th}>スクラップ売却数量（⑤入力）</th>
+                <th className={thCard}>スクラップ売却数量（調達入力）</th>
                 <td className={tdNum}>
                   {s.baikyaku !== null ? `${fmt(s.baikyaku)} kg` : s.daily.outgoing > 0 ? "送り先で計上" : "未入力"}
                 </td>
                 <td className={td}></td>
               </tr>
               <tr>
-                <th className={th}>
-                  日次記録スクラップ合計（①）
+                <th className={thCard}>
+                  日次記録スクラップ合計
                   {s.daily.incoming > 0 && <div className="text-xs font-normal">この工場の箱で量った量</div>}
                 </th>
                 <td className={tdNum}>{fmt(processed)} kg</td>
@@ -204,7 +206,7 @@ export default async function DashboardPage({
               </tr>
               {s.daily.incoming > 0 && (
                 <tr>
-                  <th className={`${th} font-normal`}>　うち他工場から届いたプラ箱</th>
+                  <th className={`${thCard} font-normal`}>　うち他工場から届いたプラ箱</th>
                   <td className={tdNum}>{fmt(s.daily.incoming)} kg</td>
                   <td className={td}>
                     <Link href={`/shipments?ym=${ym}`} className="text-xs underline">
@@ -215,13 +217,13 @@ export default async function DashboardPage({
               )}
               {s.daily.outgoing > 0 && (
                 <tr>
-                  <th className={`${th} font-normal`}>他工場へ送って処理した分</th>
+                  <th className={`${thCard} font-normal`}>他工場へ送って処理した分</th>
                   <td className={tdNum}>{fmt(s.daily.outgoing)} kg</td>
                   <td className={td}>売却は送り先で計上</td>
                 </tr>
               )}
               <tr>
-                <th className={th}>差異（売却 − 日次記録）</th>
+                <th className={thCard}>差異（売却 − 日次記録）</th>
                 <td className={`${tdNum} ${warn6 ? "bg-[#fdecea] text-[#dc000c]" : s.diff6 !== null ? "bg-[#eef4ee]" : ""}`}>
                   {s.diff6 !== null ? `${fmt(s.diff6)} kg` : "-"}
                 </td>
@@ -231,12 +233,12 @@ export default async function DashboardPage({
           </table>
         </section>
 
-        <section className="rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
+        <section className="min-w-0 rounded-2xl border border-[#e5e5e5] bg-white p-4 sm:p-5">
           <h2 className="mb-3 text-sm font-bold text-[#333333]">⑦ 理論スクラップ × 売却/日次記録 の突合</h2>
           <table className="w-full border-collapse text-sm">
             <tbody>
               <tr>
-                <th className={th}>理論スクラップ（全体）</th>
+                <th className={thCard}>理論スクラップ（全体）</th>
                 <td className={tdNum}>{g.scrapTheo !== null ? `${fmt(g.scrapTheo)} kg` : "-"}</td>
                 <td className={td}>
                   <MethodBadge method={g.method} />
@@ -244,20 +246,20 @@ export default async function DashboardPage({
               </tr>
               {s.daily.incoming > 0 && s.baikyakuOwn !== null && (
                 <tr>
-                  <th className={`${th} font-normal`}>売却のうち自工場分（他工場のプラ箱を除く）</th>
+                  <th className={`${thCard} font-normal`}>売却のうち自工場分（他工場のプラ箱を除く）</th>
                   <td className={tdNum}>{fmt(s.baikyakuOwn)} kg</td>
                   <td className={td}></td>
                 </tr>
               )}
               <tr>
-                <th className={th}>売却 − 理論（売量vs理論）</th>
+                <th className={thCard}>売却 − 理論（売量vs理論）</th>
                 <td className={`${tdNum} ${warn7 ? "bg-[#fdecea] text-[#dc000c]" : s.diff7sell !== null ? "bg-[#eef4ee]" : ""}`}>
                   {s.diff7sell !== null ? `${fmt(s.diff7sell)} kg` : "-"}
                 </td>
                 <td className={td}>{s.rate7sell !== null ? `率 ${fmtPct(s.rate7sell)}` : ""}</td>
               </tr>
               <tr>
-                <th className={th}>
+                <th className={thCard}>
                   日次記録 − 理論
                   {(s.daily.incoming > 0 || s.daily.outgoing > 0) && (
                     <div className="text-xs font-normal">
@@ -298,7 +300,7 @@ export default async function DashboardPage({
                 <tr>
                   <td className={td} colSpan={11}>
                     データがありません。
-                    <Link href="/monthly" className="text-[#b4632c] underline">月次入力</Link>・
+                    <Link href="/procurement" className="text-[#b4632c] underline">調達入力</Link>・
                     <Link href="/daily" className="text-[#b4632c] underline">日次記録</Link>から登録してください。
                   </td>
                 </tr>

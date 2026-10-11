@@ -79,9 +79,11 @@ export default function ScalesTable({
   /** 絞り込み中の工場（新規登録の既定値にも使う） */
   factory: string;
   factoryOptions: string[];
-  /** スクラップ種類（設定マスタ。使用中のものだけ） */
+  /** スクラップ種類（設定マスタ。使わないにしたものも含む全件。色は全件での並び順で決める） */
   kinds: ScrapKind[];
 }) {
+  // 選択肢に出すのは使用中のものだけ
+  const activeKinds = kinds.filter((k) => k.active);
   const router = useRouter();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState("");
@@ -117,7 +119,7 @@ export default function ScalesTable({
         <button
           onClick={() => {
             setError("");
-            setDraft({ ...emptyDraft(factory), kind: kinds[0]?.name ?? "", qrCode: genCode() });
+            setDraft({ ...emptyDraft(factory), kind: activeKinds[0]?.name ?? "", qrCode: genCode() });
           }}
           className="inline-flex items-center gap-1.5 rounded-lg bg-[#b4632c] px-3 py-2 text-sm font-semibold text-white hover:bg-[#96521f]"
         >
@@ -318,10 +320,10 @@ export default function ScalesTable({
                   className={input}
                 >
                   {/* 種類は「設定」で追加できる。使用中のものだけ選べる */}
-                  {!kinds.some((k) => k.name === draft.kind) && draft.kind !== "" && (
+                  {!activeKinds.some((k) => k.name === draft.kind) && draft.kind !== "" && (
                     <option value={draft.kind}>{draft.kind}（使用しない）</option>
                   )}
-                  {kinds.map((k) => (
+                  {activeKinds.map((k) => (
                     <option key={k.id} value={k.name}>
                       {k.name}
                     </option>

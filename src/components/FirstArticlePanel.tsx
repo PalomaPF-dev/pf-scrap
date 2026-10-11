@@ -51,7 +51,6 @@ function Step({
 function StatusTag({ h }: { h: FirstArticle }) {
   return (
     <span
-      title={h.status === "rejected" && h.rejectComment ? h.rejectComment : undefined}
       className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
         h.status === "approved"
           ? "bg-[#eef4ee] text-[#2f6b2f]"
@@ -63,6 +62,12 @@ function StatusTag({ h }: { h: FirstArticle }) {
       {FA_STATUS_LABEL[h.status]}
     </span>
   );
+}
+
+/** 差し戻しの理由。スマホでは札のツールチップが見られないので、札の下に文字で出す */
+function RejectReason({ h }: { h: FirstArticle }) {
+  if (h.status !== "rejected" || !h.rejectComment) return null;
+  return <div className="mt-0.5 max-w-[16rem] whitespace-normal break-words sm:min-w-[12rem] text-xs text-[#dc000c]">差し戻し理由: {h.rejectComment}</div>;
 }
 
 /**
@@ -490,6 +495,7 @@ export default function FirstArticlePanel({
                     測定者 {h.sokuteisha} ／ 理論 {fmt(h.kanseiJuryo, 6)}
                   </div>
                   {h.note && <div className="mt-0.5 text-xs text-[#a15c00]">{h.note}</div>}
+                  <RejectReason h={h} />
                 </div>
                 <span className="shrink-0 text-right text-lg font-bold tabular-nums">
                   {fmt(h.weight, 6)}
@@ -580,6 +586,7 @@ export default function FirstArticlePanel({
                       {h.status === "approved" && h.approvedBy && (
                         <span className="ml-1 text-xs text-[#707070]">{h.approvedBy}</span>
                       )}
+                      <RejectReason h={h} />
                     </td>
                     <td className={td}>
                       <div className="flex items-center gap-1">

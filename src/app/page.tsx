@@ -78,6 +78,19 @@ export default async function HomePage({
   const recent = [...recorded]
     .sort((a, b) => b.recordDate.localeCompare(a.recordDate) || a.factory.localeCompare(b.factory))
     .slice(0, 5);
+  // 工場ごとの集計（スマホのカードとPCの表で同じものを使う）
+  const factoryRows = status
+    ? status.factories.map((f) => {
+        const mine = recorded.filter((r) => r.factory === f);
+        return {
+          f,
+          days: new Set(mine.map((r) => r.recordDate)).size,
+          total: mine.reduce((t, r) => t + r.total, 0),
+          todayDone: mine.some((r) => r.recordDate === today),
+          pending: status.pending[f] ?? 0,
+        };
+      })
+    : [];
   const [y, mo] = ym.split("-");
   const ymLabel = `${y}年${Number(mo)}月`;
 
@@ -114,84 +127,107 @@ export default async function HomePage({
               工場がまだ登録されていません。設定の「工場・職場」で追加してください。
             </p>
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-[#eeeeee]">
-              <table className="w-full text-sm">
-                <thead className="bg-[#fafaf8] text-xs text-[#707070]">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-medium">工場</th>
-                    {isThisMonth && <th className="px-3 py-2 text-left font-medium">今日の記録</th>}
-                    <th className="px-3 py-2 text-right font-medium">記録日数</th>
-                    <th className="px-3 py-2 text-right font-medium">スクラップ合計(kg)</th>
-                    <th className="px-3 py-2 text-right font-medium">承認待ち（全期間）</th>
-                    <th className="px-3 py-2 text-right font-medium"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#f0f0f0]">
-                  {status.factories.map((f) => {
-                    const mine = recorded.filter((r) => r.factory === f);
-                    const days = new Set(mine.map((r) => r.recordDate)).size;
-                    const total = mine.reduce((t, r) => t + r.total, 0);
-                    const todayDone = mine.some((r) => r.recordDate === today);
-                    const pending = status.pending[f] ?? 0;
-                    return (
-                      <tr key={f} className="hover:bg-[#fcfcfb]">
-                        <td className="px-3 py-2 font-medium text-[#333333]">{f}</td>
-                        {isThisMonth && (
-                          <td className="px-3 py-2">
-                            <span
-                              className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
-                                todayDone ? "bg-[#eef4ee] text-[#2f6b2f]" : "bg-[#fff3e0] text-[#a15c00]"
-                              }`}
-                            >
-                              {todayDone ? "記録あり" : "まだ"}
-                            </span>
-                          </td>
-                        )}
-                        <td className="px-3 py-2 text-right tabular-nums">{days}日</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{fmt(total)}</td>
-                        <td
-                          className={`px-3 py-2 text-right tabular-nums ${pending > 0 ? "font-bold text-[#a15c00]" : ""}`}
-                        >
+            <>
+              {/* スマホ: 工場ごとのカード（表だと列が狭く、工場名や見出しが1文字ずつ折り返して読めないため） */}
+              <ul className="space-y-2 sm:hidden">
+                {factoryRows.map(({ f, days, total, todayDone, pending }) => (
+                  <li key={f} className="rounded-xl border border-[#eeeeee] p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-bold text-[#333333]">{f}</span>
+                      {isThisMonth && (
+                        <span className="flex items-center gap-1.5 text-[11px] text-[#909090]">
+                          今日の記録
+                          <TodayTag done={todayDone} />
+                        </span>
+                      )}
+                    </div>
+                    <dl className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-[#909090]">
+                      <div>
+                        <dt>記録日数</dt>
+                        <dd className="text-sm tabular-nums text-[#333333]">{days}日</dd>
+                      </div>
+                      <div>
+                        <dt>スクラップ合計</dt>
+                        <dd className="text-sm tabular-nums text-[#333333]">{fmt(total)} kg</dd>
+                      </div>
+                      <div>
+                        <dt>承認待ち（全期間）</dt>
+                        <dd className={`text-sm tabular-nums ${pending > 0 ? "font-bold text-[#a15c00]" : "text-[#333333]"}`}>
                           {pending}日
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-right">
-                          <Link
-                            href={`${MODULES.daily.href}?factory=${encodeURIComponent(f)}`}
-                            className="text-xs text-[#b4632c] underline"
-                          >
-                            日次記録
-                          </Link>
-                          <Link
-                            href={`${MODULES.summary.href}?ym=${ym}&factory=${encodeURIComponent(f)}`}
-                            className="ml-3 text-xs text-[#b4632c] underline"
-                          >
-                            月間集計
-                          </Link>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                {status.factories.length > 1 && (
-                  <tfoot className="bg-[#fafaf8] text-xs">
-                    <tr>
-                      <td className="px-3 py-2 font-medium text-[#555555]">合計</td>
-                      {isThisMonth && <td />}
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {new Set(recorded.map((r) => `${r.factory}|${r.recordDate}`)).size}日
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {fmt(recorded.reduce((t, r) => t + r.total, 0))}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {Object.values(status.pending).reduce((t, n) => t + n, 0)}日
-                      </td>
-                      <td />
-                    </tr>
-                  </tfoot>
+                        </dd>
+                      </div>
+                    </dl>
+                    <div className="mt-2">
+                      <FactoryLinks f={f} ym={ym} />
+                    </div>
+                  </li>
+                ))}
+                {factoryRows.length > 1 && (
+                  <li className="flex flex-wrap gap-x-4 gap-y-1 rounded-xl bg-[#fafaf8] px-3 py-2 text-xs text-[#555555]">
+                    <span className="font-medium">合計</span>
+                    <span className="tabular-nums">{new Set(recorded.map((r) => `${r.factory}|${r.recordDate}`)).size}日</span>
+                    <span className="tabular-nums">{fmt(recorded.reduce((t, r) => t + r.total, 0))} kg</span>
+                    <span className="tabular-nums">承認待ち {Object.values(status.pending).reduce((t, n) => t + n, 0)}日</span>
+                  </li>
                 )}
-              </table>
-            </div>
+              </ul>
+              <div className="hidden overflow-x-auto rounded-xl border border-[#eeeeee] sm:block">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#fafaf8] text-xs text-[#707070]">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">工場</th>
+                      {isThisMonth && <th className="px-3 py-2 text-left font-medium">今日の記録</th>}
+                      <th className="px-3 py-2 text-right font-medium">記録日数</th>
+                      <th className="px-3 py-2 text-right font-medium">スクラップ合計(kg)</th>
+                      <th className="px-3 py-2 text-right font-medium">承認待ち（全期間）</th>
+                      <th className="px-3 py-2 text-right font-medium"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#f0f0f0]">
+                    {factoryRows.map(({ f, days, total, todayDone, pending }) => {
+                      return (
+                        <tr key={f} className="hover:bg-[#fcfcfb]">
+                          <td className="px-3 py-2 font-medium text-[#333333]">{f}</td>
+                          {isThisMonth && (
+                            <td className="px-3 py-2">
+                              <TodayTag done={todayDone} />
+                            </td>
+                          )}
+                          <td className="px-3 py-2 text-right tabular-nums">{days}日</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmt(total)}</td>
+                          <td
+                            className={`px-3 py-2 text-right tabular-nums ${pending > 0 ? "font-bold text-[#a15c00]" : ""}`}
+                          >
+                            {pending}日
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-2 text-right">
+                            <FactoryLinks f={f} ym={ym} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  {status.factories.length > 1 && (
+                    <tfoot className="bg-[#fafaf8] text-xs">
+                      <tr>
+                        <td className="px-3 py-2 font-medium text-[#555555]">合計</td>
+                        {isThisMonth && <td />}
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {new Set(recorded.map((r) => `${r.factory}|${r.recordDate}`)).size}日
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {fmt(recorded.reduce((t, r) => t + r.total, 0))}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {Object.values(status.pending).reduce((t, n) => t + n, 0)}日
+                        </td>
+                        <td />
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            </>
           )}
           <h3 className="mb-1.5 mt-4 text-xs font-bold text-[#707070]">最近の日次記録</h3>
           {recent.length === 0 ? (
@@ -244,6 +280,39 @@ export default async function HomePage({
         })}
       </div>
     </div>
+  );
+}
+
+/** 今日の記録があるかの札 */
+function TodayTag({ done }: { done: boolean }) {
+  return (
+    <span
+      className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+        done ? "bg-[#eef4ee] text-[#2f6b2f]" : "bg-[#fff3e0] text-[#a15c00]"
+      }`}
+    >
+      {done ? "記録あり" : "まだ"}
+    </span>
+  );
+}
+
+/** 工場ごとの「日次記録」「月間集計」へのリンク */
+function FactoryLinks({ f, ym }: { f: string; ym: string }) {
+  return (
+    <>
+      <Link
+        href={`${MODULES.daily.href}?factory=${encodeURIComponent(f)}`}
+        className="text-xs text-[#b4632c] underline"
+      >
+        日次記録
+      </Link>
+      <Link
+        href={`${MODULES.summary.href}?ym=${ym}&factory=${encodeURIComponent(f)}`}
+        className="ml-3 text-xs text-[#b4632c] underline"
+      >
+        月間集計
+      </Link>
+    </>
   );
 }
 

@@ -113,7 +113,7 @@ export const MODULES: Record<ModuleKey, AppModule> = {
     title: "初品重量測定",
     icon: Scale,
     lead: "品目ごとに完成品1個あたりの重量を実測して登録します",
-    points: ["品名のQRか品目CDで呼び出す", "承認された実測値が完成重量の計算に使われる"],
+    points: ["品目QRか品目CDで呼び出す", "承認された実測値が完成重量の計算に使われる"],
     cta: "測定を登録する",
   },
   firstList: {
@@ -179,7 +179,7 @@ export const MODULES: Record<ModuleKey, AppModule> = {
     title: "品目マスター",
     icon: Package,
     lead: "McFrameの品目CD・格納場所CD・構成重量・完成重量を登録します",
-    points: ["CSV一括取込・出力", "品名QRの印刷"],
+    points: ["CSV一括取込・出力", "品目QR一覧の印刷"],
     cta: "品目を開く",
     ops: true,
   },
